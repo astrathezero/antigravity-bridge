@@ -56,10 +56,6 @@ custom_providers:
         context_length: 1000000
       gemini-3.1-pro:
         context_length: 1000000
-      antigravity:
-        context_length: 1000000
-      agy:
-        context_length: 1000000
 ```
 
 ### 2. Telegram / Messaging Platform Configuration
