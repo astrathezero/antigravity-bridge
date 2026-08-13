@@ -40,7 +40,7 @@ logger = logging.getLogger("antigravity_bridge")
 
 
 def detect_cli_command() -> Tuple[str, str]:
-    """Auto-detect available local CLI binary and command template.
+    """Auto-detect available agy CLI binary for cross-platform execution.
 
     Returns:
         (cli_binary_name, command_template)
@@ -50,20 +50,18 @@ def detect_cli_command() -> Tuple[str, str]:
         binary = env_cmd.split()[0]
         return (binary, env_cmd)
 
-    # Check ~/.local/bin/agy explicitly before PATH
-    home_local_agy = os.path.expanduser("~/.local/bin/agy")
-    if os.path.exists(home_local_agy) and os.access(home_local_agy, os.X_OK):
-        return ("agy", f'{home_local_agy} --dangerously-skip-permissions -p "{{prompt}}"')
-
+    # 1. Search PATH (works on Linux, macOS, and Windows)
     agy_path = shutil.which("agy")
     if agy_path:
-        return ("agy", 'agy --dangerously-skip-permissions -p "{prompt}"')
+        return ("agy", f'{agy_path} --dangerously-skip-permissions -p "{{prompt}}"')
 
-    anti_path = shutil.which("antigravity")
-    if anti_path and anti_path != "/usr/bin/antigravity":
-        return ("antigravity", 'antigravity --dangerously-skip-permissions -p "{prompt}"')
+    # 2. Check ~/.local/bin/agy (Linux/macOS) or Windows %USERPROFILE%\\.local\\bin\\agy.exe
+    home = os.path.expanduser("~")
+    local_bin = os.path.join(home, ".local", "bin", "agy.exe" if os.name == "nt" else "agy")
+    if os.path.exists(local_bin) and os.access(local_bin, os.X_OK if os.name != "nt" else os.F_OK):
+        return ("agy", f'{local_bin} --dangerously-skip-permissions -p "{{prompt}}"')
 
-    # Fallback default
+    # Fallback to standard agy command name
     return ("agy", 'agy --dangerously-skip-permissions -p "{prompt}"')
 
 

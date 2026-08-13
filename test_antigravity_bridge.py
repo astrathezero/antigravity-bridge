@@ -34,10 +34,10 @@ class TestAntigravityBridge(unittest.TestCase):
     def test_detect_cli_command(self):
         """Test auto-detection of local CLI binary."""
         with patch("os.path.exists", return_value=False), patch("shutil.which") as mock_which:
-            mock_which.side_effect = lambda bin_name: "/usr/local/bin/antigravity" if bin_name == "antigravity" else None
+            mock_which.side_effect = lambda bin_name: "/usr/local/bin/agy" if bin_name == "agy" else None
             binary, tpl = detect_cli_command()
-            self.assertEqual(binary, "antigravity")
-            self.assertIn("antigravity --dangerously-skip-permissions -p", tpl)
+            self.assertEqual(binary, "agy")
+            self.assertIn("agy --dangerously-skip-permissions -p", tpl)
 
     @patch("subprocess.Popen")
     def test_execute_cli_command_with_profile(self, mock_popen):
