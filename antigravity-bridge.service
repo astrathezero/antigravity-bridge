@@ -1,0 +1,15 @@
+[Unit]
+Description=Antigravity / agy OpenAI REST API Bridge Server
+After=network.target
+
+[Service]
+Type=simple
+User=your-username
+WorkingDirectory=/home/your-username/antigravity-bridge
+ExecStart=/usr/bin/python3 /home/your-username/antigravity-bridge/antigravity_bridge.py --port 8000
+Restart=always
+RestartSec=5
+Environment=PATH=/home/your-username/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
