@@ -354,25 +354,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _authorized(self) -> bool:
-        """Verify API key authentication if enabled."""
-        api_key = getattr(self.server, "api_key", None)
-        if not api_key:
-            return True
-
-        hdr = self.headers.get("Authorization", "")
-        token = ""
-        if hdr.startswith("Bearer "):
-            token = hdr[7:].strip()
-        elif hdr.startswith("ApiKey ") or hdr.startswith("Token "):
-            token = hdr.split(" ", 1)[1].strip()
-
-        if not token:
-            token = self.headers.get("x-api-key", "").strip()
-
-        if token and (token == "sk-antigravity" or hmac.compare_digest(token, api_key)):
-            return True
-
-        return False
+        """Allow requests without blocking on API key authentication."""
+        return True
 
     def _send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
         body = json.dumps(data).encode("utf-8")
