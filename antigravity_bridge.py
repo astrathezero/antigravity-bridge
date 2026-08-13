@@ -165,6 +165,9 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
     model_lower = model_name.lower().strip()
     effort = None
 
+    if model_lower.endswith("-thinking"):
+        model_lower = model_lower[:-9]
+
     if model_lower.endswith("-low"):
         effort = "low"
         model_lower = model_lower[:-4]
@@ -181,6 +184,12 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
         flags.extend(["--model", "gemini-3.5-flash"])
     elif "gemini-3.1-pro" in model_lower:
         flags.extend(["--model", "gemini-3.1-pro"])
+    elif "claude-sonnet-4.6" in model_lower:
+        flags.extend(["--model", "claude-sonnet-4.6"])
+    elif "claude-opus-4.6" in model_lower:
+        flags.extend(["--model", "claude-opus-4.6"])
+    elif "gpt-oss-120b" in model_lower:
+        flags.extend(["--model", "gpt-oss-120b"])
     elif model_lower not in ("antigravity", "agy", "default", "local"):
         flags.extend(["--model", model_name])
 
@@ -341,9 +350,15 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 {"id": "gemini-3.6-flash-high", "object": "model", "created": now_ts, "owned_by": "google"},
                 {"id": "gemini-3.6-flash-medium", "object": "model", "created": now_ts, "owned_by": "google"},
                 {"id": "gemini-3.6-flash-low", "object": "model", "created": now_ts, "owned_by": "google"},
-                {"id": "gemini-3.6-flash", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.5-flash-medium", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.5-flash-low", "object": "model", "created": now_ts, "owned_by": "google"},
                 {"id": "gemini-3.5-flash", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.1-pro-high", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.1-pro-low", "object": "model", "created": now_ts, "owned_by": "google"},
                 {"id": "gemini-3.1-pro", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "claude-sonnet-4.6-thinking", "object": "model", "created": now_ts, "owned_by": "anthropic"},
+                {"id": "claude-opus-4.6-thinking", "object": "model", "created": now_ts, "owned_by": "anthropic"},
+                {"id": "gpt-oss-120b-medium", "object": "model", "created": now_ts, "owned_by": "openai"},
                 {"id": "antigravity", "object": "model", "created": now_ts, "owned_by": "local"},
                 {"id": "agy", "object": "model", "created": now_ts, "owned_by": "local"},
             ]

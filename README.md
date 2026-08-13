@@ -50,11 +50,23 @@ custom_providers:
         context_length: 1000000
       gemini-3.6-flash-low:
         context_length: 1000000
-      gemini-3.6-flash:
+      gemini-3.5-flash-medium:
+        context_length: 1000000
+      gemini-3.5-flash-low:
         context_length: 1000000
       gemini-3.5-flash:
         context_length: 1000000
+      gemini-3.1-pro-high:
+        context_length: 1000000
+      gemini-3.1-pro-low:
+        context_length: 1000000
       gemini-3.1-pro:
+        context_length: 1000000
+      claude-sonnet-4.6-thinking:
+        context_length: 1000000
+      claude-opus-4.6-thinking:
+        context_length: 1000000
+      gpt-oss-120b-medium:
         context_length: 1000000
 ```
 
