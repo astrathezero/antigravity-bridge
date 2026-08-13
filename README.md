@@ -8,8 +8,59 @@ This standalone service acts as a local OpenAI REST API server (`http://127.0.0.
 ### Features
 - **OpenAI Compatible**: Implements `/v1/chat/completions`, `/v1/models`, and `/health`.
 - **Multi-Profile Fallback**: Automatically discovers and rotates through `agy` login profiles (`~/.config/antigravity/profiles/`) when quota or rate limits occur.
+- **Model & Reasoning Effort Support**: Exposes Gemini models and maps reasoning effort flags (`--model`, `--effort`) automatically.
 - **Headless Non-Interactive Mode**: Uses `--dangerously-skip-permissions` to allow tool execution without TUI prompts.
 - **Zero External Dependencies**: Built entirely on Python standard library (`http.server`, `subprocess`).
+
+---
+
+## Supported Models
+
+| Model ID (`model`) | agy CLI Flags | Description |
+| :--- | :--- | :--- |
+| `gemini-3.6-flash-high` | `--model gemini-3.6-flash --effort high` | Gemini 3.6 Flash (High Reasoning) |
+| `gemini-3.6-flash-medium` | `--model gemini-3.6-flash --effort medium` | Gemini 3.6 Flash (Medium Reasoning) |
+| `gemini-3.6-flash-low` | `--model gemini-3.6-flash --effort low` | Gemini 3.6 Flash (Low Reasoning) |
+| `gemini-3.6-flash` | `--model gemini-3.6-flash` | Gemini 3.6 Flash (Default) |
+| `gemini-3.5-flash` | `--model gemini-3.5-flash` | Gemini 3.5 Flash |
+| `gemini-3.1-pro` | `--model gemini-3.1-pro` | Gemini 3.1 Pro |
+| `antigravity` / `agy` | *(default)* | Default CLI Model |
+
+---
+
+## Hermes Configuration (`~/.hermes/config.yaml`)
+
+To connect **Hermes Agent** or **Hermes Messaging Gateway** to this bridge service, update `config.yaml` as follows:
+
+### 1. Basic Configuration
+```yaml
+# ~/.hermes/config.yaml or ~/.hermes/profiles/<profile_name>/config.yaml
+model:
+  default: gemini-3.6-flash-high
+  provider: agy-cli
+```
+
+### 2. Explicit Custom Provider Configuration
+If you need to specify endpoint URL and API key explicitly:
+```yaml
+model:
+  default: gemini-3.6-flash-high
+  provider: agy-cli
+
+custom_providers:
+  agy-cli:
+    base_url: "http://127.0.0.1:8000/v1"
+    api_key: "none"
+```
+
+### 3. Telegram / Messaging Platform Configuration
+```yaml
+platforms:
+  telegram:
+    enabled: true
+    model: gemini-3.6-flash-high
+    provider: agy-cli
+```
 
 ---
 
