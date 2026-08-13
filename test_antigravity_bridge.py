@@ -95,7 +95,7 @@ class TestAntigravityBridge(unittest.TestCase):
                 self.assertIn("antigravity", model_ids)
                 self.assertIn("agy", model_ids)
 
-            # 3. Test /v1/chat/completions POST (mocking subprocess execution)
+            # 3. Test /v1/chat/completions POST (OpenAI format)
             chat_url = f"http://127.0.0.1:{port}/v1/chat/completions"
             req_data = json.dumps({
                 "model": "antigravity",
@@ -108,6 +108,21 @@ class TestAntigravityBridge(unittest.TestCase):
                     resp_json = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp_json["object"], "chat.completion")
                     self.assertEqual(resp_json["choices"][0]["message"]["content"], "Bridge response")
+
+            # 4. Test /v1/messages POST (Anthropic format)
+            messages_url = f"http://127.0.0.1:{port}/v1/messages"
+            anthropic_req_data = json.dumps({
+                "model": "claude-sonnet-4.6-thinking",
+                "system": "You are a helpful assistant.",
+                "messages": [{"role": "user", "content": "Hello Anthropic"}],
+            }).encode("utf-8")
+
+            with patch("scripts.antigravity_bridge.execute_cli_command", return_value="Anthropic Bridge response"):
+                req = urllib.request.Request(messages_url, data=anthropic_req_data, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req) as resp:
+                    resp_json = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp_json["type"], "message")
+                    self.assertEqual(resp_json["content"][0]["text"], "Anthropic Bridge response")
         finally:
             server.shutdown()
             server.server_close()

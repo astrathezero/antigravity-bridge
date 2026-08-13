@@ -372,8 +372,10 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?")[0].rstrip("/")
+        is_anthropic = path in ("/v1/messages", "/messages")
+        is_openai = path in ("/v1/chat/completions", "/chat/completions")
 
-        if path not in ("/v1/chat/completions", "/chat/completions"):
+        if not (is_openai or is_anthropic):
             self._send_json_response({"error": "Not Found"}, status_code=404)
             return
 
@@ -390,6 +392,17 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             return
 
         messages = req_json.get("messages", [])
+
+        # Handle Anthropic system prompt format
+        system_prompt = req_json.get("system")
+        if system_prompt:
+            if isinstance(system_prompt, list):
+                sys_str = "\n".join(s.get("text", "") for s in system_prompt if isinstance(s, dict))
+            else:
+                sys_str = str(system_prompt)
+            if sys_str.strip():
+                messages = [{"role": "system", "content": sys_str.strip()}] + messages
+
         model = req_json.get("model") or "antigravity"
         stream = req_json.get("stream", False)
 
@@ -411,11 +424,49 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             )
             return
 
-        completion_id = f"chatcmpl-ag-{uuid.uuid4().hex[:8]}"
         created_ts = int(time.time())
 
+        # --- Handle Anthropic API format (/v1/messages) ---
+        if is_anthropic:
+            msg_id = f"msg-{uuid.uuid4().hex[:8]}"
+            if stream:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+
+                events = [
+                    ("message_start", {"type": "message_start", "message": {"id": msg_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": len(prompt_text) // 4, "output_tokens": 1}}}),
+                    ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                    ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": output_text}}),
+                    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                    ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": len(output_text) // 4}}),
+                    ("message_stop", {"type": "message_stop"}),
+                ]
+                for event_name, data in events:
+                    self.wfile.write(f"event: {event_name}\ndata: {json.dumps(data)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                return
+
+            response_payload = {
+                "id": msg_id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [{"type": "text", "text": output_text}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": len(prompt_text) // 4, "output_tokens": len(output_text) // 4},
+            }
+            self._send_json_response(response_payload)
+            return
+
+        # --- Handle OpenAI API format (/v1/chat/completions) ---
+        completion_id = f"chatcmpl-ag-{uuid.uuid4().hex[:8]}"
+
         if stream:
-            # Send Server-Sent Events (SSE) stream
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -457,7 +508,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
             return
 
-        # Standard non-streaming JSON response
+        # Standard OpenAI non-streaming response
         response_payload = {
             "id": completion_id,
             "object": "chat.completion",
