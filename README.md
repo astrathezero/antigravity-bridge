@@ -30,18 +30,9 @@ This standalone service acts as a local OpenAI REST API server (`http://127.0.0.
 
 ## Hermes Configuration (`~/.hermes/config.yaml`)
 
-To connect **Hermes Agent** or **Hermes Messaging Gateway** to this bridge service, update `config.yaml` as follows:
+To connect **Hermes Agent** or **Hermes Messaging Gateway** to this bridge service, add `agy-cli` under `custom_providers` (or `providers`) in `config.yaml`:
 
-### 1. Basic Configuration
-```yaml
-# ~/.hermes/config.yaml or ~/.hermes/profiles/<profile_name>/config.yaml
-model:
-  default: gemini-3.6-flash-high
-  provider: agy-cli
-```
-
-### 2. Explicit Custom Provider Configuration
-If you need to specify endpoint URL and API key explicitly:
+### 1. Provider & Models Configuration
 ```yaml
 model:
   default: gemini-3.6-flash-high
@@ -49,11 +40,29 @@ model:
 
 custom_providers:
   agy-cli:
-    base_url: "http://127.0.0.1:8000/v1"
-    api_key: "none"
+    api: http://127.0.0.1:8000/v1
+    api_key: sk-antigravity
+    name: AGY CLI Router
+    models:
+      gemini-3.6-flash-high:
+        context_length: 1000000
+      gemini-3.6-flash-medium:
+        context_length: 1000000
+      gemini-3.6-flash-low:
+        context_length: 1000000
+      gemini-3.6-flash:
+        context_length: 1000000
+      gemini-3.5-flash:
+        context_length: 1000000
+      gemini-3.1-pro:
+        context_length: 1000000
+      antigravity:
+        context_length: 1000000
+      agy:
+        context_length: 1000000
 ```
 
-### 3. Telegram / Messaging Platform Configuration
+### 2. Telegram / Messaging Platform Configuration
 ```yaml
 platforms:
   telegram:
