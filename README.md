@@ -21,10 +21,15 @@ This standalone service acts as a local OpenAI REST API server (`http://127.0.0.
 | `gemini-3.6-flash-high` | `--model gemini-3.6-flash --effort high` | Gemini 3.6 Flash (High Reasoning) |
 | `gemini-3.6-flash-medium` | `--model gemini-3.6-flash --effort medium` | Gemini 3.6 Flash (Medium Reasoning) |
 | `gemini-3.6-flash-low` | `--model gemini-3.6-flash --effort low` | Gemini 3.6 Flash (Low Reasoning) |
-| `gemini-3.6-flash` | `--model gemini-3.6-flash` | Gemini 3.6 Flash (Default) |
-| `gemini-3.5-flash` | `--model gemini-3.5-flash` | Gemini 3.5 Flash |
-| `gemini-3.1-pro` | `--model gemini-3.1-pro` | Gemini 3.1 Pro |
-| `antigravity` / `agy` | *(default)* | Default CLI Model |
+| `gemini-3.5-flash-medium` | `--model gemini-3.5-flash --effort medium` | Gemini 3.5 Flash (Medium Reasoning) |
+| `gemini-3.5-flash-low` | `--model gemini-3.5-flash --effort low` | Gemini 3.5 Flash (Low Reasoning) |
+| `gemini-3.5-flash` | `--model gemini-3.5-flash` | Gemini 3.5 Flash (Default) |
+| `gemini-3.1-pro-high` | `--model gemini-3.1-pro --effort high` | Gemini 3.1 Pro (High Reasoning) |
+| `gemini-3.1-pro-low` | `--model gemini-3.1-pro --effort low` | Gemini 3.1 Pro (Low Reasoning) |
+| `gemini-3.1-pro` | `--model gemini-3.1-pro` | Gemini 3.1 Pro (Default) |
+| `claude-sonnet-4.6-thinking` | `--model claude-sonnet-4.6` | Claude Sonnet 4.6 (Thinking) |
+| `claude-opus-4.6-thinking` | `--model claude-opus-4.6` | Claude Opus 4.6 (Thinking) |
+| `gpt-oss-120b-medium` | `--model gpt-oss-120b --effort medium` | GPT-OSS 120B (Medium Reasoning) |
 
 ---
 
