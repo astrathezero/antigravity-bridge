@@ -1,5 +1,5 @@
 [Unit]
-Description=Antigravity / agy OpenAI REST API Bridge Server
+Description=Antigravity / agy OpenAI & Anthropic REST API Bridge Server
 After=network.target
 
 [Service]
@@ -10,6 +10,13 @@ ExecStart=/usr/bin/python3 /home/your-username/antigravity-bridge/antigravity_br
 Restart=always
 RestartSec=5
 Environment=PATH=/home/your-username/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Security Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+MemoryMax=2G
+TasksMax=256
 
 [Install]
 WantedBy=multi-user.target
