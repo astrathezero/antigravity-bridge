@@ -8,11 +8,10 @@ Features:
 - Auto-detects whether 'antigravity' or 'agy' CLI binary is installed in PATH.
 - Supports /v1/chat/completions (JSON & Server-Sent Events streaming).
 - Supports /v1/models and /health endpoints.
-- Auto-fallbacks across multiple agy login profiles.
 - Requires no external pip dependencies (built on Python standard library).
 
 Usage:
-  python3 antigravity_bridge.py [--port 8000] [--host 127.0.0.1]
+  python3 scripts/antigravity_bridge.py [--port 8000] [--host 127.0.0.1]
 """
 
 from __future__ import annotations
@@ -157,9 +156,49 @@ def sanitize_prompt_for_cli(prompt_text: str, max_bytes: int = 115000) -> str:
     return f"{head_str}\n\n...[Middle context truncated for CLI argument limits]...\n\n{tail_str}"
 
 
-def parse_cmd_template(cmd_template: str, prompt_text: str) -> Tuple[List[str], str]:
+def resolve_model_flags(model_name: Optional[str]) -> List[str]:
+    """Parse model ID into --model and --effort CLI flags for agy."""
+    flags: List[str] = []
+    if not model_name:
+        return flags
+
+    model_lower = model_name.lower().strip()
+    effort = None
+
+    if model_lower.endswith("-low"):
+        effort = "low"
+        model_lower = model_lower[:-4]
+    elif model_lower.endswith("-medium"):
+        effort = "medium"
+        model_lower = model_lower[:-7]
+    elif model_lower.endswith("-high"):
+        effort = "high"
+        model_lower = model_lower[:-5]
+
+    if "gemini-3.6-flash" in model_lower:
+        flags.extend(["--model", "gemini-3.6-flash"])
+    elif "gemini-3.5-flash" in model_lower:
+        flags.extend(["--model", "gemini-3.5-flash"])
+    elif "gemini-3.1-pro" in model_lower:
+        flags.extend(["--model", "gemini-3.1-pro"])
+    elif model_lower not in ("antigravity", "agy", "default", "local"):
+        flags.extend(["--model", model_name])
+
+    if effort:
+        flags.extend(["--effort", effort])
+
+    return flags
+
+
+def parse_cmd_template(
+    cmd_template: str,
+    prompt_text: str,
+    model_name: Optional[str] = None,
+) -> Tuple[List[str], str]:
     """Parse command template into list of arguments for subprocess (shell=False)."""
     sanitized_prompt = sanitize_prompt_for_cli(prompt_text)
+    model_flags = resolve_model_flags(model_name)
+
     if "{prompt}" in cmd_template:
         placeholder = "__PROMPT_PLACEHOLDER__"
         temp = (
@@ -168,10 +207,14 @@ def parse_cmd_template(cmd_template: str, prompt_text: str) -> Tuple[List[str], 
             .replace("{prompt}", placeholder)
         )
         parts = shlex.split(temp)
+        if model_flags:
+            parts = [parts[0]] + model_flags + parts[1:]
         argv = [sanitized_prompt if p == placeholder else p for p in parts]
         return argv, ""
     else:
         argv = shlex.split(cmd_template)
+        if model_flags:
+            argv = [argv[0]] + model_flags + argv[1:]
         if argv and argv[-1] in ("-p", "--print"):
             argv.append(sanitized_prompt)
             return argv, ""
@@ -183,9 +226,10 @@ def execute_cli_command(
     prompt_text: str,
     timeout: float = 180.0,
     profile: Optional[str] = None,
+    model_name: Optional[str] = None,
 ) -> str:
     """Execute local CLI command with prompt substitution or stdin piping for a given profile."""
-    argv, stdin_input = parse_cmd_template(cmd_template, prompt_text)
+    argv, stdin_input = parse_cmd_template(cmd_template, prompt_text, model_name=model_name)
 
     log_str = " ".join(argv)[:120] if argv else cmd_template[:120]
     logger.info("Executing CLI command (profile=%s): %s", profile or "default", log_str)
@@ -229,6 +273,7 @@ def execute_cli_with_fallback(
     prompt_text: str,
     timeout: float = 180.0,
     profiles: Optional[List[Optional[str]]] = None,
+    model_name: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
     """Execute CLI command trying profiles sequentially until one succeeds."""
     if profiles is None:
@@ -237,8 +282,8 @@ def execute_cli_with_fallback(
     errors: List[str] = []
     for profile in profiles:
         try:
-            logger.info("Attempting CLI execution with profile: %s", profile or "default")
-            output = execute_cli_command(cmd_template, prompt_text, timeout=timeout, profile=profile)
+            logger.info("Attempting CLI execution with profile: %s (model=%s)", profile or "default", model_name or "default")
+            output = execute_cli_command(cmd_template, prompt_text, timeout=timeout, profile=profile, model_name=model_name)
             return output, profile
         except Exception as exc:
             logger.warning("Profile '%s' execution failed: %s", profile or "default", exc)
@@ -291,29 +336,20 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/v1/models", "/models"):
-            cli_bin, _ = detect_cli_command()
+            now_ts = int(time.time())
+            models_list = [
+                {"id": "gemini-3.6-flash-high", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.6-flash-medium", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.6-flash-low", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.6-flash", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.5-flash", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "gemini-3.1-pro", "object": "model", "created": now_ts, "owned_by": "google"},
+                {"id": "antigravity", "object": "model", "created": now_ts, "owned_by": "local"},
+                {"id": "agy", "object": "model", "created": now_ts, "owned_by": "local"},
+            ]
             self._send_json_response({
                 "object": "list",
-                "data": [
-                    {
-                        "id": "antigravity",
-                        "object": "model",
-                        "created": int(time.time()),
-                        "owned_by": "local",
-                    },
-                    {
-                        "id": "agy",
-                        "object": "model",
-                        "created": int(time.time()),
-                        "owned_by": "local",
-                    },
-                    {
-                        "id": cli_bin,
-                        "object": "model",
-                        "created": int(time.time()),
-                        "owned_by": "local",
-                    },
-                ],
+                "data": models_list,
             })
             return
 
@@ -349,9 +385,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
         try:
             output_text, used_profile = execute_cli_with_fallback(
-                custom_tpl, prompt_text, profiles=configured_profiles
+                custom_tpl, prompt_text, profiles=configured_profiles, model_name=model
             )
-            logger.info("Successfully executed CLI using profile: %s", used_profile or "default")
+            logger.info("Successfully executed CLI using profile: %s (model=%s)", used_profile or "default", model)
         except Exception as exc:
             logger.error("All agy profile attempts failed: %s", exc)
             self._send_json_response(

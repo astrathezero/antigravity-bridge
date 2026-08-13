@@ -7,7 +7,7 @@ import unittest
 import urllib.request
 from unittest.mock import MagicMock, patch
 
-from antigravity_bridge import (
+from scripts.antigravity_bridge import (
     AntigravityBridgeHandler,
     ThreadedHTTPServer,
     detect_cli_command,
@@ -47,22 +47,22 @@ class TestAntigravityBridge(unittest.TestCase):
         mock_proc.communicate.return_value = ("CLI execution output", "")
         mock_popen.return_value = mock_proc
 
-        output = execute_cli_command('echo "{prompt}"', "Hello world", profile="test_profile")
+        output = execute_cli_command('echo "{prompt}"', "Hello world", profile="astrathezero")
         self.assertEqual(output, "CLI execution output")
         mock_popen.assert_called_once()
         _, kwargs = mock_popen.call_args
-        self.assertEqual(kwargs.get("env", {}).get("ANTIGRAVITY_PROFILE"), "test_profile")
+        self.assertEqual(kwargs.get("env", {}).get("ANTIGRAVITY_PROFILE"), "astrathezero")
 
     def test_execute_cli_with_fallback_profile(self):
         """Test profile fallback when first profile fails and second succeeds."""
-        def side_effect(cmd, prompt, timeout=180.0, profile=None):
+        def side_effect(cmd, prompt, timeout=180.0, profile=None, **kwargs):
             if profile == "p1":
                 raise RuntimeError("Rate limit on p1")
             if profile == "p2":
                 return "Output from p2"
             raise RuntimeError("Unknown profile")
 
-        with patch("antigravity_bridge.execute_cli_command", side_effect=side_effect):
+        with patch("scripts.antigravity_bridge.execute_cli_command", side_effect=side_effect):
             output, used_profile = execute_cli_with_fallback('echo "{prompt}"', "test", profiles=["p1", "p2"])
             self.assertEqual(output, "Output from p2")
             self.assertEqual(used_profile, "p2")
@@ -102,7 +102,7 @@ class TestAntigravityBridge(unittest.TestCase):
                 "messages": [{"role": "user", "content": "Hello"}],
             }).encode("utf-8")
 
-            with patch("antigravity_bridge.execute_cli_command", return_value="Bridge response"):
+            with patch("scripts.antigravity_bridge.execute_cli_command", return_value="Bridge response"):
                 req = urllib.request.Request(chat_url, data=req_data, headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req) as resp:
                     resp_json = json.loads(resp.read().decode("utf-8"))
