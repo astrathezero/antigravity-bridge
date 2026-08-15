@@ -823,7 +823,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Connection", "keep-alive")
+                    self.send_header("Connection", "close")
                     if getattr(self.server, "enable_cors", False):
                         self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
@@ -864,7 +864,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         for tc in parsed_tool_calls:
                             tc_id = tc["id"]
                             if not tc_id.startswith("toolu_"):
-                                tc_id = f"toolu_{tc_id.replace('call_', '')}"
+                                tc_id = f"toolu_{uuid.uuid4().hex}"
                             events.extend([
                                 ("content_block_start", {"type": "content_block_start", "index": block_idx, "content_block": {"type": "tool_use", "id": tc_id, "name": tc["name"], "input": {}}}),
                                 ("content_block_delta", {"type": "content_block_delta", "index": block_idx, "delta": {"type": "input_json_delta", "partial_json": json.dumps(tc["arguments"], ensure_ascii=False)}}),
@@ -883,6 +883,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         logger.warning("Client disconnected during Anthropic SSE stream")
+                    finally:
+                        self.close_connection = True
                     return
 
                 response_payload = {
@@ -922,7 +924,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Connection", "close")
                 if getattr(self.server, "enable_cors", False):
                     self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
@@ -991,6 +993,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     logger.warning("Client disconnected during OpenAI SSE stream")
+                finally:
+                    self.close_connection = True
                 return
 
             # Standard OpenAI non-streaming response
