@@ -21,6 +21,9 @@ execute_cli_command = antigravity_bridge.execute_cli_command
 execute_cli_with_fallback = antigravity_bridge.execute_cli_with_fallback
 format_messages_to_prompt = antigravity_bridge.format_messages_to_prompt
 get_available_profiles = antigravity_bridge.get_available_profiles
+normalize_tools = antigravity_bridge.normalize_tools
+format_tools_to_system_prompt = antigravity_bridge.format_tools_to_system_prompt
+parse_tool_calls_from_response = antigravity_bridge.parse_tool_calls_from_response
 
 
 class TestAntigravityBridge(unittest.TestCase):
@@ -35,6 +38,143 @@ class TestAntigravityBridge(unittest.TestCase):
         prompt = format_messages_to_prompt(messages)
         self.assertIn("[System Instructions]\nSystem directive", prompt)
         self.assertIn("[User]\nUser query", prompt)
+
+    def test_normalize_tools(self):
+        """Test normalizing OpenAI tools, legacy functions, and Anthropic tools."""
+        openai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather info",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                },
+            }
+        ]
+        anthropic_tools = [
+            {
+                "name": "search_db",
+                "description": "Search database",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            }
+        ]
+        functions = [
+            {
+                "name": "calc",
+                "description": "Calculate math expression",
+                "parameters": {"type": "object", "properties": {"expr": {"type": "string"}}},
+            }
+        ]
+
+        norm_openai = normalize_tools(tools=openai_tools)
+        self.assertEqual(len(norm_openai), 1)
+        self.assertEqual(norm_openai[0]["name"], "get_weather")
+        self.assertIn("location", norm_openai[0]["parameters"]["properties"])
+
+        norm_anthropic = normalize_tools(tools=anthropic_tools)
+        self.assertEqual(len(norm_anthropic), 1)
+        self.assertEqual(norm_anthropic[0]["name"], "search_db")
+
+        norm_mixed = normalize_tools(tools=openai_tools, functions=functions)
+        self.assertEqual(len(norm_mixed), 2)
+        names = [item["name"] for item in norm_mixed]
+        self.assertIn("get_weather", names)
+        self.assertIn("calc", names)
+
+    def test_format_tools_to_system_prompt(self):
+        """Test generating tool prompt instructions."""
+        tools = [
+            {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}},
+            }
+        ]
+        prompt_auto = format_tools_to_system_prompt(tools, tool_choice="auto")
+        self.assertIn("[Available Tools & Functions]", prompt_auto)
+        self.assertIn("get_weather", prompt_auto)
+        self.assertIn("tool_calls", prompt_auto)
+
+        prompt_none = format_tools_to_system_prompt(tools, tool_choice="none")
+        self.assertEqual(prompt_none, "")
+
+        prompt_required = format_tools_to_system_prompt(tools, tool_choice="required")
+        self.assertIn("CRITICAL: You MUST call at least one tool", prompt_required)
+
+        prompt_forced = format_tools_to_system_prompt(
+            tools, tool_choice={"type": "function", "function": {"name": "get_weather"}}
+        )
+        self.assertIn("CRITICAL: You MUST call the tool 'get_weather'", prompt_forced)
+
+    def test_parse_tool_calls_from_response(self):
+        """Test parsing tool calls from various model output formats."""
+        # 1. JSON code block with tool_calls list
+        output_1 = (
+            'I will check the weather.\n```json\n'
+            '{\n  "tool_calls": [\n    {"name": "get_weather", "arguments": {"location": "Bangkok"}}\n  ]\n}\n```'
+        )
+        text_1, calls_1 = parse_tool_calls_from_response(output_1)
+        self.assertEqual(text_1, "I will check the weather.")
+        self.assertIsNotNone(calls_1)
+        self.assertEqual(len(calls_1), 1)
+        self.assertEqual(calls_1[0]["name"], "get_weather")
+        self.assertEqual(calls_1[0]["arguments"], {"location": "Bangkok"})
+
+        # 2. Raw JSON string
+        output_2 = '{"tool_calls": [{"name": "search", "arguments": {"query": "python"}}]}'
+        text_2, calls_2 = parse_tool_calls_from_response(output_2)
+        self.assertIsNone(text_2)
+        self.assertEqual(len(calls_2), 1)
+        self.assertEqual(calls_2[0]["name"], "search")
+        self.assertEqual(calls_2[0]["arguments"], {"query": "python"})
+
+        # 3. XML style tool call
+        output_3 = 'Let me run that.<tool_call>{"name": "exec_cmd", "arguments": {"cmd": "ls"}}</tool_call>'
+        text_3, calls_3 = parse_tool_calls_from_response(output_3)
+        self.assertEqual(text_3, "Let me run that.")
+        self.assertEqual(len(calls_3), 1)
+        self.assertEqual(calls_3[0]["name"], "exec_cmd")
+        self.assertEqual(calls_3[0]["arguments"], {"cmd": "ls"})
+
+        # 4. Normal text (no tool call)
+        output_4 = "Hello, how are you today?"
+        text_4, calls_4 = parse_tool_calls_from_response(output_4)
+        self.assertEqual(text_4, "Hello, how are you today?")
+        self.assertIsNone(calls_4)
+
+    def test_format_messages_with_tool_history(self):
+        """Test multi-turn tool call history in messages."""
+        messages = [
+            {"role": "user", "content": "What is the weather in Tokyo?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"location": "Tokyo"}'},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "name": "get_weather",
+                "content": '{"temperature": "22C", "condition": "Sunny"}',
+            },
+        ]
+        prompt = format_messages_to_prompt(messages)
+        self.assertIn("[User]\nWhat is the weather in Tokyo?", prompt)
+        self.assertIn("[Tool Call: get_weather({\"location\": \"Tokyo\"})]", prompt)
+        self.assertIn("[Tool Result (call_123)]\n{\"temperature\": \"22C\", \"condition\": \"Sunny\"}", prompt)
 
     def test_detect_cli_command(self):
         """Test auto-detection of local CLI binary."""
@@ -102,7 +242,7 @@ class TestAntigravityBridge(unittest.TestCase):
                 self.assertIn("antigravity", model_ids)
                 self.assertIn("agy", model_ids)
 
-            # 3. Test /v1/chat/completions POST (OpenAI format)
+            # 3. Test /v1/chat/completions POST (OpenAI format without tools)
             chat_url = f"http://127.0.0.1:{port}/v1/chat/completions"
             req_data = json.dumps({
                 "model": "antigravity",
@@ -115,21 +255,122 @@ class TestAntigravityBridge(unittest.TestCase):
                     resp_json = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp_json["object"], "chat.completion")
                     self.assertEqual(resp_json["choices"][0]["message"]["content"], "Bridge response")
+                    self.assertEqual(resp_json["choices"][0]["finish_reason"], "stop")
 
-            # 4. Test /v1/messages POST (Anthropic format)
-            messages_url = f"http://127.0.0.1:{port}/v1/messages"
-            anthropic_req_data = json.dumps({
-                "model": "claude-sonnet-4.6-thinking",
-                "system": "You are a helpful assistant.",
-                "messages": [{"role": "user", "content": "Hello Anthropic"}],
+            # 4. Test /v1/chat/completions POST (OpenAI format WITH tool calling)
+            tool_call_cli_output = '```json\n{\n  "tool_calls": [\n    {"name": "get_weather", "arguments": {"location": "London"}}\n  ]\n}\n```'
+            req_data_tools = json.dumps({
+                "model": "gemini-3.6-flash-high",
+                "messages": [{"role": "user", "content": "What is the weather in London?"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get weather",
+                            "parameters": {"type": "object", "properties": {"location": {"type": "string"}}},
+                        },
+                    }
+                ],
             }).encode("utf-8")
 
-            with patch.object(antigravity_bridge, "execute_cli_command", return_value="Anthropic Bridge response"):
-                req = urllib.request.Request(messages_url, data=anthropic_req_data, headers={"Content-Type": "application/json"})
+            with patch.object(antigravity_bridge, "execute_cli_command", return_value=tool_call_cli_output):
+                req = urllib.request.Request(chat_url, data=req_data_tools, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req) as resp:
+                    resp_json = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp_json["choices"][0]["finish_reason"], "tool_calls")
+                    self.assertIn("tool_calls", resp_json["choices"][0]["message"])
+                    tc = resp_json["choices"][0]["message"]["tool_calls"][0]
+                    self.assertEqual(tc["function"]["name"], "get_weather")
+                    self.assertEqual(json.loads(tc["function"]["arguments"]), {"location": "London"})
+
+            # 5. Test /v1/messages POST (Anthropic format WITH tool calling)
+            messages_url = f"http://127.0.0.1:{port}/v1/messages"
+            anthropic_tool_req = json.dumps({
+                "model": "claude-sonnet-4.6-thinking",
+                "messages": [{"role": "user", "content": "Check London weather"}],
+                "tools": [
+                    {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
+                    }
+                ],
+            }).encode("utf-8")
+
+            with patch.object(antigravity_bridge, "execute_cli_command", return_value=tool_call_cli_output):
+                req = urllib.request.Request(messages_url, data=anthropic_tool_req, headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req) as resp:
                     resp_json = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp_json["type"], "message")
-                    self.assertEqual(resp_json["content"][0]["text"], "Anthropic Bridge response")
+                    self.assertEqual(resp_json["stop_reason"], "tool_use")
+                    tool_blocks = [b for b in resp_json["content"] if b["type"] == "tool_use"]
+                    self.assertEqual(len(tool_blocks), 1)
+                    self.assertEqual(tool_blocks[0]["name"], "get_weather")
+                    self.assertEqual(tool_blocks[0]["input"], {"location": "London"})
+
+            # 6. Test /v1/chat/completions Streaming WITH tool calling
+            req_data_stream = json.dumps({
+                "model": "gemini-3.6-flash-high",
+                "messages": [{"role": "user", "content": "What is the weather in London?"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {"type": "object", "properties": {"location": {"type": "string"}}},
+                        },
+                    }
+                ],
+                "stream": True,
+            }).encode("utf-8")
+
+            with patch.object(antigravity_bridge, "execute_cli_command", return_value=tool_call_cli_output):
+                req = urllib.request.Request(chat_url, data=req_data_stream, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req) as resp:
+                    lines = []
+                    while True:
+                        line = resp.readline().decode("utf-8")
+                        if not line:
+                            break
+                        lines.append(line)
+                        if "[DONE]" in line:
+                            break
+                    stream_data = "".join(lines)
+                    self.assertIn("data: ", stream_data)
+                    self.assertIn("[DONE]", stream_data)
+                    self.assertIn("tool_calls", stream_data)
+                    self.assertIn("get_weather", stream_data)
+
+            # 7. Test /v1/messages Streaming WITH tool calling
+            anthropic_stream_req = json.dumps({
+                "model": "claude-sonnet-4.6-thinking",
+                "messages": [{"role": "user", "content": "Check London weather"}],
+                "tools": [
+                    {
+                        "name": "get_weather",
+                        "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
+                    }
+                ],
+                "stream": True,
+            }).encode("utf-8")
+
+            with patch.object(antigravity_bridge, "execute_cli_command", return_value=tool_call_cli_output):
+                req = urllib.request.Request(messages_url, data=anthropic_stream_req, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req) as resp:
+                    lines = []
+                    while True:
+                        line = resp.readline().decode("utf-8")
+                        if not line:
+                            break
+                        lines.append(line)
+                        if "message_stop" in line:
+                            break
+                    stream_data = "".join(lines)
+                    self.assertIn("event: content_block_start", stream_data)
+                    self.assertIn("tool_use", stream_data)
+                    self.assertIn("get_weather", stream_data)
+
         finally:
             server.shutdown()
             server.server_close()
