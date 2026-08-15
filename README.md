@@ -48,7 +48,7 @@ It exposes standard REST endpoints locally (`http://127.0.0.1:8000/v1`), seamles
 ## ✨ Key Features
 
 - 🔄 **Dual Format Compatibility**: Full support for both **OpenAI** (`/v1/chat/completions`) and **Anthropic** (`/v1/messages`) API specifications.
-- 🎨 **Imagen 3 Image Generation**: Built-in `/v1/images/generations` endpoint powered by Google Imagen 3 (`imagen-3.0-generate-002`), returning Base64 image data.
+- 🎨 **Google Imagen 3 Image Generation**: Built-in `/v1/images/generations` endpoint powered by Google AI Studio Free API Key (`imagen-3.0-generate-002`), returning Base64 image data in 2-3 seconds.
 - ⚡ **Real-Time SSE Streaming**: Supports Server-Sent Events (`text/event-stream`) for both OpenAI and Anthropic streaming consumers.
 - 🔀 **Multi-Profile Fallback & Rotation**: Automatically detects all `agy` profiles in `~/.config/antigravity/profiles/` and rotates on rate limits or quota depletion.
 - 🧠 **Dynamic Reasoning Effort**: Maps model IDs to `--model` and `--effort` CLI parameters (`high`, `medium`, `low`) automatically.
@@ -207,9 +207,21 @@ curl -X POST http://127.0.0.1:8000/v1/messages \
 
 ### 5. Image Generation (`POST /v1/images/generations`)
 
-Standard OpenAI Image Generation API format backed by Google Imagen 3 (`imagen-3.0-generate-002`).
+Standard OpenAI Image Generation API format powered by **Google Imagen 3** (`imagen-3.0-generate-002`).
+
+> [!TIP]
+> **Why Google AI Studio Free API Key?**
+> The local `agy` CLI is specialized for text, reasoning, and coding agent workflows and does not have a local image diffusion engine.
+> Therefore, image generation is seamlessly powered by **Google AI Studio's Free API Key** via Google Imagen 3.
+> 
+> Simply get your free API key at [Google AI Studio](https://aistudio.google.com/) and save it to `.env`:
+> ```bash
+> echo "GEMINI_API_KEY=AIzaSyYourKeyHere" >> .env
+> ```
+> The bridge automatically discovers your key from `.env`, environment variables, or the client's `Authorization: Bearer <API_KEY>` header.
 
 ```bash
+# Generate image via Bridge Server (uses GEMINI_API_KEY from .env or Bearer token)
 curl -X POST http://127.0.0.1:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-antigravity" \
@@ -240,6 +252,7 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations \
   ]
 }
 ```
+
 
 ---
 
@@ -423,7 +436,7 @@ main();
 
 | Variable | Description |
 | :--- | :--- |
-| **`GEMINI_API_KEY`** / **`GOOGLE_API_KEY`** | Google AI Studio API Key for Imagen 3 image generation. |
+| **`GEMINI_API_KEY`** / **`gemini_api_key`** / **`GOOGLE_API_KEY`** | Google AI Studio Free API Key for Imagen 3 image generation. [Get Key Here](https://aistudio.google.com/) |
 | **`ANTIGRAVITY_PROFILES`** | Comma-separated list of `agy` profile directory names to rotate through. |
 | **`ANTIGRAVITY_PROFILE`** | Active default profile name. |
 | **`ANTIGRAVITY_BRIDGE_API_KEY`** | Default API key to protect bridge endpoints. |
