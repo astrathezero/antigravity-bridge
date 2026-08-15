@@ -25,6 +25,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -34,6 +35,7 @@ import urllib.error
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from socketserver import ThreadingMixIn
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,6 +44,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
+
 logger = logging.getLogger("antigravity_bridge")
 
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
@@ -376,39 +379,38 @@ def execute_cli_with_fallback(
     raise RuntimeError(f"All agy profile execution attempts failed. Details: {'; '.join(errors)}")
 
 
-def resolve_gemini_api_key(client_key: Optional[str] = None) -> str:
-    """Resolve Gemini / Google AI API key from client header, environment, or config files."""
+def resolve_gemini_api_key(client_key: Optional[str] = None) -> Optional[str]:
+    """Resolve Google Gemini API key from client auth header, env, or .env files."""
     if client_key and (client_key.startswith("AIza") or len(client_key) > 30):
         return client_key
 
-    for env_var in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTIGRAVITY_BRIDGE_GEMINI_KEY"):
-        val = os.environ.get(env_var, "").strip()
-        if val:
+    for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "IMAGEN_API_KEY", "ANTIGRAVITY_BRIDGE_GEMINI_KEY"):
+        val = os.environ.get(env_name, "").strip()
+        if val and (val.startswith("AIza") or len(val) > 30):
             return val
 
-    # Try reading ~/.hermes/.env if present
-    hermes_env_path = os.path.expanduser("~/.hermes/.env")
-    if os.path.exists(hermes_env_path):
-        try:
-            with open(hermes_env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip("'\"")
-                    if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY") and v:
-                        return v
-        except Exception:
-            pass
+    # Search common .env locations
+    for env_file in (
+        os.path.expanduser("~/.hermes/.env"),
+        os.path.expanduser("~/astra_social_ai/.env"),
+        os.path.expanduser("~/.env"),
+    ):
+        if os.path.exists(env_file):
+            try:
+                with open(env_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "IMAGEN_API_KEY") and (v.startswith("AIza") or len(v) > 30):
+                            return v
+            except Exception:
+                pass
 
-    if client_key and client_key not in ("sk-antigravity", "local", "test"):
-        return client_key
-
-    raise RuntimeError(
-        "Gemini API key not found. Please set GEMINI_API_KEY or GOOGLE_API_KEY in environment or ~/.hermes/.env"
-    )
+    return None
 
 
 def generate_image_with_imagen(
@@ -422,20 +424,16 @@ def generate_image_with_imagen(
 ) -> List[Dict[str, Any]]:
     """Call Google AI Imagen 3 REST API endpoint to generate images and return OpenAI format data list."""
     if not api_key:
-        api_key = resolve_gemini_api_key()
+        raise RuntimeError("No valid Google AI Studio API key (AIza...) found")
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:predict"
     payload = {
-        "instances": [
-            {"prompt": prompt}
-        ],
+        "instances": [{"prompt": prompt}],
         "parameters": {
             "sampleCount": sample_count,
             "aspectRatio": aspect_ratio,
-            "outputOptions": {
-                "mimeType": output_mime_type
-            }
-        }
+            "outputOptions": {"mimeType": output_mime_type},
+        },
     }
 
     req_bytes = json.dumps(payload).encode("utf-8")
@@ -446,21 +444,12 @@ def generate_image_with_imagen(
             "Content-Type": "application/json",
             "x-goog-api-key": api_key,
         },
-        method="POST"
+        method="POST",
     )
 
     logger.info("Calling Google Imagen 3 API (model=%s, aspect_ratio=%s, count=%d)...", model, aspect_ratio, sample_count)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            resp_body = resp.read().decode("utf-8")
-            data = json.loads(resp_body)
-    except urllib.error.HTTPError as exc:
-        err_msg = exc.read().decode("utf-8", errors="replace")
-        logger.error("Google Imagen API HTTPError %d: %s", exc.code, err_msg)
-        raise RuntimeError(f"Google Imagen API Error ({exc.code}): {err_msg}")
-    except Exception as exc:
-        logger.error("Failed to connect to Google Imagen API: %s", exc)
-        raise RuntimeError(f"Failed to connect to Google Imagen API: {exc}")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
 
     predictions = data.get("predictions", [])
     if not predictions:
@@ -470,15 +459,68 @@ def generate_image_with_imagen(
     for pred in predictions:
         b64_img = pred.get("bytesBase64Encoded")
         if b64_img:
-            results.append({
-                "b64_json": b64_img,
-                "revised_prompt": prompt,
-            })
+            results.append({"b64_json": b64_img, "revised_prompt": prompt})
 
     if not results:
         raise RuntimeError("No valid base64 image data found in Google Imagen response")
 
     return results
+
+
+def generate_image_with_agy(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+) -> List[Dict[str, Any]]:
+    """Use local agy CLI with generate_image tool (gemini-3.1-flash-image) and return base64 result."""
+    _, cmd_tpl = detect_cli_command()
+    profiles = get_available_profiles()
+    img_name = f"img_{uuid.uuid4().hex[:8]}"
+    agy_prompt = f"Use generate_image tool to generate an image with prompt: '{prompt}'. Save the image file."
+
+    for profile in profiles:
+        try:
+            cmd = cmd_tpl.replace('"{prompt}"', shlex.quote(agy_prompt)).replace('{prompt}', shlex.quote(agy_prompt))
+            env = os.environ.copy()
+            if profile:
+                env["ANTIGRAVITY_PROFILE"] = profile
+            logger.info("Generating image via agy CLI (profile=%s)...", profile or "default")
+            start_ts = time.time()
+            res = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True, timeout=180)
+
+            # 1. Check Path in text output of agy
+            found_paths = re.findall(r'(/[\w\.-]+(?:/[\w\.-]+)*\.(?:png|jpg|jpeg))', res.stdout + res.stderr)
+            for p in found_paths:
+                path_obj = Path(p)
+                if path_obj.is_file() and path_obj.stat().st_mtime >= start_ts - 5:
+                    b64 = base64.b64encode(path_obj.read_bytes()).decode("utf-8")
+                    logger.info("Image successfully created via agy CLI: %s (%d bytes)", p, path_obj.stat().st_size)
+                    return [{"b64_json": b64, "revised_prompt": prompt}]
+
+            # 2. Check scratch dir (~/.gemini/antigravity-cli/scratch)
+            scratch = Path.home() / ".gemini" / "antigravity-cli" / "scratch"
+            if scratch.exists():
+                matching = [f for f in (list(scratch.glob("*.png")) + list(scratch.glob("*.jpg"))) if f.stat().st_mtime >= start_ts - 5]
+                if matching:
+                    latest = max(matching, key=lambda x: x.stat().st_mtime)
+                    b64 = base64.b64encode(latest.read_bytes()).decode("utf-8")
+                    logger.info("Image found in scratch dir: %s (%d bytes)", latest, latest.stat().st_size)
+                    return [{"b64_json": b64, "revised_prompt": prompt}]
+
+            # 3. Check ~/.gemini root directory
+            gemini_root = Path.home() / ".gemini"
+            if gemini_root.exists():
+                all_imgs = [f for f in (list(gemini_root.rglob("*.png")) + list(gemini_root.rglob("*.jpg"))) if f.stat().st_mtime >= start_ts - 5]
+                if all_imgs:
+                    latest = max(all_imgs, key=lambda x: x.stat().st_mtime)
+                    b64 = base64.b64encode(latest.read_bytes()).decode("utf-8")
+                    logger.info("Image found in .gemini dir: %s (%d bytes)", latest, latest.stat().st_size)
+                    return [{"b64_json": b64, "revised_prompt": prompt}]
+
+        except Exception as e:
+            logger.warning("agy image generation failed for profile %s: %s", profile, e)
+
+    raise RuntimeError("Failed to generate image via agy CLI")
+
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -639,32 +681,45 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     output_mime = "image/jpeg"
 
                 auth_header = self.headers.get("Authorization", "")
-                auth_token = ""
-                if auth_header.startswith("Bearer "):
-                    auth_token = auth_header[7:].strip()
+                auth_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
 
+                image_results = None
+                # Tier 1: Try direct Google Imagen 3 API if API key is available
                 try:
                     resolved_key = resolve_gemini_api_key(client_key=auth_token)
-                    image_results = generate_image_with_imagen(
-                        prompt=prompt.strip(),
-                        model=img_model,
-                        sample_count=n,
-                        aspect_ratio=aspect_ratio,
-                        output_mime_type=output_mime,
-                        api_key=resolved_key,
-                    )
-                    self._send_json_response({
-                        "created": int(time.time()),
-                        "data": image_results,
-                    })
-                    return
-                except Exception as exc:
-                    logger.error("Image generation failed: %s", exc)
-                    self._send_json_response(
-                        {"error": {"message": str(exc), "type": "api_error"}},
-                        status_code=500,
-                    )
-                    return
+                    if resolved_key:
+                        image_results = generate_image_with_imagen(
+                            prompt=prompt.strip(),
+                            model=img_model,
+                            sample_count=n,
+                            aspect_ratio=aspect_ratio,
+                            output_mime_type=output_mime,
+                            api_key=resolved_key,
+                        )
+                except Exception as e:
+                    logger.warning("Imagen API direct generation failed: %s — falling back to agy CLI", e)
+
+                # Tier 2: Fallback to local agy CLI (gemini-3.1-flash-image)
+                if not image_results:
+                    try:
+                        image_results = generate_image_with_agy(
+                            prompt=prompt.strip(),
+                            aspect_ratio=aspect_ratio,
+                        )
+                    except Exception as exc:
+                        logger.error("All image generation methods failed: %s", exc)
+                        self._send_json_response(
+                            {"error": {"message": str(exc), "type": "api_error"}},
+                            status_code=500,
+                        )
+                        return
+
+                self._send_json_response({
+                    "created": int(time.time()),
+                    "data": image_results,
+                })
+                return
+
 
             messages = req_json.get("messages", [])
             if not isinstance(messages, list):

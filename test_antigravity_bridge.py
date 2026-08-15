@@ -131,7 +131,7 @@ class TestAntigravityBridge(unittest.TestCase):
                     self.assertEqual(resp_json["type"], "message")
                     self.assertEqual(resp_json["content"][0]["text"], "Anthropic Bridge response")
 
-            # 5. Test /v1/images/generations POST (OpenAI Image Gen format)
+            # 5. Test /v1/images/generations POST (OpenAI Image Gen format - Tier 1 Direct)
             image_url = f"http://127.0.0.1:{port}/v1/images/generations"
             img_req_data = json.dumps({
                 "model": "imagen-3.0-generate-002",
@@ -150,6 +150,14 @@ class TestAntigravityBridge(unittest.TestCase):
                     self.assertEqual(len(resp_json["data"]), 1)
                     self.assertEqual(resp_json["data"][0]["b64_json"], fake_b64)
                     self.assertEqual(resp_json["data"][0]["revised_prompt"], "A cute robot cat")
+
+            # 6. Test /v1/images/generations POST (Tier 2 Fallback to agy CLI)
+            with patch.object(antigravity_bridge, "resolve_gemini_api_key", return_value=None), \
+                 patch.object(antigravity_bridge, "generate_image_with_agy", return_value=[{"b64_json": fake_b64, "revised_prompt": "A cute robot cat"}]):
+                req = urllib.request.Request(image_url, data=img_req_data, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req) as resp:
+                    resp_json = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(resp_json["data"][0]["b64_json"], fake_b64)
         finally:
             server.shutdown()
             server.server_close()
