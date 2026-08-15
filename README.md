@@ -61,10 +61,15 @@ It exposes standard REST endpoints locally (`http://127.0.0.1:8000/v1`), seamles
 
 | Model ID (`model`) | Backend Engine / CLI Mapping | Reasoning Effort | Description | Max Context |
 | :--- | :--- | :---: | :--- | :---: |
+| **`gemini-3.7-flash-high`** | `--model gemini-3.7-flash` | `high` | Gemini 3.7 Flash (High Reasoning Effort) | 1,000,000 |
+| **`gemini-3.7-flash-medium`** | `--model gemini-3.7-flash` | `medium` | Gemini 3.7 Flash (Medium Reasoning Effort) | 1,000,000 |
+| **`gemini-3.7-flash-low`** | `--model gemini-3.7-flash` | `low` | Gemini 3.7 Flash (Low Reasoning Effort) | 1,000,000 |
+| **`gemini-3.7-flash`** | `--model gemini-3.7-flash` | - | Gemini 3.7 Flash (Default) | 1,000,000 |
 | **`gemini-3.6-flash-high`** | `--model gemini-3.6-flash` | `high` | Gemini 3.6 Flash (High Reasoning Effort) | 1,000,000 |
 | **`gemini-3.6-flash-medium`** | `--model gemini-3.6-flash` | `medium` | Gemini 3.6 Flash (Medium Reasoning Effort) | 1,000,000 |
 | **`gemini-3.6-flash-low`** | `--model gemini-3.6-flash` | `low` | Gemini 3.6 Flash (Low Reasoning Effort) | 1,000,000 |
 | **`gemini-3.6-flash`** | `--model gemini-3.6-flash` | - | Gemini 3.6 Flash (Default) | 1,000,000 |
+
 | **`gemini-3.5-flash-medium`** | `--model gemini-3.5-flash` | `medium` | Gemini 3.5 Flash (Medium Reasoning Effort) | 1,000,000 |
 | **`gemini-3.5-flash-low`** | `--model gemini-3.5-flash` | `low` | Gemini 3.5 Flash (Low Reasoning Effort) | 1,000,000 |
 | **`gemini-3.5-flash`** | `--model gemini-3.5-flash` | - | Gemini 3.5 Flash (Default) | 1,000,000 |
@@ -245,7 +250,7 @@ To connect **Hermes Agent** or **Hermes Messaging Gateway** (Telegram, Discord, 
 ### 1. Add `agy-cli` to `~/.hermes/config.yaml`
 ```yaml
 model:
-  default: gemini-3.6-flash-high
+  default: gemini-3.7-flash-high
   provider: agy-cli
 
 custom_providers:
@@ -254,6 +259,14 @@ custom_providers:
     api_key: sk-antigravity
     name: AGY CLI Router
     models:
+      gemini-3.7-flash-high:
+        context_length: 1000000
+      gemini-3.7-flash-medium:
+        context_length: 1000000
+      gemini-3.7-flash-low:
+        context_length: 1000000
+      gemini-3.7-flash:
+        context_length: 1000000
       gemini-3.6-flash-high:
         context_length: 1000000
       gemini-3.6-flash-medium:
@@ -262,6 +275,7 @@ custom_providers:
         context_length: 1000000
       gemini-3.6-flash:
         context_length: 1000000
+
       gemini-3.5-flash-medium:
         context_length: 1000000
       gemini-3.5-flash-low:

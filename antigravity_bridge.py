@@ -47,10 +47,15 @@ logger = logging.getLogger("antigravity_bridge")
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
 
 SUPPORTED_MODELS = {
+    "gemini-3.7-flash-high": ("gemini-3.7-flash", "high"),
+    "gemini-3.7-flash-medium": ("gemini-3.7-flash", "medium"),
+    "gemini-3.7-flash-low": ("gemini-3.7-flash", "low"),
+    "gemini-3.7-flash": ("gemini-3.7-flash", None),
     "gemini-3.6-flash-high": ("gemini-3.6-flash", "high"),
     "gemini-3.6-flash-medium": ("gemini-3.6-flash", "medium"),
     "gemini-3.6-flash-low": ("gemini-3.6-flash", "low"),
     "gemini-3.6-flash": ("gemini-3.6-flash", None),
+
     "gemini-3.5-flash-medium": ("gemini-3.5-flash", "medium"),
     "gemini-3.5-flash-low": ("gemini-3.5-flash", "low"),
     "gemini-3.5-flash": ("gemini-3.5-flash", None),
@@ -232,9 +237,12 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
         effort = "high"
         model_lower = model_lower[:-5]
 
-    if "gemini-3.6-flash" in model_lower:
+    if "gemini-3.7-flash" in model_lower:
+        flags.extend(["--model", "gemini-3.7-flash"])
+    elif "gemini-3.6-flash" in model_lower:
         flags.extend(["--model", "gemini-3.6-flash"])
     elif "gemini-3.5-flash" in model_lower:
+
         flags.extend(["--model", "gemini-3.5-flash"])
     elif "gemini-3.1-pro" in model_lower:
         flags.extend(["--model", "gemini-3.1-pro"])
