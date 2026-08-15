@@ -470,56 +470,102 @@ def generate_image_with_imagen(
 def generate_image_with_agy(
     prompt: str,
     aspect_ratio: str = "1:1",
+    cmd_template: Optional[str] = None,
+    profiles: Optional[List[Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Use local agy CLI with generate_image tool (gemini-3.1-flash-image) and return base64 result."""
-    _, cmd_tpl = detect_cli_command()
-    profiles = get_available_profiles()
-    img_name = f"img_{uuid.uuid4().hex[:8]}"
-    agy_prompt = f"Use generate_image tool to generate an image with prompt: '{prompt}'. Save the image file."
+    """Use local agy CLI with generate_image tool / prompt and return base64 result."""
+    if not cmd_template:
+        _, cmd_template = detect_cli_command()
+    if profiles is None:
+        profiles = get_available_profiles()
 
-    for profile in profiles:
+    start_ts = time.time()
+    agy_prompt = (
+        f"Generate an image for: \"{prompt}\" with aspect ratio '{aspect_ratio}'. "
+        f"Use the generate_image tool or generate a local image file. "
+        f"Output the saved image file path."
+    )
+
+    logger.info("Calling agy CLI for image generation (prompt: %s)...", prompt[:80])
+    try:
+        output_text, used_profile = execute_cli_with_fallback(
+            cmd_template,
+            agy_prompt,
+            timeout=180.0,
+            profiles=profiles,
+            model_name="gemini-3.7-flash-low",
+        )
+        logger.info("agy CLI finished with profile '%s'. Parsing output for image...", used_profile or "default")
+    except Exception as exc:
+        logger.error("agy CLI execution error during image generation: %s", exc)
+        raise RuntimeError(f"agy CLI image generation failed: {exc}")
+
+    # 1. Check for Base64 image data in response text (e.g. data:image/png;base64,...)
+    b64_matches = re.findall(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]{100,})', output_text)
+    if b64_matches:
+        logger.info("Found base64 data URI in agy output (%d chars)", len(b64_matches[0]))
+        return [{"b64_json": b64_matches[0], "revised_prompt": prompt}]
+
+    # 2. Check for file paths in output text
+    # Matches patterns like /path/to/img.png, ~/.gemini/.../img.png, ./img.png
+    path_candidates = re.findall(r'([~/\.][\w\.\-_/ ]+\.(?:png|jpg|jpeg|webp))', output_text)
+    for p_str in path_candidates:
+        clean_p = p_str.strip().strip("'\"()[]<>")
+        expanded = os.path.abspath(os.path.expanduser(clean_p))
+        if os.path.isfile(expanded) and os.path.getsize(expanded) > 0:
+            try:
+                with open(expanded, "rb") as f:
+                    img_bytes = f.read()
+                b64 = base64.b64encode(img_bytes).decode("utf-8")
+                logger.info("Found image from output path: %s (%d bytes)", expanded, len(img_bytes))
+                return [{"b64_json": b64, "revised_prompt": prompt}]
+            except Exception as e:
+                logger.warning("Failed to read image at %s: %s", expanded, e)
+
+    # 3. Search directories for newly created images (mtime >= start_ts - 10)
+    search_dirs = [
+        os.getcwd(),
+        "/tmp",
+        os.path.expanduser("~/.gemini"),
+        os.path.expanduser("~/.cache"),
+        os.path.expanduser("~/antigravity-bridge"),
+    ]
+
+    recent_files: List[Tuple[float, str]] = []
+    for d in search_dirs:
+        if not os.path.exists(d):
+            continue
         try:
-            cmd = cmd_tpl.replace('"{prompt}"', shlex.quote(agy_prompt)).replace('{prompt}', shlex.quote(agy_prompt))
-            env = os.environ.copy()
-            if profile:
-                env["ANTIGRAVITY_PROFILE"] = profile
-            logger.info("Generating image via agy CLI (profile=%s)...", profile or "default")
-            start_ts = time.time()
-            res = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True, timeout=180)
-
-            # 1. Check Path in text output of agy
-            found_paths = re.findall(r'(/[\w\.-]+(?:/[\w\.-]+)*\.(?:png|jpg|jpeg))', res.stdout + res.stderr)
-            for p in found_paths:
-                path_obj = Path(p)
-                if path_obj.is_file() and path_obj.stat().st_mtime >= start_ts - 5:
-                    b64 = base64.b64encode(path_obj.read_bytes()).decode("utf-8")
-                    logger.info("Image successfully created via agy CLI: %s (%d bytes)", p, path_obj.stat().st_size)
-                    return [{"b64_json": b64, "revised_prompt": prompt}]
-
-            # 2. Check scratch dir (~/.gemini/antigravity-cli/scratch)
-            scratch = Path.home() / ".gemini" / "antigravity-cli" / "scratch"
-            if scratch.exists():
-                matching = [f for f in (list(scratch.glob("*.png")) + list(scratch.glob("*.jpg"))) if f.stat().st_mtime >= start_ts - 5]
-                if matching:
-                    latest = max(matching, key=lambda x: x.stat().st_mtime)
-                    b64 = base64.b64encode(latest.read_bytes()).decode("utf-8")
-                    logger.info("Image found in scratch dir: %s (%d bytes)", latest, latest.stat().st_size)
-                    return [{"b64_json": b64, "revised_prompt": prompt}]
-
-            # 3. Check ~/.gemini root directory
-            gemini_root = Path.home() / ".gemini"
-            if gemini_root.exists():
-                all_imgs = [f for f in (list(gemini_root.rglob("*.png")) + list(gemini_root.rglob("*.jpg"))) if f.stat().st_mtime >= start_ts - 5]
-                if all_imgs:
-                    latest = max(all_imgs, key=lambda x: x.stat().st_mtime)
-                    b64 = base64.b64encode(latest.read_bytes()).decode("utf-8")
-                    logger.info("Image found in .gemini dir: %s (%d bytes)", latest, latest.stat().st_size)
-                    return [{"b64_json": b64, "revised_prompt": prompt}]
-
+            for root, _, files in os.walk(d):
+                if ".git" in root or "node_modules" in root:
+                    continue
+                for fname in files:
+                    if fname.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                        full_path = os.path.join(root, fname)
+                        try:
+                            st = os.stat(full_path)
+                            if st.st_mtime >= start_ts - 10 and st.st_size > 0:
+                                recent_files.append((st.st_mtime, full_path))
+                        except Exception:
+                            pass
         except Exception as e:
-            logger.warning("agy image generation failed for profile %s: %s", profile, e)
+            logger.debug("Error walking %s: %s", d, e)
 
-    raise RuntimeError("Failed to generate image via agy CLI")
+    if recent_files:
+        recent_files.sort(key=lambda x: x[0], reverse=True)
+        newest_file = recent_files[0][1]
+        try:
+            with open(newest_file, "rb") as f:
+                img_bytes = f.read()
+            b64 = base64.b64encode(img_bytes).decode("utf-8")
+            logger.info("Found newly generated image on filesystem: %s (%d bytes)", newest_file, len(img_bytes))
+            return [{"b64_json": b64, "revised_prompt": prompt}]
+        except Exception as e:
+            logger.error("Failed to read found image %s: %s", newest_file, e)
+
+    logger.error("No image file or base64 data found. agy output preview: %s", output_text[:300])
+    raise RuntimeError(f"No image was generated by agy CLI (output: {output_text[:160]})")
+
 
 
 
@@ -702,9 +748,14 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 # Tier 2: Fallback to local agy CLI (gemini-3.1-flash-image)
                 if not image_results:
                     try:
+                        _, cmd_tpl = detect_cli_command()
+                        custom_tpl = getattr(self.server, "custom_cmd", None) or cmd_tpl
+                        configured_profiles = getattr(self.server, "profiles", None)
                         image_results = generate_image_with_agy(
                             prompt=prompt.strip(),
                             aspect_ratio=aspect_ratio,
+                            cmd_template=custom_tpl,
+                            profiles=configured_profiles,
                         )
                     except Exception as exc:
                         logger.error("All image generation methods failed: %s", exc)
@@ -713,6 +764,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                             status_code=500,
                         )
                         return
+
 
                 self._send_json_response({
                     "created": int(time.time()),
