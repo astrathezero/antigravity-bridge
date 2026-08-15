@@ -391,6 +391,8 @@ def resolve_gemini_api_key(client_key: Optional[str] = None) -> Optional[str]:
 
     # Search common .env locations
     for env_file in (
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        os.path.expanduser("~/antigravity-bridge/.env"),
         os.path.expanduser("~/.hermes/.env"),
         os.path.expanduser("~/astra_social_ai/.env"),
         os.path.expanduser("~/.env"),
@@ -482,9 +484,9 @@ def generate_image_with_agy(
     start_ts = time.time()
     target_file = f"/tmp/agy_img_{uuid.uuid4().hex[:8]}.png"
     agy_prompt = (
-        f"Generate an image for: \"{prompt}\" with aspect ratio '{aspect_ratio}'. "
-        f"Save the image file to '{target_file}' or current directory. "
-        f"Output the saved image file path clearly."
+        f"You are an AI assistant. Write and execute a Python script or use tools to create/render the image for: \"{prompt}\" "
+        f"with aspect ratio '{aspect_ratio}'. Save the resulting image directly to '{target_file}'. "
+        f"You MUST ensure '{target_file}' is saved on disk. Output the exact saved path: {target_file}"
     )
 
     logger.info("Calling agy CLI for image generation (target=%s, prompt: %s)...", target_file, prompt[:80])
