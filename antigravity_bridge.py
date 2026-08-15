@@ -20,20 +20,23 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import hmac
 import json
 import logging
 import os
-import re
 import secrets
 import shlex
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from typing import Any, Dict, List, Optional, Tuple
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,7 +63,28 @@ SUPPORTED_MODELS = {
     "claude-opus-4.6": ("claude-opus-4.6", None),
     "gpt-oss-120b-medium": ("gpt-oss-120b", "medium"),
     "gpt-oss-120b": ("gpt-oss-120b", None),
+    "imagen-3.0-generate-002": ("imagen-3.0-generate-002", None),
+    "imagen-3.0-fast-generate-001": ("imagen-3.0-fast-generate-001", None),
+    "imagen-3": ("imagen-3.0-generate-002", None),
 }
+
+IMAGE_SIZE_TO_ASPECT_RATIO = {
+    "1024x1024": "1:1",
+    "512x512": "1:1",
+    "1792x1024": "16:9",
+    "1920x1080": "16:9",
+    "1280x720": "16:9",
+    "16:9": "16:9",
+    "1024x1792": "9:16",
+    "1080x1920": "9:16",
+    "720x1280": "9:16",
+    "9:16": "9:16",
+    "1024x768": "4:3",
+    "4:3": "4:3",
+    "768x1024": "3:4",
+    "3:4": "3:4",
+}
+
 
 
 def detect_cli_command() -> Tuple[str, str]:
@@ -77,268 +101,24 @@ def detect_cli_command() -> Tuple[str, str]:
     # 1. Search PATH (works on Linux, macOS, and Windows)
     agy_path = shutil.which("agy")
     if agy_path:
-        return ("agy", f'"{agy_path}" --dangerously-skip-permissions')
+        return ("agy", f'"{agy_path}" --dangerously-skip-permissions -p "{{prompt}}"')
 
-    # 2. Check ~/.local/bin/agy (Linux/macOS) or Windows %USERPROFILE%\\.local\\bin\\agy.exe
+    # 2. Check ~/.local/bin/agy (Linux/macOS) or Windows %USERPROFILE%\.local\bin\agy.exe
     home = os.path.expanduser("~")
     local_bin = os.path.join(home, ".local", "bin", "agy.exe" if os.name == "nt" else "agy")
     if os.path.exists(local_bin) and os.access(local_bin, os.X_OK if os.name != "nt" else os.F_OK):
-        return ("agy", f'"{local_bin}" --dangerously-skip-permissions')
+        return ("agy", f'"{local_bin}" --dangerously-skip-permissions -p "{{prompt}}"')
 
     # Fallback to standard agy command name
-    return ("agy", 'agy --dangerously-skip-permissions')
+    return ("agy", 'agy --dangerously-skip-permissions -p "{prompt}"')
 
 
-def normalize_tools(
-    tools: Optional[List[Dict[str, Any]]] = None,
-    functions: Optional[List[Dict[str, Any]]] = None,
-) -> List[Dict[str, Any]]:
-    """Normalize OpenAI tools, legacy OpenAI functions, and Anthropic tools into unified schema list."""
-    normalized: List[Dict[str, Any]] = []
-
-    if tools and isinstance(tools, list):
-        for t in tools:
-            if not isinstance(t, dict):
-                continue
-            if t.get("type") == "function" and isinstance(t.get("function"), dict):
-                fn = t["function"]
-                normalized.append({
-                    "name": fn.get("name", ""),
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters", {}),
-                })
-            elif "name" in t:
-                # Anthropic tool format or direct tool definition
-                normalized.append({
-                    "name": t.get("name", ""),
-                    "description": t.get("description", ""),
-                    "parameters": t.get("input_schema") or t.get("parameters", {}),
-                })
-
-    if functions and isinstance(functions, list):
-        for fn in functions:
-            if isinstance(fn, dict) and "name" in fn:
-                # Avoid duplicate names if already added via tools
-                if not any(item["name"] == fn.get("name") for item in normalized):
-                    normalized.append({
-                        "name": fn.get("name", ""),
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {}),
-                    })
-
-    return normalized
-
-
-def format_tools_to_system_prompt(
-    tools: List[Dict[str, Any]],
-    tool_choice: Optional[Any] = None,
-) -> str:
-    """Format normalized tools and instructions into system prompt text."""
-    if not tools:
-        return ""
-
-    if isinstance(tool_choice, str) and tool_choice.lower() == "none":
-        return ""
-
-    forced_tool = None
-    if isinstance(tool_choice, dict):
-        if tool_choice.get("type") == "function" and isinstance(tool_choice.get("function"), dict):
-            forced_tool = tool_choice["function"].get("name")
-        elif tool_choice.get("type") == "tool":
-            forced_tool = tool_choice.get("name")
-        elif "name" in tool_choice:
-            forced_tool = tool_choice.get("name")
-
-    tools_json = json.dumps(tools, indent=2, ensure_ascii=False)
-
-    lines = [
-        "[Available Tools & Functions]",
-        "You have access to the following tools/functions that you can call when needed:",
-        "```json",
-        tools_json,
-        "```",
-        "",
-        "[Tool Calling Instructions]",
-        "When you decide to call one or more tools, respond ONLY with a JSON object in this format:",
-        "```json",
-        "{",
-        '  "tool_calls": [',
-        "    {",
-        '      "name": "function_name",',
-        '      "arguments": { "parameter_name": "parameter_value" }',
-        "    }",
-        "  ]",
-        "}",
-        "```",
-    ]
-
-    if forced_tool:
-        lines.append(f"CRITICAL: You MUST call the tool '{forced_tool}'.")
-    elif isinstance(tool_choice, str) and tool_choice.lower() in ("required", "any"):
-        lines.append("CRITICAL: You MUST call at least one tool from the available tools list.")
-    else:
-        lines.append("If no tool needs to be called to answer the user's request, respond normally with plain text.")
-
-    lines.append("Do NOT output conversational filler before or after the JSON block when calling a tool.")
-    return "\n".join(lines)
-
-
-def _normalize_tool_call_item(
-    item: Any,
-    allowed_tools: Optional[List[str]] = None,
-) -> Optional[Dict[str, Any]]:
-    """Normalize an extracted dictionary into standard tool call dict."""
-    if not isinstance(item, dict):
-        return None
-
-    if item.get("type") == "function" and isinstance(item.get("function"), dict):
-        item = item["function"]
-
-    name = item.get("name") or item.get("function_name")
-    if not name or not isinstance(name, str):
-        return None
-
-    name = name.strip()
-    if allowed_tools:
-        matched = next((t for t in allowed_tools if t.lower() == name.lower()), None)
-        if matched:
-            name = matched
-        else:
-            return None
-
-    args = item.get("arguments") or item.get("parameters") or item.get("input") or {}
-    if isinstance(args, str):
-        try:
-            args_dict = json.loads(args)
-        except Exception:
-            args_dict = {"raw_input": args}
-    elif isinstance(args, dict):
-        args_dict = args
-    else:
-        args_dict = {}
-
-    call_id = item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-    return {
-        "id": call_id,
-        "name": name,
-        "arguments": args_dict,
-    }
-
-
-def _try_parse_tool_call_json(
-    raw_str: str,
-    allowed_tools: Optional[List[str]] = None,
-) -> Optional[List[Dict[str, Any]]]:
-    """Attempt to parse a raw string as tool_calls JSON structure."""
-    if not raw_str or not raw_str.strip():
-        return None
-
-    try:
-        data = json.loads(raw_str)
-    except Exception:
-        return None
-
-    tool_calls: List[Dict[str, Any]] = []
-
-    if isinstance(data, dict):
-        if "tool_calls" in data and isinstance(data["tool_calls"], list):
-            for tc in data["tool_calls"]:
-                item = _normalize_tool_call_item(tc, allowed_tools)
-                if item:
-                    tool_calls.append(item)
-        elif "name" in data and ("arguments" in data or "parameters" in data or "input" in data):
-            item = _normalize_tool_call_item(data, allowed_tools)
-            if item:
-                tool_calls.append(item)
-        elif "function" in data and isinstance(data["function"], dict):
-            item = _normalize_tool_call_item(data["function"], allowed_tools)
-            if item:
-                tool_calls.append(item)
-
-    elif isinstance(data, list):
-        for tc in data:
-            item = _normalize_tool_call_item(tc, allowed_tools)
-            if item:
-                tool_calls.append(item)
-
-    return tool_calls if tool_calls else None
-
-
-def parse_tool_calls_from_response(
-    output_text: str,
-    allowed_tools: Optional[List[str]] = None,
-) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
-    """Parse model output text to extract tool calls if present.
-
-    Returns:
-        (text_content, tool_calls_list)
-    """
-    if not output_text or not output_text.strip():
-        return output_text, None
-
-    text = output_text.strip()
-
-    # 1. Regex search for ```json ... ``` or ``` ... ```
-    code_block_matches = list(re.finditer(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE))
-    for match in code_block_matches:
-        candidate = match.group(1).strip()
-        parsed = _try_parse_tool_call_json(candidate, allowed_tools)
-        if parsed:
-            prefix = text[:match.start()].strip()
-            suffix = text[match.end():].strip()
-            remaining_text = f"{prefix}\n{suffix}".strip() if (prefix or suffix) else None
-            return remaining_text, parsed
-
-    # 2. Search for XML style <tool_call>...</tool_call> or <function_call>...</function_call>
-    xml_matches = list(re.finditer(r"<(?:tool_call|function_call)>\s*([\s\S]*?)\s*</(?:tool_call|function_call)>", text, re.IGNORECASE))
-    if xml_matches:
-        all_parsed: List[Dict[str, Any]] = []
-        for match in xml_matches:
-            candidate = match.group(1).strip()
-            parsed = _try_parse_tool_call_json(candidate, allowed_tools)
-            if parsed:
-                all_parsed.extend(parsed)
-        if all_parsed:
-            clean_text = re.sub(r"<(?:tool_call|function_call)>[\s\S]*?</(?:tool_call|function_call)>", "", text, flags=re.IGNORECASE).strip()
-            return clean_text or None, all_parsed
-
-    # 3. Direct JSON parse on whole text
-    parsed = _try_parse_tool_call_json(text, allowed_tools)
-    if parsed:
-        return None, parsed
-
-    # 4. Search for { ... } object containing tool_calls or function names
-    json_obj_matches = list(re.finditer(r"\{[\s\S]*\}", text))
-    for match in json_obj_matches:
-        candidate = match.group(0).strip()
-        parsed = _try_parse_tool_call_json(candidate, allowed_tools)
-        if parsed:
-            prefix = text[:match.start()].strip()
-            suffix = text[match.end():].strip()
-            remaining_text = f"{prefix}\n{suffix}".strip() if (prefix or suffix) else None
-            return remaining_text, parsed
-
-    return output_text, None
-
-
-def format_messages_to_prompt(
-    messages: List[Dict[str, Any]],
-    tools: Optional[List[Dict[str, Any]]] = None,
-    tool_choice: Optional[Any] = None,
-) -> str:
+def format_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     """Format OpenAI/Anthropic messages list into a prompt string for CLI tools."""
-    parts: List[str] = []
-
-    # Prepend tool descriptions and instructions if tools are provided
-    if tools:
-        tool_prompt = format_tools_to_system_prompt(tools, tool_choice=tool_choice)
-        if tool_prompt:
-            parts.append(tool_prompt)
-
     if not messages:
-        return "\n\n".join(parts)
+        return ""
 
-    if len(messages) == 1 and isinstance(messages[0], dict) and messages[0].get("role") == "user" and not tools:
+    if len(messages) == 1 and isinstance(messages[0], dict) and messages[0].get("role") == "user":
         content = messages[0].get("content") or ""
         if isinstance(content, str):
             return content
@@ -349,33 +129,18 @@ def format_messages_to_prompt(
                 if isinstance(c, dict) and c.get("type") == "text"
             )
 
+    parts: List[str] = []
     for msg in messages:
         if not isinstance(msg, dict):
             continue
         role = msg.get("role", "user")
         content = msg.get("content") or ""
-
-        # Parse content blocks (Anthropic / OpenAI rich content)
         if isinstance(content, list):
-            text_blocks: List[str] = []
-            for c in content:
-                if not isinstance(c, dict):
-                    continue
-                c_type = c.get("type")
-                if c_type == "text":
-                    text_blocks.append(c.get("text", ""))
-                elif c_type == "tool_use":
-                    # Anthropic assistant tool call block
-                    t_name = c.get("name", "")
-                    t_input = json.dumps(c.get("input", {}), ensure_ascii=False)
-                    text_blocks.append(f"[Tool Call: {t_name}({t_input})]")
-                elif c_type == "tool_result":
-                    # Anthropic user tool result block
-                    t_id = c.get("tool_use_id", "")
-                    t_content = c.get("content", "")
-                    is_err = " (ERROR)" if c.get("is_error") else ""
-                    text_blocks.append(f"[Tool Result ({t_id}){is_err}]:\n{t_content}")
-            content = "\n".join(text_blocks)
+            content = "\n".join(
+                c.get("text", "")
+                for c in content
+                if isinstance(c, dict) and c.get("type") == "text"
+            )
         elif not isinstance(content, str):
             content = str(content)
 
@@ -385,24 +150,10 @@ def format_messages_to_prompt(
             parts.append(f"[User]\n{content}")
         elif role == "assistant":
             tool_calls = msg.get("tool_calls")
-            tc_text = ""
-            if tool_calls and isinstance(tool_calls, list):
-                tc_items = []
-                for tc in tool_calls:
-                    if isinstance(tc, dict):
-                        fn = tc.get("function", {})
-                        fn_name = fn.get("name", "")
-                        fn_args = fn.get("arguments", "")
-                        tc_items.append(f"[Tool Call: {fn_name}({fn_args})]")
-                if tc_items:
-                    tc_text = "\n" + "\n".join(tc_items)
-            parts.append(f"[Assistant]\n{content}{tc_text}".strip())
+            tc_text = f"\nTool Calls: {json.dumps(tool_calls)}" if tool_calls else ""
+            parts.append(f"[Assistant]\n{content}{tc_text}")
         elif role == "tool":
-            tool_id = msg.get("tool_call_id") or msg.get("name") or "tool"
-            parts.append(f"[Tool Result ({tool_id})]\n{content}")
-        elif role == "function":
-            fn_name = msg.get("name") or "function"
-            parts.append(f"[Function Result ({fn_name})]\n{content}")
+            parts.append(f"[Tool Result]\n{content}")
         else:
             parts.append(f"[{str(role).capitalize()}]\n{content}")
 
@@ -617,7 +368,113 @@ def execute_cli_with_fallback(
     raise RuntimeError(f"All agy profile execution attempts failed. Details: {'; '.join(errors)}")
 
 
+def resolve_gemini_api_key(client_key: Optional[str] = None) -> str:
+    """Resolve Gemini / Google AI API key from client header, environment, or config files."""
+    if client_key and (client_key.startswith("AIza") or len(client_key) > 30):
+        return client_key
+
+    for env_var in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTIGRAVITY_BRIDGE_GEMINI_KEY"):
+        val = os.environ.get(env_var, "").strip()
+        if val:
+            return val
+
+    # Try reading ~/.hermes/.env if present
+    hermes_env_path = os.path.expanduser("~/.hermes/.env")
+    if os.path.exists(hermes_env_path):
+        try:
+            with open(hermes_env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY") and v:
+                        return v
+        except Exception:
+            pass
+
+    if client_key and client_key not in ("sk-antigravity", "local", "test"):
+        return client_key
+
+    raise RuntimeError(
+        "Gemini API key not found. Please set GEMINI_API_KEY or GOOGLE_API_KEY in environment or ~/.hermes/.env"
+    )
+
+
+def generate_image_with_imagen(
+    prompt: str,
+    model: str = "imagen-3.0-generate-002",
+    sample_count: int = 1,
+    aspect_ratio: str = "1:1",
+    output_mime_type: str = "image/jpeg",
+    api_key: Optional[str] = None,
+    timeout: float = 120.0,
+) -> List[Dict[str, Any]]:
+    """Call Google AI Imagen 3 REST API endpoint to generate images and return OpenAI format data list."""
+    if not api_key:
+        api_key = resolve_gemini_api_key()
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:predict"
+    payload = {
+        "instances": [
+            {"prompt": prompt}
+        ],
+        "parameters": {
+            "sampleCount": sample_count,
+            "aspectRatio": aspect_ratio,
+            "outputOptions": {
+                "mimeType": output_mime_type
+            }
+        }
+    }
+
+    req_bytes = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=req_bytes,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        method="POST"
+    )
+
+    logger.info("Calling Google Imagen 3 API (model=%s, aspect_ratio=%s, count=%d)...", model, aspect_ratio, sample_count)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp_body = resp.read().decode("utf-8")
+            data = json.loads(resp_body)
+    except urllib.error.HTTPError as exc:
+        err_msg = exc.read().decode("utf-8", errors="replace")
+        logger.error("Google Imagen API HTTPError %d: %s", exc.code, err_msg)
+        raise RuntimeError(f"Google Imagen API Error ({exc.code}): {err_msg}")
+    except Exception as exc:
+        logger.error("Failed to connect to Google Imagen API: %s", exc)
+        raise RuntimeError(f"Failed to connect to Google Imagen API: {exc}")
+
+    predictions = data.get("predictions", [])
+    if not predictions:
+        raise RuntimeError("Google Imagen API returned no image predictions")
+
+    results: List[Dict[str, Any]] = []
+    for pred in predictions:
+        b64_img = pred.get("bytesBase64Encoded")
+        if b64_img:
+            results.append({
+                "b64_json": b64_img,
+                "revised_prompt": prompt,
+            })
+
+    if not results:
+        raise RuntimeError("No valid base64 image data found in Google Imagen response")
+
+    return results
+
+
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+
     """Multi-threaded HTTP server for handling concurrent API calls."""
     daemon_threads = True
     allow_reuse_address = True
@@ -641,7 +498,6 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Headers", "*")
         self.end_headers()
         self.wfile.write(body)
-        self.wfile.flush()
 
     def _send_cors_headers(self) -> None:
         self.send_response(204)
@@ -700,8 +556,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             path = self.path.split("?")[0].rstrip("/")
             is_anthropic = path in ("/v1/messages", "/messages")
             is_openai = path in ("/v1/chat/completions", "/chat/completions")
+            is_image_gen = path in ("/v1/images/generations", "/images/generations")
 
-            if not (is_openai or is_anthropic):
+            if not (is_openai or is_anthropic or is_image_gen):
                 self._send_json_response({"error": "Not Found"}, status_code=404)
                 return
 
@@ -739,6 +596,68 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            # --- Handle Image Generation format (/v1/images/generations) ---
+            if is_image_gen:
+                prompt = req_json.get("prompt")
+                if not prompt or not isinstance(prompt, str) or not prompt.strip():
+                    self._send_json_response(
+                        {"error": {"message": "'prompt' field is required and must be a non-empty string", "type": "invalid_request_error"}},
+                        status_code=400,
+                    )
+                    return
+
+                raw_model = (req_json.get("model") or "imagen-3.0-generate-002").strip()
+                if raw_model in ("imagen-3", "imagen"):
+                    img_model = "imagen-3.0-generate-002"
+                elif raw_model in SUPPORTED_MODELS and raw_model.startswith("imagen-"):
+                    img_model = raw_model
+                else:
+                    img_model = raw_model
+
+                try:
+                    n = max(1, min(int(req_json.get("n", 1)), 4))
+                except (ValueError, TypeError):
+                    n = 1
+
+                size = req_json.get("size")
+                aspect_ratio = req_json.get("aspect_ratio")
+                if not aspect_ratio and size:
+                    aspect_ratio = IMAGE_SIZE_TO_ASPECT_RATIO.get(str(size), "1:1")
+                if not aspect_ratio:
+                    aspect_ratio = "1:1"
+
+                output_mime = req_json.get("output_mime_type") or "image/jpeg"
+                if output_mime not in ("image/jpeg", "image/png"):
+                    output_mime = "image/jpeg"
+
+                auth_header = self.headers.get("Authorization", "")
+                auth_token = ""
+                if auth_header.startswith("Bearer "):
+                    auth_token = auth_header[7:].strip()
+
+                try:
+                    resolved_key = resolve_gemini_api_key(client_key=auth_token)
+                    image_results = generate_image_with_imagen(
+                        prompt=prompt.strip(),
+                        model=img_model,
+                        sample_count=n,
+                        aspect_ratio=aspect_ratio,
+                        output_mime_type=output_mime,
+                        api_key=resolved_key,
+                    )
+                    self._send_json_response({
+                        "created": int(time.time()),
+                        "data": image_results,
+                    })
+                    return
+                except Exception as exc:
+                    logger.error("Image generation failed: %s", exc)
+                    self._send_json_response(
+                        {"error": {"message": str(exc), "type": "api_error"}},
+                        status_code=500,
+                    )
+                    return
+
             messages = req_json.get("messages", [])
             if not isinstance(messages, list):
                 self._send_json_response(
@@ -747,10 +666,6 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            tools = req_json.get("tools")
-            functions = req_json.get("functions")
-            tool_choice = req_json.get("tool_choice")
-            normalized_tools = normalize_tools(tools=tools, functions=functions)
 
             # Handle Anthropic system prompt format
             system_prompt = req_json.get("system")
@@ -765,11 +680,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             model = req_json.get("model") or "antigravity"
             stream = req_json.get("stream", False)
 
-            prompt_text = format_messages_to_prompt(
-                messages,
-                tools=normalized_tools if normalized_tools else None,
-                tool_choice=tool_choice,
-            )
+            prompt_text = format_messages_to_prompt(messages)
             cli_bin, cmd_tpl = detect_cli_command()
             custom_tpl = getattr(self.server, "custom_cmd", None) or cmd_tpl
             configured_profiles = getattr(self.server, "profiles", None)
@@ -789,102 +700,32 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
             created_ts = int(time.time())
 
-            # Parse tool calls if tools were provided or output format matches tool call schema
-            allowed_tool_names = [t["name"] for t in normalized_tools if t.get("name")] if normalized_tools else None
-            content_text, parsed_tool_calls = parse_tool_calls_from_response(
-                output_text,
-                allowed_tools=allowed_tool_names if normalized_tools else None,
-            )
-
             # --- Handle Anthropic API format (/v1/messages) ---
             if is_anthropic:
-                msg_id = f"msg_{uuid.uuid4().hex}"
-
-                if parsed_tool_calls:
-                    anthropic_content: List[Dict[str, Any]] = []
-                    if content_text:
-                        anthropic_content.append({"type": "text", "text": content_text})
-                    for tc in parsed_tool_calls:
-                        tc_id = tc["id"]
-                        if not tc_id.startswith("toolu_"):
-                            tc_id = f"toolu_{uuid.uuid4().hex}"
-                        anthropic_content.append({
-                            "type": "tool_use",
-                            "id": tc_id,
-                            "name": tc["name"],
-                            "input": tc["arguments"],
-                        })
-                    stop_reason = "tool_use"
-                else:
-                    anthropic_content = [{"type": "text", "text": output_text}]
-                    stop_reason = "end_turn"
-
+                msg_id = f"msg-{uuid.uuid4().hex[:8]}"
                 if stream:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Connection", "close")
+                    self.send_header("Connection", "keep-alive")
                     if getattr(self.server, "enable_cors", False):
                         self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
 
-                    events: List[Tuple[str, Dict[str, Any]]] = [
-                        ("message_start", {
-                            "type": "message_start",
-                            "message": {
-                                "id": msg_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "model": model,
-                                "content": [],
-                                "stop_reason": None,
-                                "stop_sequence": None,
-                                "usage": {"input_tokens": len(prompt_text) // 4, "output_tokens": 1},
-                            },
-                        }),
-                    ]
-
-                    block_idx = 0
-                    if content_text:
-                        events.extend([
-                            ("content_block_start", {"type": "content_block_start", "index": block_idx, "content_block": {"type": "text", "text": ""}}),
-                            ("content_block_delta", {"type": "content_block_delta", "index": block_idx, "delta": {"type": "text_delta", "text": content_text}}),
-                            ("content_block_stop", {"type": "content_block_stop", "index": block_idx}),
-                        ])
-                        block_idx += 1
-                    elif not parsed_tool_calls:
-                        events.extend([
-                            ("content_block_start", {"type": "content_block_start", "index": block_idx, "content_block": {"type": "text", "text": ""}}),
-                            ("content_block_delta", {"type": "content_block_delta", "index": block_idx, "delta": {"type": "text_delta", "text": output_text}}),
-                            ("content_block_stop", {"type": "content_block_stop", "index": block_idx}),
-                        ])
-                        block_idx += 1
-
-                    if parsed_tool_calls:
-                        for tc in parsed_tool_calls:
-                            tc_id = tc["id"]
-                            if not tc_id.startswith("toolu_"):
-                                tc_id = f"toolu_{uuid.uuid4().hex}"
-                            events.extend([
-                                ("content_block_start", {"type": "content_block_start", "index": block_idx, "content_block": {"type": "tool_use", "id": tc_id, "name": tc["name"], "input": {}}}),
-                                ("content_block_delta", {"type": "content_block_delta", "index": block_idx, "delta": {"type": "input_json_delta", "partial_json": json.dumps(tc["arguments"], ensure_ascii=False)}}),
-                                ("content_block_stop", {"type": "content_block_stop", "index": block_idx}),
-                            ])
-                            block_idx += 1
-
-                    events.extend([
-                        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": len(output_text) // 4}}),
+                    events = [
+                        ("message_start", {"type": "message_start", "message": {"id": msg_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": len(prompt_text) // 4, "output_tokens": 1}}}),
+                        ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                        ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": output_text}}),
+                        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": len(output_text) // 4}}),
                         ("message_stop", {"type": "message_stop"}),
-                    ])
-
+                    ]
                     try:
                         for event_name, data in events:
                             self.wfile.write(f"event: {event_name}\ndata: {json.dumps(data)}\n\n".encode("utf-8"))
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         logger.warning("Client disconnected during Anthropic SSE stream")
-                    finally:
-                        self.close_connection = True
                     return
 
                 response_payload = {
@@ -892,8 +733,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     "type": "message",
                     "role": "assistant",
                     "model": model,
-                    "content": anthropic_content,
-                    "stop_reason": stop_reason,
+                    "content": [{"type": "text", "text": output_text}],
+                    "stop_reason": "end_turn",
                     "stop_sequence": None,
                     "usage": {"input_tokens": len(prompt_text) // 4, "output_tokens": len(output_text) // 4},
                 }
@@ -903,76 +744,28 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             # --- Handle OpenAI API format (/v1/chat/completions) ---
             completion_id = f"chatcmpl-ag-{uuid.uuid4().hex[:8]}"
 
-            if parsed_tool_calls:
-                openai_tool_calls = [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": json.dumps(tc["arguments"], ensure_ascii=False),
-                        },
-                    }
-                    for tc in parsed_tool_calls
-                ]
-                finish_reason = "tool_calls"
-            else:
-                openai_tool_calls = None
-                finish_reason = "stop"
-
             if stream:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
+                self.send_header("Connection", "keep-alive")
                 if getattr(self.server, "enable_cors", False):
                     self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
 
-                if parsed_tool_calls:
-                    chunk_start = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_ts,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {
-                                    "role": "assistant",
-                                    "content": content_text,
-                                    "tool_calls": [
-                                        {
-                                            "index": idx,
-                                            "id": tc["id"],
-                                            "type": "function",
-                                            "function": {
-                                                "name": tc["name"],
-                                                "arguments": json.dumps(tc["arguments"], ensure_ascii=False),
-                                            },
-                                        }
-                                        for idx, tc in enumerate(parsed_tool_calls)
-                                    ],
-                                },
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                else:
-                    chunk_start = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_ts,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"role": "assistant", "content": output_text},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-
+                chunk_start = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": output_text},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
                 chunk_stop = {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
@@ -982,7 +775,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         {
                             "index": 0,
                             "delta": {},
-                            "finish_reason": finish_reason,
+                            "finish_reason": "stop",
                         }
                     ],
                 }
@@ -993,18 +786,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     logger.warning("Client disconnected during OpenAI SSE stream")
-                finally:
-                    self.close_connection = True
                 return
 
             # Standard OpenAI non-streaming response
-            message_obj: Dict[str, Any] = {
-                "role": "assistant",
-                "content": content_text if parsed_tool_calls else output_text,
-            }
-            if openai_tool_calls:
-                message_obj["tool_calls"] = openai_tool_calls
-
             response_payload = {
                 "id": completion_id,
                 "object": "chat.completion",
@@ -1013,8 +797,11 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 "choices": [
                     {
                         "index": 0,
-                        "message": message_obj,
-                        "finish_reason": finish_reason,
+                        "message": {
+                            "role": "assistant",
+                            "content": output_text,
+                        },
+                        "finish_reason": "stop",
                     }
                 ],
                 "usage": {

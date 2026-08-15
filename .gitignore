@@ -4,5 +4,3 @@ __pycache__/
 *.log
 .venv/
 venv/
-scatch/
-scratch/

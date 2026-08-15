@@ -6,11 +6,9 @@ Standalone OpenAI-compatible REST API Bridge Server for `antigravity` / `agy` CL
 This standalone service acts as a local OpenAI REST API server (`http://127.0.0.1:8000/v1`) that translates standard OpenAI `/v1/chat/completions` API calls into local CLI execution (`antigravity` / `agy`).
 
 ### Features
-- **Dual API Format**: OpenAI (`/v1/chat/completions`) + Anthropic (`/v1/messages`).
-- **Tool Calling & Function Calling**: Full support for OpenAI `tools` / `functions` and Anthropic `tools` parameter, parsing tool calls automatically.
+- **OpenAI Compatible**: Implements `/v1/chat/completions`, `/v1/models`, and `/health`.
 - **Multi-Profile Fallback**: Automatically discovers and rotates through `agy` login profiles (`~/.config/antigravity/profiles/`) when quota or rate limits occur.
 - **Model & Reasoning Effort Support**: Exposes Gemini models and maps reasoning effort flags (`--model`, `--effort`) automatically.
-- **Streaming Support**: Real-time SSE streams (`text/event-stream`) for both OpenAI chunks and Anthropic events including tool calling deltas.
 - **Headless Non-Interactive Mode**: Uses `--dangerously-skip-permissions` to allow tool execution without TUI prompts.
 - **Zero External Dependencies**: Built entirely on Python standard library (`http.server`, `subprocess`).
 
@@ -32,6 +30,28 @@ This standalone service acts as a local OpenAI REST API server (`http://127.0.0.
 | `claude-sonnet-4.6-thinking` | `--model claude-sonnet-4.6` | Claude Sonnet 4.6 (Thinking) |
 | `claude-opus-4.6-thinking` | `--model claude-opus-4.6` | Claude Opus 4.6 (Thinking) |
 | `gpt-oss-120b-medium` | `--model gpt-oss-120b --effort medium` | GPT-OSS 120B (Medium Reasoning) |
+| `imagen-3.0-generate-002` | Imagen 3 API | Google Imagen 3 Image Generation (`/v1/images/generations`) |
+| `imagen-3.0-fast-generate-001` | Imagen 3 Fast API | Google Imagen 3 Fast Image Generation (`/v1/images/generations`) |
+
+---
+
+## Image Generation (`/v1/images/generations`)
+
+The bridge server supports standard OpenAI Image Generation API format backed by Google Imagen 3:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{
+    "model": "imagen-3.0-generate-002",
+    "prompt": "A futuristic cybernetic city at night with neon lights",
+    "size": "1024x1024",
+    "n": 1
+  }'
+```
+*Note: Ensure `GEMINI_API_KEY` or `GOOGLE_API_KEY` is exported in your environment or present in `~/.hermes/.env`.*
+
 
 ---
 
@@ -138,62 +158,3 @@ pm2 save
 ```bash
 nohup python3 antigravity_bridge.py --port 8000 > bridge.log 2>&1 &
 ```
-
----
-
-## Tool Calling / Function Calling Examples
-
-### 1. OpenAI Python SDK Example
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="sk-antigravity")
-
-response = client.chat.completions.create(
-    model="gemini-3.6-flash-high",
-    messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
-    tools=[
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get current weather for a city",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {"type": "string", "description": "City name"}
-                    },
-                    "required": ["location"],
-                },
-            },
-        }
-    ],
-    tool_choice="auto",
-)
-
-if response.choices[0].finish_reason == "tool_calls":
-    for tool_call in response.choices[0].message.tool_calls:
-        print(f"Function called: {tool_call.function.name}")
-        print(f"Arguments: {tool_call.function.arguments}")
-```
-
-### 2. cURL Example
-```bash
-curl -X POST http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemini-3.6-flash-high",
-    "messages": [{"role": "user", "content": "Check weather in Tokyo"}],
-    "tools": [{
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "parameters": {
-          "type": "object",
-          "properties": {"location": {"type": "string"}}
-        }
-      }
-    }]
-  }'
-```
-
