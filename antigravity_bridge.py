@@ -77,16 +77,16 @@ def detect_cli_command() -> Tuple[str, str]:
     # 1. Search PATH (works on Linux, macOS, and Windows)
     agy_path = shutil.which("agy")
     if agy_path:
-        return ("agy", f'"{agy_path}" --dangerously-skip-permissions -p "{{prompt}}"')
+        return ("agy", f'"{agy_path}" --dangerously-skip-permissions')
 
     # 2. Check ~/.local/bin/agy (Linux/macOS) or Windows %USERPROFILE%\\.local\\bin\\agy.exe
     home = os.path.expanduser("~")
     local_bin = os.path.join(home, ".local", "bin", "agy.exe" if os.name == "nt" else "agy")
     if os.path.exists(local_bin) and os.access(local_bin, os.X_OK if os.name != "nt" else os.F_OK):
-        return ("agy", f'"{local_bin}" --dangerously-skip-permissions -p "{{prompt}}"')
+        return ("agy", f'"{local_bin}" --dangerously-skip-permissions')
 
     # Fallback to standard agy command name
-    return ("agy", 'agy --dangerously-skip-permissions -p "{prompt}"')
+    return ("agy", 'agy --dangerously-skip-permissions')
 
 
 def normalize_tools(
@@ -641,6 +641,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Headers", "*")
         self.end_headers()
         self.wfile.write(body)
+        self.wfile.flush()
 
     def _send_cors_headers(self) -> None:
         self.send_response(204)
@@ -797,7 +798,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
             # --- Handle Anthropic API format (/v1/messages) ---
             if is_anthropic:
-                msg_id = f"msg-{uuid.uuid4().hex[:8]}"
+                msg_id = f"msg_{uuid.uuid4().hex}"
 
                 if parsed_tool_calls:
                     anthropic_content: List[Dict[str, Any]] = []
@@ -806,7 +807,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     for tc in parsed_tool_calls:
                         tc_id = tc["id"]
                         if not tc_id.startswith("toolu_"):
-                            tc_id = f"toolu_{tc_id.replace('call_', '')}"
+                            tc_id = f"toolu_{uuid.uuid4().hex}"
                         anthropic_content.append({
                             "type": "tool_use",
                             "id": tc_id,
