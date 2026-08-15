@@ -384,10 +384,10 @@ def resolve_gemini_api_key(client_key: Optional[str] = None) -> Optional[str]:
     if client_key and (client_key.startswith("AIza") or len(client_key) > 30):
         return client_key
 
-    for env_name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "IMAGEN_API_KEY", "ANTIGRAVITY_BRIDGE_GEMINI_KEY"):
-        val = os.environ.get(env_name, "").strip()
-        if val and (val.startswith("AIza") or len(val) > 30):
-            return val
+    allowed_keys = {"GEMINI_API_KEY", "GOOGLE_API_KEY", "IMAGEN_API_KEY", "ANTIGRAVITY_BRIDGE_GEMINI_KEY"}
+    for env_k, env_v in os.environ.items():
+        if env_k.upper() in allowed_keys and (env_v.strip().startswith("AIza") or len(env_v.strip()) > 30):
+            return env_v.strip()
 
     # Search common .env locations
     for env_file in (
@@ -405,9 +405,9 @@ def resolve_gemini_api_key(client_key: Optional[str] = None) -> Optional[str]:
                         if line.startswith("#") or "=" not in line:
                             continue
                         k, v = line.split("=", 1)
-                        k = k.strip()
+                        k = k.strip().upper()
                         v = v.strip().strip("'\"")
-                        if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "IMAGEN_API_KEY") and (v.startswith("AIza") or len(v) > 30):
+                        if k in allowed_keys and (v.startswith("AIza") or len(v) > 30):
                             return v
             except Exception:
                 pass
