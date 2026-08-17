@@ -4,3 +4,9 @@ __pycache__/
 *.log
 .venv/
 venv/
+scatch/
+scratch/
+*auth*.json
+*.png
+*.jpg
+*.jpeg

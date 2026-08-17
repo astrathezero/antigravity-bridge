@@ -7,7 +7,7 @@
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0%20external-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Standalone OpenAI & Anthropic compatible REST API Bridge Server for `antigravity` / `agy` CLI with Google Imagen 3 image generation support.
+Standalone OpenAI & Anthropic compatible REST API Bridge Server for `antigravity` / `agy` CLI with Smart Profile Switching and Image Generation support.
 
 ---
 
@@ -16,12 +16,14 @@ Standalone OpenAI & Anthropic compatible REST API Bridge Server for `antigravity
 - [Overview](#-overview)
 - [Key Features](#-key-features)
 - [Supported Models Matrix](#-supported-models-matrix)
+- [Profile Management Endpoints](#-profile-management-endpoints)
 - [API Endpoints Reference](#-api-endpoints-reference)
   - [1. Health Check (`GET /health`)](#1-health-check-get-health)
   - [2. List Models (`GET /v1/models`)](#2-list-models-get-v1models)
   - [3. OpenAI Chat Completions (`POST /v1/chat/completions`)](#3-openai-chat-completions-post-v1chatcompletions)
   - [4. Anthropic Messages (`POST /v1/messages`)](#4-anthropic-messages-post-v1messages)
   - [5. Image Generation (`POST /v1/images/generations`)](#5-image-generation-post-v1imagesgenerations)
+  - [6. Profile Management (`GET /v1/profiles`, `POST /v1/profiles/reset`, `POST /v1/profiles/check`)](#-profile-management-endpoints)
 - [Hermes Agent Integration (`config.yaml`)](#-hermes-agent-integration-configyaml)
 - [Client SDK Examples](#-client-sdk-examples)
   - [Python (OpenAI SDK)](#python-openai-sdk)
@@ -41,19 +43,35 @@ Standalone OpenAI & Anthropic compatible REST API Bridge Server for `antigravity
 
 The **Antigravity Bridge Server** bridges external AI clients (e.g. **Hermes Agent**, **OpenAI SDK**, **Anthropic SDK**, **LangChain**, **LlamaIndex**, webhooks, bots) to your local `antigravity` / `agy` CLI environment.
 
-It exposes standard REST endpoints locally (`http://127.0.0.1:8000/v1`), seamlessly converting HTTP requests into headless `agy` CLI executions and Imagen 3 generation calls while providing automatic multi-profile rotation to bypass quota and rate limits.
+It exposes standard REST endpoints locally (`http://127.0.0.1:8000/v1`), seamlessly converting HTTP requests into headless `agy` CLI executions while providing automatic multi-profile rotation and circuit breaking to bypass quota and rate limits.
 
 ---
 
 ## ✨ Key Features
 
 - 🔄 **Dual Format Compatibility**: Full support for both **OpenAI** (`/v1/chat/completions`) and **Anthropic** (`/v1/messages`) API specifications.
-- 🎨 **Google Imagen 3 Image Generation**: Built-in `/v1/images/generations` endpoint powered by Google AI Studio Free API Key (`imagen-3.0-generate-002`), returning Base64 image data in 2-3 seconds.
+- 🛠️ **Tool Calling & Function Calling**: Full support for OpenAI `tools` / `functions` and Anthropic `tools` parameter, parsing tool calls automatically.
 - ⚡ **Real-Time SSE Streaming**: Supports Server-Sent Events (`text/event-stream`) for both OpenAI and Anthropic streaming consumers.
-- 🔀 **Multi-Profile Fallback & Rotation**: Automatically detects all `agy` profiles in `~/.config/antigravity/profiles/` and rotates on rate limits or quota depletion.
+- 🔀 **Smart Profile Manager & Automatic Quota Fallback**:
+  - Automatically discovers and dynamically rotates through `agy` profiles (`~/.config/antigravity/profiles/`).
+  - Detects `429 Too Many Requests`, `RESOURCE_EXHAUSTED`, and quota errors instantly.
+  - Automatically enters cooldown for exhausted profiles and immediately routes incoming requests to available/healthy profiles (e.g. `attasitgits`).
+  - Preserves quota health states across restarts via `~/.config/antigravity/quota_cache.json`.
+- 🎨 **Image Generation Support**: Built-in `/v1/images/generations` and image model routing.
 - 🧠 **Dynamic Reasoning Effort**: Maps model IDs to `--model` and `--effort` CLI parameters (`high`, `medium`, `low`) automatically.
 - 🛡️ **Zero External Dependencies**: Built entirely with Python 3 standard library (`http.server`, `urllib.request`, `subprocess`). No `pip install` required!
 - 🔒 **Security Hardening**: Built-in API Key authorization support, payload size limits (32MB), CLI argument sanitization, and environment isolation.
+
+---
+
+## 👥 Profile Management Endpoints
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/health` | `GET` | Server health, active healthy profile, and profile quota status summary |
+| `/v1/profiles` | `GET` | List all profiles with availability, cooldown remaining, and success counts |
+| `/v1/profiles/reset` | `POST` | Reset cooldowns (`{"profile": "optional_name"}`) |
+| `/v1/profiles/check` | `POST` | Run active lightweight health probes across all profiles |
 
 ---
 

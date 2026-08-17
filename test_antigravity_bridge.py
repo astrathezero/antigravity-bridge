@@ -21,6 +21,13 @@ execute_cli_command = antigravity_bridge.execute_cli_command
 execute_cli_with_fallback = antigravity_bridge.execute_cli_with_fallback
 format_messages_to_prompt = antigravity_bridge.format_messages_to_prompt
 get_available_profiles = antigravity_bridge.get_available_profiles
+normalize_tools = antigravity_bridge.normalize_tools
+format_tools_to_system_prompt = antigravity_bridge.format_tools_to_system_prompt
+parse_tool_calls_from_response = antigravity_bridge.parse_tool_calls_from_response
+ProfileManager = antigravity_bridge.ProfileManager
+is_quota_or_rate_limit_error = antigravity_bridge.is_quota_or_rate_limit_error
+probe_profile = antigravity_bridge.probe_profile
+resolve_model_flags = antigravity_bridge.resolve_model_flags
 
 
 class TestAntigravityBridge(unittest.TestCase):
@@ -58,19 +65,118 @@ class TestAntigravityBridge(unittest.TestCase):
         _, kwargs = mock_popen.call_args
         self.assertEqual(kwargs.get("env", {}).get("ANTIGRAVITY_PROFILE"), "astrathezero")
 
-    def test_execute_cli_with_fallback_profile(self):
-        """Test profile fallback when first profile fails and second succeeds."""
-        def side_effect(cmd, prompt, timeout=180.0, profile=None, **kwargs):
-            if profile == "p1":
-                raise RuntimeError("Rate limit on p1")
-            if profile == "p2":
-                return "Output from p2"
-            raise RuntimeError("Unknown profile")
+    def test_is_quota_or_rate_limit_error(self):
+        """Test detecting quota exhaustion and rate limit error patterns."""
+        self.assertTrue(is_quota_or_rate_limit_error("Error 429: Too Many Requests"))
+        self.assertTrue(is_quota_or_rate_limit_error("RESOURCE_EXHAUSTED: Quota exceeded for model"))
+        self.assertTrue(is_quota_or_rate_limit_error("insufficient_quota on user account"))
+        self.assertTrue(is_quota_or_rate_limit_error("Rate limit reached for profile astrathezero"))
+        self.assertTrue(is_quota_or_rate_limit_error("You have exceeded your current quota"))
+        self.assertTrue(is_quota_or_rate_limit_error("out of credits"))
+        self.assertTrue(is_quota_or_rate_limit_error("model overloaded"))
+        self.assertTrue(is_quota_or_rate_limit_error("503 Service Unavailable"))
+        self.assertFalse(is_quota_or_rate_limit_error("SyntaxError: invalid syntax"))
+        self.assertFalse(is_quota_or_rate_limit_error("FileNotFoundError: file not found"))
 
-        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=side_effect):
-            output, used_profile = execute_cli_with_fallback('echo "{prompt}"', "test", profiles=["p1", "p2"])
-            self.assertEqual(output, "Output from p2")
-            self.assertEqual(used_profile, "p2")
+    def test_profile_manager_lifecycle_and_cache(self):
+        """Test ProfileManager cooldown tracking and cache persistence."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+
+        try:
+            pm = ProfileManager(profiles=["p1", "p2", "p3"], cache_file=cache_file, default_cooldown=100.0)
+            self.assertFalse(pm.is_in_cooldown("p1"))
+
+            # Mark p1 exhausted
+            pm.mark_exhausted("p1", "Rate limit 429")
+            self.assertTrue(pm.is_in_cooldown("p1"))
+            self.assertFalse(pm.is_in_cooldown("p2"))
+
+            # Mark p2 success
+            pm.mark_success("p2")
+            self.assertEqual(pm.state["p2"]["status"], "OK")
+            self.assertEqual(pm.state["p2"]["success_count"], 1)
+
+            # Check cache saved and can be reloaded
+            pm2 = ProfileManager(profiles=["p1", "p2", "p3"], cache_file=cache_file)
+            self.assertTrue(pm2.is_in_cooldown("p1"))
+            self.assertEqual(pm2.state["p2"]["success_count"], 1)
+
+            # Reset p1
+            pm2.reset_all("p1")
+            self.assertFalse(pm2.is_in_cooldown("p1"))
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
+    def test_smart_profile_ordering_and_rotation(self):
+        """Test that healthy profiles come first and exhausted profiles are placed last."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+        try:
+            pm = ProfileManager(profiles=["astrathezero", "mrsermshop", "attasitgits"], cache_file=cache_file)
+            pm.mark_exhausted("astrathezero", "429 Quota Exceeded")
+            pm.mark_exhausted("mrsermshop", "ResourceExhausted")
+
+            # Ready profiles must put attasitgits at the very front!
+            ordered = pm.get_ordered_profiles()
+            self.assertEqual(ordered[0], "attasitgits")
+            self.assertIn("astrathezero", ordered)
+            self.assertIn("mrsermshop", ordered)
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
+    def test_execute_cli_with_smart_fallback(self):
+        """Test that execute_cli_with_fallback immediately routes to healthy profile."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+        try:
+            pm = ProfileManager(profiles=["astrathezero", "mrsermshop", "attasitgits"], cache_file=cache_file)
+            attempts = []
+
+            def side_effect(cmd, prompt, timeout=60.0, profile=None, **kwargs):
+                attempts.append(profile)
+                if profile in ("astrathezero", "mrsermshop"):
+                    raise RuntimeError(f"RESOURCE_EXHAUSTED on {profile}")
+                if profile == "attasitgits":
+                    return "Output from attasitgits"
+                raise RuntimeError(f"Unknown profile {profile}")
+
+            with patch.object(antigravity_bridge, "execute_cli_command", side_effect=side_effect):
+                # 1. First call: astrathezero and mrsermshop fail with quota error, attasitgits succeeds
+                output1, used_profile1 = execute_cli_with_fallback('echo "{prompt}"', "test", profile_manager=pm)
+                self.assertEqual(output1, "Output from attasitgits")
+                self.assertEqual(used_profile1, "attasitgits")
+                self.assertEqual(attempts, ["astrathezero", "mrsermshop", "attasitgits"])
+
+                # 2. Second call: astrathezero and mrsermshop are now IN COOLDOWN!
+                # It must execute attasitgits directly without trying astrathezero or mrsermshop first!
+                attempts.clear()
+                output2, used_profile2 = execute_cli_with_fallback('echo "{prompt}"', "test", profile_manager=pm)
+                self.assertEqual(output2, "Output from attasitgits")
+                self.assertEqual(used_profile2, "attasitgits")
+                self.assertEqual(attempts, ["attasitgits"])
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
+    def test_resolve_model_flags(self):
+        """Test model flag mapping with reasoning effort defaults."""
+        flags_37 = resolve_model_flags("gemini-3.7-flash")
+        self.assertEqual(flags_37, ["--model", "gemini-3.7-flash", "--effort", "high"])
+
+        flags_37_low = resolve_model_flags("gemini-3.7-flash-low")
+        self.assertEqual(flags_37_low, ["--model", "gemini-3.7-flash", "--effort", "low"])
+
+        flags_31_pro = resolve_model_flags("gemini-3.1-pro")
+        self.assertEqual(flags_31_pro, ["--model", "gemini-3.1-pro", "--effort", "high"])
+
+        flags_claude = resolve_model_flags("claude-sonnet-4.6-thinking")
+        self.assertEqual(flags_claude, ["--model", "claude-sonnet-4.6"])
 
     def test_server_http_endpoints(self):
         """Test HTTP server endpoints /health, /v1/models, /v1/chat/completions, /v1/messages."""
@@ -131,33 +237,67 @@ class TestAntigravityBridge(unittest.TestCase):
                     self.assertEqual(resp_json["type"], "message")
                     self.assertEqual(resp_json["content"][0]["text"], "Anthropic Bridge response")
 
-            # 5. Test /v1/images/generations POST (OpenAI Image Gen format - Tier 1 Direct)
-            image_url = f"http://127.0.0.1:{port}/v1/images/generations"
-            img_req_data = json.dumps({
-                "model": "imagen-3.0-generate-002",
-                "prompt": "A cute robot cat",
-                "size": "1024x1024",
-                "n": 1,
+            # 5. Test /v1/chat/completions with Image Model (gemini-3.1-flash-image)
+            image_chat_req = json.dumps({
+                "model": "gemini-3.1-flash-image",
+                "messages": [{"role": "user", "content": "Draw a cute puppy"}],
             }).encode("utf-8")
 
-            fake_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-            with patch.object(antigravity_bridge, "generate_image_with_imagen", return_value=[{"b64_json": fake_b64, "revised_prompt": "A cute robot cat"}]), \
-                 patch.object(antigravity_bridge, "resolve_gemini_api_key", return_value="AIzaFakeKey"):
-                req = urllib.request.Request(image_url, data=img_req_data, headers={"Content-Type": "application/json"})
+            dummy_img_md = "\n![image](data:image/jpeg;base64,dummy_puppy_b64)"
+            with patch.object(antigravity_bridge, "generate_image_via_router", return_value=(dummy_img_md, "dummy_puppy_b64")):
+                req = urllib.request.Request(chat_url, data=image_chat_req, headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req) as resp:
                     resp_json = json.loads(resp.read().decode("utf-8"))
-                    self.assertIn("created", resp_json)
-                    self.assertEqual(len(resp_json["data"]), 1)
-                    self.assertEqual(resp_json["data"][0]["b64_json"], fake_b64)
-                    self.assertEqual(resp_json["data"][0]["revised_prompt"], "A cute robot cat")
+                    self.assertEqual(resp_json["object"], "chat.completion")
+                    self.assertEqual(resp_json["model"], "gemini-3.1-flash-image")
+                    content = resp_json["choices"][0]["message"]["content"]
+                    self.assertIn("![image](data:image/jpeg;base64,dummy_puppy_b64)", content)
 
-            # 6. Test /v1/images/generations POST (Tier 2 Fallback to agy CLI)
-            with patch.object(antigravity_bridge, "resolve_gemini_api_key", return_value=None), \
-                 patch.object(antigravity_bridge, "generate_image_with_agy", return_value=[{"b64_json": fake_b64, "revised_prompt": "A cute robot cat"}]):
-                req = urllib.request.Request(image_url, data=img_req_data, headers={"Content-Type": "application/json"})
+            # 6. Test /v1/messages with Image Model (Anthropic format)
+            image_msg_req = json.dumps({
+                "model": "gemini-3.1-flash-image",
+                "messages": [{"role": "user", "content": "Draw a cute puppy"}],
+            }).encode("utf-8")
+
+            with patch.object(antigravity_bridge, "generate_image_via_router", return_value=(dummy_img_md, "dummy_puppy_b64")):
+                req = urllib.request.Request(messages_url, data=image_msg_req, headers={"Content-Type": "application/json"})
                 with urllib.request.urlopen(req) as resp:
                     resp_json = json.loads(resp.read().decode("utf-8"))
-                    self.assertEqual(resp_json["data"][0]["b64_json"], fake_b64)
+                    self.assertEqual(resp_json["type"], "message")
+                    self.assertEqual(resp_json["model"], "gemini-3.1-flash-image")
+                    content = resp_json["content"][0]["text"]
+                    self.assertIn("![image](data:image/jpeg;base64,dummy_puppy_b64)", content)
+
+            # 7. Test /v1/images/generations endpoint
+            image_gen_url = f"http://127.0.0.1:{port}/v1/images/generations"
+            image_gen_req = json.dumps({
+                "model": "gemini-3.1-flash-image",
+                "prompt": "A cute cat",
+            }).encode("utf-8")
+
+            with patch.object(antigravity_bridge, "generate_image_via_router", return_value=(dummy_img_md, "dummy_cat_b64")):
+                req = urllib.request.Request(image_gen_url, data=image_gen_req, headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req) as resp:
+                    resp_json = json.loads(resp.read().decode("utf-8"))
+                    self.assertIn("data", resp_json)
+                    self.assertEqual(resp_json["data"][0]["b64_json"], "dummy_cat_b64")
+
+            # 8. Test /v1/profiles GET endpoint
+            profiles_url = f"http://127.0.0.1:{port}/v1/profiles"
+            with urllib.request.urlopen(profiles_url) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp_json["object"], "list")
+                self.assertIn("profiles", resp_json)
+                self.assertIn("default_test", resp_json["profiles"])
+
+            # 9. Test /v1/profiles/reset POST endpoint
+            reset_url = f"http://127.0.0.1:{port}/v1/profiles/reset"
+            reset_req = json.dumps({"profile": "default_test"}).encode("utf-8")
+            req = urllib.request.Request(reset_url, data=reset_req, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp_json["status"], "ok")
+                self.assertIn("default_test", resp_json["profiles"])
         finally:
             server.shutdown()
             server.server_close()
@@ -165,3 +305,4 @@ class TestAntigravityBridge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
