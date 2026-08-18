@@ -59,11 +59,12 @@ class TestAntigravityBridge(unittest.TestCase):
         mock_proc.communicate.return_value = ("CLI execution output", "")
         mock_popen.return_value = mock_proc
 
-        output = execute_cli_command('echo "{prompt}"', "Hello world", profile="astrathezero")
-        self.assertEqual(output, "CLI execution output")
-        mock_popen.assert_called_once()
-        _, kwargs = mock_popen.call_args
-        self.assertEqual(kwargs.get("env", {}).get("ANTIGRAVITY_PROFILE"), "astrathezero")
+        with patch.object(antigravity_bridge, "sync_profile_to_system", return_value=("test@gmail.com", "ya29.test")):
+            output = execute_cli_command('echo "{prompt}"', "Hello world", profile="astrathezero")
+            self.assertEqual(output, "CLI execution output")
+            mock_popen.assert_called_once()
+            _, kwargs = mock_popen.call_args
+            self.assertEqual(kwargs.get("env", {}).get("ANTIGRAVITY_PROFILE"), "astrathezero")
 
     def test_is_quota_or_rate_limit_error(self):
         """Test detecting quota exhaustion and rate limit error patterns."""
@@ -110,6 +111,29 @@ class TestAntigravityBridge(unittest.TestCase):
             if os.path.exists(cache_file):
                 os.remove(cache_file)
 
+    def test_profile_quota_banner_and_duration_format(self):
+        """Test human-readable cooldown duration and quota banner formatting."""
+        format_cooldown = antigravity_bridge.format_cooldown_duration
+        self.assertEqual(format_cooldown(45), "45s")
+        self.assertEqual(format_cooldown(125), "2m 5s")
+        self.assertEqual(format_cooldown(3665), "1h 1m 5s")
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+        try:
+            pm = ProfileManager(profiles=["p1", "p2"], cache_file=cache_file)
+            pm.mark_success("p1")
+            pm.mark_exhausted("p2", "Rate limit exceeded", cooldown_seconds=300)
+            banner = pm.build_profile_quota_banner("p1")
+            self.assertIn("Antigravity Profile:** `p1`", banner)
+            self.assertIn("1/2** Profiles Ready", banner)
+            self.assertIn("in Cooldown", banner)
+            self.assertIn("p2", banner)
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
     def test_smart_profile_ordering_and_rotation(self):
         """Test that healthy profiles come first and exhausted profiles are placed last."""
         import tempfile
@@ -120,11 +144,14 @@ class TestAntigravityBridge(unittest.TestCase):
             pm.mark_exhausted("astrathezero", "429 Quota Exceeded")
             pm.mark_exhausted("mrsermshop", "ResourceExhausted")
 
-            # Ready profiles must put attasitgits at the very front!
+            # Fast path: only healthy profiles returned when available
             ordered = pm.get_ordered_profiles()
-            self.assertEqual(ordered[0], "attasitgits")
-            self.assertIn("astrathezero", ordered)
-            self.assertIn("mrsermshop", ordered)
+            self.assertEqual(ordered, ["attasitgits"])
+
+            # When all are exhausted, fallback returns all sorted by earliest cooldown
+            pm.mark_exhausted("attasitgits", "ResourceExhausted")
+            fallback_ordered = pm.get_ordered_profiles()
+            self.assertEqual(len(fallback_ordered), 3)
         finally:
             if os.path.exists(cache_file):
                 os.remove(cache_file)
@@ -233,7 +260,8 @@ class TestAntigravityBridge(unittest.TestCase):
                 with urllib.request.urlopen(req) as resp:
                     resp_json = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp_json["object"], "chat.completion")
-                    self.assertEqual(resp_json["choices"][0]["message"]["content"], "Bridge response")
+                    self.assertIn("Bridge response", resp_json["choices"][0]["message"]["content"])
+                    self.assertIn("Antigravity Profile", resp_json["choices"][0]["message"]["content"])
 
             # 4. Test /v1/messages POST (Anthropic format)
             messages_url = f"http://127.0.0.1:{port}/v1/messages"
@@ -248,7 +276,8 @@ class TestAntigravityBridge(unittest.TestCase):
                 with urllib.request.urlopen(req) as resp:
                     resp_json = json.loads(resp.read().decode("utf-8"))
                     self.assertEqual(resp_json["type"], "message")
-                    self.assertEqual(resp_json["content"][0]["text"], "Anthropic Bridge response")
+                    self.assertIn("Anthropic Bridge response", resp_json["content"][0]["text"])
+                    self.assertIn("Antigravity Profile", resp_json["content"][0]["text"])
 
             # 5. Test /v1/chat/completions with Image Model (gemini-3.1-flash-image)
             image_chat_req = json.dumps({

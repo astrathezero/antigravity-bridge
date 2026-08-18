@@ -587,6 +587,27 @@ def parse_quota_reset_seconds(error_message: str) -> Optional[float]:
     return None
 
 
+def format_cooldown_duration(seconds: float) -> str:
+    """Format seconds into human-readable duration (e.g. '74h 7m 25s', '12m 30s', '45s')."""
+    if seconds <= 0:
+        return "ready"
+    s = int(seconds)
+    days = s // 86400
+    hours = (s % 86400) // 3600
+    minutes = (s % 3600) // 60
+    secs = s % 60
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    if secs > 0 or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
 class ProfileManager:
     """Thread-safe manager for tracking profile quota states, cooldowns, and smart routing."""
 
@@ -887,6 +908,58 @@ class ProfileManager:
                 info["cooldown_seconds_remaining"] = cooldown_left
                 res[key] = info
             return res
+
+    def build_profile_quota_banner(self, used_profile: Optional[str] = None) -> str:
+        """Build a clean, informative markdown footer showing active profile, account, and quota pool status."""
+        now = time.time()
+        with self.lock:
+            key = used_profile or "default"
+            email = get_profile_account_email(used_profile)
+            email_info = f" (`{email}`)" if email and email != "Not Logged In" else ""
+            stat = self.state.get(key, {})
+            succ = stat.get("success_count", 0)
+
+            total_profiles = list(self._profiles)
+            total_count = len(total_profiles)
+
+            ready_list: List[str] = []
+            cooldown_list: List[Tuple[str, int]] = []
+            disabled_list: List[str] = []
+
+            for p in total_profiles:
+                pk = p or "default"
+                info = self.state.get(pk, {})
+                st = info.get("status", "OK")
+                if st == "DISABLED":
+                    disabled_list.append(pk)
+                    continue
+                ex_until = info.get("exhausted_until", 0)
+                if ex_until > now:
+                    rem = int(ex_until - now)
+                    cooldown_list.append((pk, rem))
+                else:
+                    ready_list.append(pk)
+
+            ready_count = len(ready_list)
+
+            lines = [
+                "",
+                "---",
+                f"> ⚡ **Antigravity Profile:** `{key}`{email_info} | Total Successes: **{succ}**",
+            ]
+
+            if total_count > 1:
+                if cooldown_list:
+                    cd_items = [f"`{p}` (⏳ {format_cooldown_duration(rem)})" for p, rem in sorted(cooldown_list, key=lambda x: x[1])]
+                    lines.append(f"> 📊 **Quota Pool:** 🟢 **{ready_count}/{total_count}** Profiles Ready • 🔴 **{len(cooldown_list)}** in Cooldown")
+                    lines.append(f"> ⏳ **In Cooldown:** {', '.join(cd_items)}")
+                else:
+                    lines.append(f"> 📊 **Quota Pool:** 🟢 **{ready_count}/{total_count}** Profiles Ready (All Quotas OK)")
+            else:
+                status_desc = "🟢 Ready" if key in ready_list else "🔴 In Cooldown"
+                lines.append(f"> 📊 **Quota Status:** {status_desc}")
+
+            return "\n".join(lines)
 
 
 GLOBAL_PROFILE_MANAGER = ProfileManager()
@@ -1686,11 +1759,14 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
         """Allow requests without blocking on API key authentication."""
         return True
 
-    def _send_json_response(self, data: Dict[str, Any], status_code: int = 200) -> None:
+    def _send_json_response(self, data: Dict[str, Any], status_code: int = 200, extra_headers: Optional[Dict[str, str]] = None) -> None:
         body = json.dumps(data).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if extra_headers:
+            for hk, hv in extra_headers.items():
+                self.send_header(hk, hv)
         if getattr(self.server, "enable_cors", False):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Headers", "*")
@@ -2012,6 +2088,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+                show_status = getattr(self.server, "show_profile_status", True)
+                if show_status:
+                    pm_banner = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
+                    img_banner = pm_banner.build_profile_quota_banner(None)
+                    markdown_img = markdown_img + "\n" + img_banner
+
                 if is_anthropic:
                     msg_id = f"msg_{uuid.uuid4().hex}"
                     if stream:
@@ -2175,14 +2257,32 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
             content_text = parsed_content_text if (parsed_tool_calls and parsed_content_text) else ""
 
+            # Build profile quota status banner and response headers
+            show_status = getattr(self.server, "show_profile_status", True)
+            status_banner = ""
+            if show_status and profile_manager:
+                status_banner = profile_manager.build_profile_quota_banner(used_profile)
+
+            final_text_content = (output_text + status_banner) if not parsed_tool_calls else output_text
+            final_content_text = (content_text + status_banner) if (parsed_tool_calls and content_text) else content_text
+
+            extra_resp_headers: Dict[str, str] = {}
+            if used_profile:
+                extra_resp_headers["X-Antigravity-Active-Profile"] = str(used_profile)
+            if profile_manager:
+                summary = profile_manager.get_status_summary()
+                ready_ct = sum(1 for s in summary.values() if s.get("available"))
+                extra_resp_headers["X-Antigravity-Profiles-Ready"] = str(ready_ct)
+                extra_resp_headers["X-Antigravity-Profiles-Total"] = str(len(summary))
+
             # --- Handle Anthropic API format (/v1/messages) ---
             if is_anthropic:
                 msg_id = f"msg-{uuid.uuid4().hex[:8]}"
 
                 if parsed_tool_calls:
                     anthropic_content = []
-                    if content_text:
-                        anthropic_content.append({"type": "text", "text": content_text})
+                    if final_content_text:
+                        anthropic_content.append({"type": "text", "text": final_content_text})
                     for tc in parsed_tool_calls:
                         anthropic_content.append({
                             "type": "tool_use",
@@ -2192,7 +2292,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         })
                     stop_reason = "tool_use"
                 else:
-                    anthropic_content = [{"type": "text", "text": output_text}]
+                    anthropic_content = [{"type": "text", "text": final_text_content}]
                     stop_reason = "end_turn"
 
                 if stream:
@@ -2201,10 +2301,10 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     ]
                     if parsed_tool_calls:
                         idx = 0
-                        if content_text:
+                        if final_content_text:
                             events.extend([
                                 ("content_block_start", {"type": "content_block_start", "index": idx, "content_block": {"type": "text", "text": ""}}),
-                                ("content_block_delta", {"type": "content_block_delta", "index": idx, "delta": {"type": "text_delta", "text": content_text}}),
+                                ("content_block_delta", {"type": "content_block_delta", "index": idx, "delta": {"type": "text_delta", "text": final_content_text}}),
                                 ("content_block_stop", {"type": "content_block_stop", "index": idx}),
                             ])
                             idx += 1
@@ -2218,12 +2318,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     else:
                         events.extend([
                             ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-                            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": output_text}}),
+                            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": final_text_content}}),
                             ("content_block_stop", {"type": "content_block_stop", "index": 0}),
                         ])
 
                     events.extend([
-                        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": len(output_text) // 4}}),
+                        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": len(final_text_content) // 4}}),
                         ("message_stop", {"type": "message_stop"}),
                     ])
 
@@ -2243,9 +2343,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     "content": anthropic_content,
                     "stop_reason": stop_reason,
                     "stop_sequence": None,
-                    "usage": {"input_tokens": len(prompt_text) // 4, "output_tokens": len(output_text) // 4},
+                    "usage": {"input_tokens": len(prompt_text) // 4, "output_tokens": len(final_text_content) // 4},
                 }
-                self._send_json_response(response_payload)
+                self._send_json_response(response_payload, extra_headers=extra_resp_headers)
                 return
 
             # --- Handle OpenAI API format (/v1/chat/completions) ---
@@ -2280,7 +2380,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                                 "index": 0,
                                 "delta": {
                                     "role": "assistant",
-                                    "content": content_text,
+                                    "content": final_content_text,
                                     "tool_calls": [
                                         {
                                             "index": idx,
@@ -2307,7 +2407,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {"role": "assistant", "content": output_text},
+                                "delta": {"role": "assistant", "content": final_text_content},
                                 "finish_reason": None,
                             }
                         ],
@@ -2338,7 +2438,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             # Standard OpenAI non-streaming response
             message_obj: Dict[str, Any] = {
                 "role": "assistant",
-                "content": content_text if parsed_tool_calls else output_text,
+                "content": final_content_text if parsed_tool_calls else final_text_content,
             }
             if openai_tool_calls:
                 message_obj["tool_calls"] = openai_tool_calls
@@ -2357,12 +2457,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 ],
                 "usage": {
                     "prompt_tokens": len(prompt_text) // 4,
-                    "completion_tokens": len(output_text) // 4,
-                    "total_tokens": (len(prompt_text) + len(output_text)) // 4,
+                    "completion_tokens": len(final_text_content) // 4,
+                    "total_tokens": (len(prompt_text) + len(final_text_content)) // 4,
                 },
             }
 
-            self._send_json_response(response_payload)
+            self._send_json_response(response_payload, extra_headers=extra_resp_headers)
         except Exception as exc:
             logger.error("Unhandled Exception in do_POST: %s", exc)
             self._send_json_response(
@@ -3042,6 +3142,7 @@ def main():
     parser.add_argument("--image-router-url", default=DEFAULT_IMAGE_ROUTER_URL, help=f"Image generation router URL (default: {DEFAULT_IMAGE_ROUTER_URL})")
     parser.add_argument("--image-router-key", default=DEFAULT_IMAGE_ROUTER_KEY, help="API Key for image generation router")
     parser.add_argument("--no-proxy", "--direct", action="store_true", help="Disable outbound proxy auto-detection and connect directly to Google")
+    parser.add_argument("--hide-profile-status", "--no-profile-status", action="store_true", help="Hide profile & quota status footer from assistant responses")
 
     args = parser.parse_args()
 
@@ -3070,11 +3171,18 @@ def main():
                 profile_manager.mark_exhausted(p, msg)
                 logger.warning("Profile '%s' probe: FAILED (%s)", p or "default", msg)
 
+    show_profile_status = not (
+        args.hide_profile_status
+        or os.environ.get("ANTIGRAVITY_HIDE_PROFILE_STATUS", "").lower() in ("1", "true", "yes")
+        or os.environ.get("ANTIGRAVITY_SHOW_PROFILE_STATUS", "").lower() in ("0", "false", "no")
+    )
+
     logger.info("Starting Antigravity API Bridge Server...")
     logger.info("Detected CLI Binary: %s", cli_bin)
     logger.info("Command Template:   %s", effective_cmd)
     logger.info("Configured Profiles: %s", configured_profiles)
     logger.info("Quota Cache File:   %s", profile_manager.cache_file)
+    logger.info("Profile Status Foot: %s", "ENABLED" if show_profile_status else "DISABLED")
     logger.info("Image Generation:   ENABLED (model: gemini-3.1-flash-image / 9router)")
     logger.info("Listening on:       http://%s:%d/v1", args.host, args.port)
 
@@ -3082,6 +3190,7 @@ def main():
     server.custom_cmd = effective_cmd
     server.profiles = configured_profiles
     server.profile_manager = profile_manager
+    server.show_profile_status = show_profile_status
     server.api_key = args.api_key
     server.enable_cors = args.enable_cors
     server.image_router_url = args.image_router_url
