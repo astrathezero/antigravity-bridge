@@ -1023,17 +1023,45 @@ def execute_cli_command(
     with CLI_EXEC_LOCK:
         if profile:
             profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}")
+            if not os.path.exists(profile_dir):
+                alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile}")
+                if os.path.exists(alt_dir) and os.path.isdir(alt_dir):
+                    profile_dir = alt_dir
+
             if os.path.exists(profile_dir) and os.path.isdir(profile_dir):
                 gemini_dir = os.path.expanduser("~/.gemini")
                 os.makedirs(gemini_dir, exist_ok=True)
+                copied_files = []
+                token_preview = "N/A"
+                email_preview = "N/A"
                 for f in ("oauth_creds.json", "google_accounts.json", "state.json"):
                     src = os.path.join(profile_dir, f)
                     dst = os.path.join(gemini_dir, f)
                     if os.path.exists(src):
                         try:
                             shutil.copy2(src, dst)
-                        except Exception:
-                            pass
+                            copied_files.append(f)
+                            if f == "google_accounts.json":
+                                with open(src, "r", encoding="utf-8") as g_file:
+                                    g_data = json.load(g_file)
+                                    email_preview = g_data.get("active", "unknown")
+                            elif f == "oauth_creds.json":
+                                with open(src, "r", encoding="utf-8") as o_file:
+                                    o_data = json.load(o_file)
+                                    t = o_data.get("access_token") or (o_data.get("token", {}).get("access_token") if isinstance(o_data.get("token"), dict) else "")
+                                    if t:
+                                        token_preview = f"{t[:12]}...{t[-6:]}" if len(t) > 20 else t
+                        except Exception as exc:
+                            logger.warning("[PROFILE SWAP] Failed copying %s: %s", f, exc)
+                logger.info(
+                    "[PROFILE SWAP] Activated profile '%s' | Email: %s | Token: %s | Source: %s",
+                    profile,
+                    email_preview,
+                    token_preview,
+                    profile_dir,
+                )
+            else:
+                logger.warning("[PROFILE SWAP] Profile directory not found for '%s' (checked %s)", profile, profile_dir)
 
         proc = subprocess.Popen(
             argv,
@@ -2007,6 +2035,10 @@ def get_profile_account_email(profile: Optional[str]) -> str:
         p = os.path.expanduser("~/.gemini/google_accounts.json")
     else:
         p = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}/google_accounts.json")
+        if not os.path.exists(p):
+            alt_p = os.path.expanduser(f"~/.config/antigravity/{profile}/google_accounts.json")
+            if os.path.exists(alt_p):
+                p = alt_p
     if os.path.exists(p):
         try:
             with open(p, "r", encoding="utf-8") as f:
@@ -2322,7 +2354,26 @@ Examples:
         print("=" * 85)
         for p in profiles_to_test:
             email = get_profile_account_email(p)
-            print(f"👉 Testing profile '{p or 'default'}' ({email})...", flush=True)
+            p_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{p}") if p else os.path.expanduser("~/.gemini")
+            if p and not os.path.exists(p_dir):
+                alt = os.path.expanduser(f"~/.config/antigravity/{p}")
+                if os.path.exists(alt):
+                    p_dir = alt
+
+            tok_snippet = "N/A"
+            oauth_f = os.path.join(p_dir, "oauth_creds.json")
+            if os.path.exists(oauth_f):
+                try:
+                    with open(oauth_f, "r", encoding="utf-8") as tf:
+                        td = json.load(tf)
+                        tok = td.get("access_token") or (td.get("token", {}).get("access_token") if isinstance(td.get("token"), dict) else "")
+                        if tok:
+                            tok_snippet = f"{tok[:14]}...{tok[-8:]}" if len(tok) > 25 else tok
+                except Exception:
+                    pass
+
+            print(f"👉 Testing profile '{p or 'default'}' | Email: {email} | Token: {tok_snippet}", flush=True)
+            print(f"   Directory: {p_dir}", flush=True)
             ok, msg, resp_text = probe_profile(p, cmd_template=cmd_tpl, model_name=target_model, prompt=test_prompt)
             if ok:
                 pm.mark_success(p)
