@@ -827,6 +827,8 @@ def probe_profile(
         start_t = time.time()
         output = execute_cli_command(tpl, "say hi", timeout=timeout, profile=profile, model_name=model_name)
         duration = round(time.time() - start_t, 2)
+        if is_quota_or_rate_limit_error(output):
+            return False, output
         return True, f"Passed active check ({duration}s)"
     except Exception as exc:
         return False, str(exc)
@@ -886,16 +888,15 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
     elif "gemini-3.6-flash" in model_lower:
         flags.extend(["--model", "gemini-3.6-flash"])
     elif "gemini-3.5-flash" in model_lower:
-
         flags.extend(["--model", "gemini-3.5-flash"])
     elif "gemini-3.1-pro" in model_lower:
         flags.extend(["--model", "gemini-3.1-pro"])
         if not effort:
             effort = "high"
-    elif "claude-sonnet-4.6" in model_lower:
-        flags.extend(["--model", "claude-sonnet-4.6"])
+    elif "claude-sonnet-4.6" in model_lower or "claude-3-7-sonnet" in model_lower:
+        flags.extend(["--model", "Claude Sonnet 4.6 (Thinking)"])
     elif "claude-opus-4.6" in model_lower:
-        flags.extend(["--model", "claude-opus-4.6"])
+        flags.extend(["--model", "Claude Opus 4.6 (Thinking)"])
     elif "gpt-oss-120b" in model_lower:
         flags.extend(["--model", "gpt-oss-120b"])
     elif model_lower not in ("antigravity", "agy", "default", "local") and not model_clean.startswith("-"):
@@ -1965,16 +1966,25 @@ Examples:
         return 0
 
     elif sub in ("test", "check", "probe"):
-        target_p = argv[1].strip() if len(argv) > 1 else None
+        target_model = None
+        cleaned_args = list(argv[1:])
+        if "--model" in cleaned_args:
+            m_idx = cleaned_args.index("--model")
+            if m_idx + 1 < len(cleaned_args):
+                target_model = cleaned_args[m_idx + 1]
+                del cleaned_args[m_idx:m_idx + 2]
+
+        target_p = cleaned_args[0].strip() if cleaned_args else None
         profiles_to_test = [target_p] if target_p else get_available_profiles()
         cli_bin, cmd_tpl = detect_cli_command()
         pm = GLOBAL_PROFILE_MANAGER
 
-        print(f"\n[INFO] Testing {len(profiles_to_test)} profile(s)...")
+        model_label = f" (model: {target_model})" if target_model else ""
+        print(f"\n[INFO] Testing {len(profiles_to_test)} profile(s){model_label}...")
         for p in profiles_to_test:
             email = get_profile_account_email(p)
             print(f"Testing profile '{p or 'default'}' ({email})...", end=" ", flush=True)
-            ok, msg = probe_profile(p, cmd_template=cmd_tpl)
+            ok, msg = probe_profile(p, cmd_template=cmd_tpl, model_name=target_model)
             if ok:
                 pm.mark_success(p)
                 print(f"[OK] Available (latency: {msg})")
