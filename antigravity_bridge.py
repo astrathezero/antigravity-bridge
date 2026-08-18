@@ -998,6 +998,27 @@ def parse_cmd_template(
 CLI_EXEC_LOCK = threading.Lock()
 
 
+def detect_local_proxy() -> Optional[str]:
+    """Detect if an explicit proxy is configured in env or if local WARP/SOCKS5 proxy is listening."""
+    for env_var in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        val = os.environ.get(env_var, "").strip()
+        if val:
+            return val
+
+    # Auto-detect Cloudflare WARP proxy or local SOCKS5 proxy
+    for port in (40000, 1080, 7890):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.15)
+            res = s.connect_ex(("127.0.0.1", port))
+            s.close()
+            if res == 0:
+                return f"socks5://127.0.0.1:{port}"
+        except Exception:
+            pass
+    return None
+
+
 def execute_cli_command(
     cmd_template: str,
     prompt_text: str,
@@ -1020,6 +1041,16 @@ def execute_cli_command(
     env = {k: v for k, v in os.environ.items() if k in allowed_env_keys or k.startswith("ANTIGRAVITY_")}
     if profile:
         env["ANTIGRAVITY_PROFILE"] = profile
+
+    proxy_url = detect_local_proxy()
+    if proxy_url:
+        env["ALL_PROXY"] = proxy_url
+        env["all_proxy"] = proxy_url
+        env["HTTPS_PROXY"] = proxy_url
+        env["https_proxy"] = proxy_url
+        env["HTTP_PROXY"] = proxy_url
+        env["http_proxy"] = proxy_url
+        logger.info("[PROXY] Active Outbound Proxy: %s", proxy_url)
 
     with CLI_EXEC_LOCK:
         if profile:
