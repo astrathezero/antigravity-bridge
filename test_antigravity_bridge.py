@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import sys
+import threading
+import time
 import unittest
 import urllib.request
 from unittest.mock import MagicMock, patch
@@ -382,6 +384,37 @@ class TestAntigravityBridge(unittest.TestCase):
                     os.remove(test_cfg)
                 except Exception:
                     pass
+
+    def test_refresh_profile_token_and_daemon(self):
+        """Test active token refresh and background daemon thread execution."""
+        refresh_fn = antigravity_bridge.refresh_profile_token
+        start_daemon = antigravity_bridge.start_token_refresh_daemon
+
+        # Non-existent profile should return False gracefully
+        ok, msg = refresh_fn("non_existent_profile_xyz")
+        self.assertFalse(ok)
+        self.assertIn("missing", msg.lower())
+
+        # Test daemon start and graceful shutdown
+        dummy_server = MagicMock()
+        dummy_server.profiles = ["default_test"]
+        shutdown_evt = threading.Event()
+        dummy_server._shutdown_event = shutdown_evt
+
+        with patch.object(antigravity_bridge, "refresh_profile_token", return_value=(True, "Refreshed OK")) as mock_ref:
+            # Start daemon with small initial delay
+            t = start_daemon(dummy_server, interval_seconds=100.0, initial_delay=0.05)
+            self.assertIsNotNone(t)
+            self.assertTrue(t.is_alive())
+
+            # Wait for initial delay to trigger worker
+            time.sleep(0.15)
+            mock_ref.assert_called_with("default_test")
+
+            # Signal shutdown
+            shutdown_evt.set()
+            t.join(timeout=1.0)
+            self.assertFalse(t.is_alive())
 
 
 if __name__ == "__main__":

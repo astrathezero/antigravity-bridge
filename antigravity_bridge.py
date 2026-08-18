@@ -1263,6 +1263,165 @@ def sync_profile_to_system(profile_name: str) -> Tuple[str, str]:
     return email_preview, token_preview
 
 
+def refresh_profile_token(profile: Optional[str], agy_exec: Optional[str] = None) -> Tuple[bool, str]:
+    """Actively refresh OAuth access token for a profile using its refresh token."""
+    p = profile
+    p_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{p}") if p else os.path.expanduser("~/.gemini")
+    if p and not os.path.exists(p_dir):
+        alt = os.path.expanduser(f"~/.config/antigravity/{p}")
+        if os.path.exists(alt):
+            p_dir = alt
+
+    oauth_file = os.path.join(p_dir, "oauth_creds.json")
+    if not os.path.exists(oauth_file):
+        return False, f"oauth_creds.json missing at {p_dir}"
+
+    try:
+        with open(oauth_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return False, f"Failed reading {oauth_file}: {e}"
+
+    refresh_tok = data.get("refresh_token") or (data.get("token", {}).get("refresh_token") if isinstance(data.get("token"), dict) else None)
+    if not refresh_tok:
+        return False, "refresh_token is missing"
+
+    if agy_exec is None:
+        cli_bin, _ = detect_cli_command()
+        agy_exec = cli_bin if os.path.isabs(cli_bin) else shutil.which("agy") or "agy"
+
+    if sys.platform == "darwin":
+        keyring_payload = {
+            "token": {
+                "access_token": "",
+                "refresh_token": refresh_tok,
+                "token_type": "Bearer",
+                "expiry": "2020-01-01T00:00:00Z"
+            },
+            "auth_method": "consumer"
+        }
+        b64_val = "go-keyring-base64:" + base64.b64encode(json.dumps(keyring_payload).encode()).decode()
+        subprocess.call(["security", "add-generic-password", "-U", "-s", "gemini", "-a", "antigravity", "-w", b64_val])
+
+        # Execute agy to trigger Google auto-refresh
+        subprocess.call([agy_exec, "--dangerously-skip-permissions", "-p", "hi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        try:
+            out = subprocess.check_output(["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]).decode().strip()
+            raw = out.replace("go-keyring-base64:", "")
+            fresh_d = json.loads(base64.b64decode(raw).decode())
+            new_access_tok = fresh_d.get("token", {}).get("access_token") or fresh_d.get("access_token")
+            exp = fresh_d.get("token", {}).get("expiry", "")
+            if new_access_tok:
+                data["access_token"] = new_access_tok
+                if "token" in data and isinstance(data["token"], dict):
+                    data["token"]["access_token"] = new_access_tok
+                    data["token"]["expiry"] = exp
+                with open(oauth_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                with open(os.path.join(p_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
+                    json.dump({"token": data.get("token", data), "auth_method": data.get("auth_method", "consumer")}, f, indent=2)
+                return True, f"New Access Token generated (expires {exp})"
+            else:
+                return False, "Google rejected refresh_token (account may need re-login)"
+        except Exception as e:
+            return False, f"Keyring error: {e}"
+    else:
+        # Linux & Windows OS handling: Prepare expired token payload in antigravity-oauth-token
+        fallback_payload = {
+            "token": {
+                "access_token": "",
+                "refresh_token": refresh_tok,
+                "token_type": "Bearer",
+                "expiry": "2020-01-01T00:00:00Z"
+            },
+            "auth_method": "consumer"
+        }
+        for td in get_auth_sync_directories():
+            os.makedirs(td, exist_ok=True)
+            try:
+                with open(os.path.join(td, "antigravity-oauth-token"), "w", encoding="utf-8") as a_f:
+                    json.dump(fallback_payload, a_f)
+            except Exception:
+                pass
+
+        # Execute agy to trigger Google auto-refresh
+        subprocess.call([agy_exec, "--dangerously-skip-permissions", "-p", "hi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        token_found = False
+        for td in get_auth_sync_directories():
+            tok_path = os.path.join(td, "antigravity-oauth-token")
+            if os.path.exists(tok_path):
+                try:
+                    with open(tok_path, "r", encoding="utf-8") as tf:
+                        fresh_d = json.load(tf)
+                    new_access_tok = fresh_d.get("token", {}).get("access_token") or fresh_d.get("access_token")
+                    exp = fresh_d.get("token", {}).get("expiry", "")
+                    if new_access_tok:
+                        data["access_token"] = new_access_tok
+                        if "token" in data and isinstance(data["token"], dict):
+                            data["token"]["access_token"] = new_access_tok
+                            data["token"]["expiry"] = exp
+                        with open(oauth_file, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2)
+                        with open(os.path.join(p_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
+                            json.dump({"token": data.get("token", data), "auth_method": data.get("auth_method", "consumer")}, f, indent=2)
+                        return True, f"New Access Token generated (expires {exp})"
+                except Exception:
+                    pass
+
+        return True, "Token refresh executed via agy"
+
+
+def start_token_refresh_daemon(
+    server: Any,
+    interval_seconds: float = 3300.0,
+    initial_delay: Optional[float] = None,
+) -> Optional[threading.Thread]:
+    """Start background worker thread that automatically refreshes OAuth tokens for all profiles every 55 minutes."""
+    if interval_seconds <= 0:
+        return None
+
+    shutdown_event = getattr(server, "_shutdown_event", None)
+    if shutdown_event is None:
+        shutdown_event = threading.Event()
+        server._shutdown_event = shutdown_event
+
+    def _worker():
+        interval_min = int(interval_seconds // 60)
+        logger.info("Background OAuth Token Auto-Refresher started (interval: %d min)", interval_min)
+
+        # Wait initial delay or full interval before first background refresh
+        first_wait = initial_delay if initial_delay is not None else interval_seconds
+        if shutdown_event.wait(timeout=first_wait):
+            return
+
+        while not shutdown_event.is_set():
+            try:
+                profiles = list(getattr(server, "profiles", []))
+                if not profiles:
+                    profiles = get_available_profiles()
+                logger.info("[AUTO-REFRESH] ⏰ Starting scheduled %d-minute OAuth token refresh for %d profile(s)...", interval_min, len(profiles))
+                succ = 0
+                for p in profiles:
+                    ok, msg = refresh_profile_token(p)
+                    if ok:
+                        succ += 1
+                        logger.info("[AUTO-REFRESH] Profile '%s': %s", p or "default", msg)
+                    else:
+                        logger.warning("[AUTO-REFRESH] Profile '%s' refresh failed: %s", p or "default", msg)
+                logger.info("[AUTO-REFRESH] Scheduled refresh completed (%d/%d profiles refreshed successfully).", succ, len(profiles))
+            except Exception as exc:
+                logger.error("[AUTO-REFRESH] Error during scheduled token refresh: %s", exc)
+
+            if shutdown_event.wait(timeout=interval_seconds):
+                break
+
+    thread = threading.Thread(target=_worker, name="TokenRefreshDaemon", daemon=True)
+    thread.start()
+    return thread
+
+
 def probe_profile(
     profile: Optional[str],
     cmd_template: Optional[str] = None,
@@ -2952,107 +3111,13 @@ Examples:
         target_p = argv[1].strip() if len(argv) > 1 else None
         to_refresh = [target_p] if target_p else profiles
 
-        cli_bin, _ = detect_cli_command()
-        agy_exec = cli_bin if os.path.isabs(cli_bin) else shutil.which("agy") or "agy"
-
         for p in to_refresh:
-            p_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{p}") if p else os.path.expanduser("~/.gemini")
-            oauth_file = os.path.join(p_dir, "oauth_creds.json")
-            if not os.path.exists(oauth_file):
-                print(f"  ❌ Profile '{p}': oauth_creds.json missing at {p_dir}")
-                continue
-            with open(oauth_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            refresh_tok = data.get("refresh_token") or data.get("token", {}).get("refresh_token")
-            if not refresh_tok:
-                print(f"  ❌ Profile '{p}': refresh_token is missing")
-                continue
-
             print(f"👉 Refreshing Profile '{p}' (OS: {get_os_type()}) via OAuth Exchange...")
-            if sys.platform == "darwin":
-                keyring_payload = {
-                    "token": {
-                        "access_token": "",
-                        "refresh_token": refresh_tok,
-                        "token_type": "Bearer",
-                        "expiry": "2020-01-01T00:00:00Z"
-                    },
-                    "auth_method": "consumer"
-                }
-                b64_val = "go-keyring-base64:" + base64.b64encode(json.dumps(keyring_payload).encode()).decode()
-                subprocess.call(["security", "add-generic-password", "-U", "-s", "gemini", "-a", "antigravity", "-w", b64_val])
-
-                # Execute agy to trigger Google auto-refresh
-                subprocess.call([agy_exec, "--dangerously-skip-permissions", "-p", "hi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-                try:
-                    out = subprocess.check_output(["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]).decode().strip()
-                    raw = out.replace("go-keyring-base64:", "")
-                    fresh_d = json.loads(base64.b64decode(raw).decode())
-                    new_access_tok = fresh_d.get("token", {}).get("access_token")
-                    exp = fresh_d.get("token", {}).get("expiry", "")
-                    if new_access_tok:
-                        data["access_token"] = new_access_tok
-                        if "token" in data and isinstance(data["token"], dict):
-                            data["token"]["access_token"] = new_access_tok
-                            data["token"]["expiry"] = exp
-                        with open(oauth_file, "w", encoding="utf-8") as f:
-                            json.dump(data, f, indent=2)
-                        with open(os.path.join(p_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
-                            json.dump({"token": data["token"], "auth_method": data.get("auth_method", "consumer")}, f, indent=2)
-                        print(f"   [SUCCESS] New Access Token generated! Valid until {exp}")
-                    else:
-                        print(f"   [FAILED] Google rejected refresh_token (account may need re-login)")
-                except Exception as e:
-                    print(f"   [FAILED] Error: {e}")
+            ok, msg = refresh_profile_token(p)
+            if ok:
+                print(f"   [SUCCESS] {msg}")
             else:
-                # Linux & Windows OS handling: Prepare expired token payload in antigravity-oauth-token
-                fallback_payload = {
-                    "token": {
-                        "access_token": "",
-                        "refresh_token": refresh_tok,
-                        "token_type": "Bearer",
-                        "expiry": "2020-01-01T00:00:00Z"
-                    },
-                    "auth_method": "consumer"
-                }
-                for td in get_auth_sync_directories():
-                    os.makedirs(td, exist_ok=True)
-                    try:
-                        with open(os.path.join(td, "antigravity-oauth-token"), "w", encoding="utf-8") as a_f:
-                            json.dump(fallback_payload, a_f)
-                    except Exception:
-                        pass
-
-                # Execute agy to trigger Google auto-refresh
-                subprocess.call([agy_exec, "--dangerously-skip-permissions", "-p", "hi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-                # Check for refreshed token in antigravity-oauth-token
-                token_found = False
-                for td in get_auth_sync_directories():
-                    tok_path = os.path.join(td, "antigravity-oauth-token")
-                    if os.path.exists(tok_path):
-                        try:
-                            with open(tok_path, "r", encoding="utf-8") as tf:
-                                fresh_d = json.load(tf)
-                            new_access_tok = fresh_d.get("token", {}).get("access_token") or fresh_d.get("access_token")
-                            exp = fresh_d.get("token", {}).get("expiry", "")
-                            if new_access_tok:
-                                data["access_token"] = new_access_tok
-                                if "token" in data and isinstance(data["token"], dict):
-                                    data["token"]["access_token"] = new_access_tok
-                                    data["token"]["expiry"] = exp
-                                with open(oauth_file, "w", encoding="utf-8") as f:
-                                    json.dump(data, f, indent=2)
-                                with open(os.path.join(p_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
-                                    json.dump({"token": data["token"], "auth_method": data.get("auth_method", "consumer")}, f, indent=2)
-                                print(f"   [SUCCESS] New Access Token generated! Valid until {exp}")
-                                token_found = True
-                                break
-                        except Exception:
-                            pass
-                if not token_found:
-                    print(f"   [INFO] On {get_os_type()}, tokens are auto-refreshed via agy execution.")
+                print(f"   [FAILED] {msg}")
         print("=" * 60 + "\n")
         return 0
 
@@ -3225,6 +3290,8 @@ def main():
     parser.add_argument("--image-router-key", default=DEFAULT_IMAGE_ROUTER_KEY, help="API Key for image generation router")
     parser.add_argument("--no-proxy", "--direct", action="store_true", help="Disable outbound proxy auto-detection and connect directly to Google")
     parser.add_argument("--hide-profile-status", "--no-profile-status", action="store_true", help="Hide profile & quota status footer from assistant responses")
+    parser.add_argument("--auto-refresh-min", type=float, default=55.0, help="Interval in minutes for automatic background token refresh (default: 55)")
+    parser.add_argument("--no-auto-refresh", action="store_true", help="Disable periodic background OAuth token refresh")
 
     args = parser.parse_args()
 
@@ -3259,12 +3326,15 @@ def main():
         or os.environ.get("ANTIGRAVITY_SHOW_PROFILE_STATUS", "").lower() in ("0", "false", "no")
     )
 
+    auto_refresh_sec = 0.0 if (args.no_auto_refresh or os.environ.get("ANTIGRAVITY_NO_AUTO_REFRESH", "").lower() in ("1", "true", "yes")) else (args.auto_refresh_min * 60.0)
+
     logger.info("Starting Antigravity API Bridge Server...")
     logger.info("Detected CLI Binary: %s", cli_bin)
     logger.info("Command Template:   %s", effective_cmd)
     logger.info("Configured Profiles: %s", configured_profiles)
     logger.info("Quota Cache File:   %s", profile_manager.cache_file)
     logger.info("Profile Status Foot: %s", "ENABLED" if show_profile_status else "DISABLED")
+    logger.info("Token Auto-Refresh:  %s", f"ENABLED (every {int(args.auto_refresh_min)} min)" if auto_refresh_sec > 0 else "DISABLED")
     logger.info("Image Generation:   ENABLED (model: gemini-3.1-flash-image / 9router)")
     logger.info("Listening on:       http://%s:%d/v1", args.host, args.port)
 
@@ -3277,6 +3347,9 @@ def main():
     server.enable_cors = args.enable_cors
     server.image_router_url = args.image_router_url
     server.image_router_key = args.image_router_key
+
+    if auto_refresh_sec > 0:
+        start_token_refresh_daemon(server, interval_seconds=auto_refresh_sec)
 
     if server.api_key:
         logger.info("API Key Authentication: ENABLED")
