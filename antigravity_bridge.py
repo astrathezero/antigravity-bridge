@@ -30,6 +30,7 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -1854,7 +1855,177 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             )
 
 
+def get_profile_account_email(profile: Optional[str]) -> str:
+    """Get active logged in email for a profile from google_accounts.json."""
+    if not profile or profile == "default":
+        p = os.path.expanduser("~/.gemini/google_accounts.json")
+    else:
+        p = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}/google_accounts.json")
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("active") or "N/A"
+        except Exception:
+            pass
+    return "Not Logged In"
+
+
+def handle_profile_cli(argv: List[str]) -> int:
+    """CLI subcommand handler for managing Antigravity login profiles."""
+    if argv and argv[0] in ("-h", "--help", "help"):
+        print("""
+Antigravity Bridge - Profile Manager CLI 👤
+
+Usage:
+  python3 antigravity_bridge.py profile list                  List all profiles, logged-in emails, and quota status
+  python3 antigravity_bridge.py profile login <name>          Log in or add a new profile interactively with agy
+  python3 antigravity_bridge.py profile remove <name>         Delete a profile directory
+  python3 antigravity_bridge.py profile test [name]           Actively test/probe profile quota availability
+  python3 antigravity_bridge.py profile reset [name]          Reset cooldown state for a profile or all profiles
+  python3 antigravity_bridge.py profile copy <name> <host>    Copy profile credentials to remote server via SCP
+
+Shortcuts:
+  python3 antigravity_bridge.py profiles                      Direct shortcut to list all profiles
+  python3 antigravity_bridge.py login <name>                  Direct shortcut to login/add a profile
+
+Examples:
+  python3 antigravity_bridge.py profile list
+  python3 antigravity_bridge.py profile login attasitgits
+  python3 antigravity_bridge.py profile test
+  python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com
+""")
+        return 0
+
+    sub = argv[0].lower() if argv else "list"
+    profiles_dir = os.path.expanduser("~/.config/antigravity/profiles")
+    os.makedirs(profiles_dir, exist_ok=True)
+
+    if sub in ("list", "ls", "status"):
+        pm = GLOBAL_PROFILE_MANAGER
+        all_profiles = get_available_profiles()
+        summary = pm.get_status_summary()
+
+        print("\n" + "=" * 85)
+        print(f"{'Profile Name':<18} {'Google Account Email':<32} {'Status':<12} {'Cooldown':<10} {'Success'}")
+        print("=" * 85)
+        for p in all_profiles:
+            name = p or "default"
+            email = get_profile_account_email(p)
+            info = summary.get(name, {})
+            status = info.get("status", "OK")
+            cooldown = f"{info.get('cooldown_seconds_remaining', 0)}s" if info.get("cooldown_seconds_remaining", 0) > 0 else "Ready"
+            succ = info.get("success_count", 0)
+            print(f"{name:<18} {email:<32} {status:<12} {cooldown:<10} {succ}")
+        print("=" * 85 + "\n")
+        return 0
+
+    elif sub in ("login", "add", "new"):
+        if len(argv) < 2:
+            print("[Error] Please specify profile name: python3 antigravity_bridge.py profile login <profile_name>")
+            return 1
+        name = argv[1].strip()
+        target_dir = os.path.join(profiles_dir, name)
+        os.makedirs(target_dir, exist_ok=True)
+
+        print(f"\n[INFO] Starting interactive login for profile '{name}'...")
+        print(f"[INFO] Profile directory: {target_dir}")
+        cli_bin, _ = detect_cli_command()
+
+        # Run agy in interactive mode with ANTIGRAVITY_PROFILE
+        env = os.environ.copy()
+        env["ANTIGRAVITY_PROFILE"] = name
+        cmd = [cli_bin] if os.path.isabs(cli_bin) else ["agy"]
+        try:
+            subprocess.call(cmd, env=env)
+        except FileNotFoundError:
+            print(f"[Error] '{cli_bin}' binary not found. Make sure agy is installed.")
+            return 1
+
+        email = get_profile_account_email(name)
+        print(f"\n[SUCCESS] Profile '{name}' login completed! Active Account: {email}\n")
+        return 0
+
+    elif sub in ("remove", "delete", "rm"):
+        if len(argv) < 2:
+            print("[Error] Please specify profile name: python3 antigravity_bridge.py profile remove <profile_name>")
+            return 1
+        name = argv[1].strip()
+        target_dir = os.path.join(profiles_dir, name)
+        if not os.path.exists(target_dir):
+            print(f"[Warning] Profile directory '{target_dir}' does not exist.")
+            return 0
+        shutil.rmtree(target_dir, ignore_errors=True)
+        pm = GLOBAL_PROFILE_MANAGER
+        with pm.lock:
+            if name in pm.state:
+                del pm.state[name]
+                pm.save_cache()
+        print(f"[SUCCESS] Profile '{name}' deleted successfully.")
+        return 0
+
+    elif sub in ("test", "check", "probe"):
+        target_p = argv[1].strip() if len(argv) > 1 else None
+        profiles_to_test = [target_p] if target_p else get_available_profiles()
+        cli_bin, cmd_tpl = detect_cli_command()
+        pm = GLOBAL_PROFILE_MANAGER
+
+        print(f"\n[INFO] Testing {len(profiles_to_test)} profile(s)...")
+        for p in profiles_to_test:
+            email = get_profile_account_email(p)
+            print(f"Testing profile '{p or 'default'}' ({email})...", end=" ", flush=True)
+            ok, msg = probe_profile(p, cmd_template=cmd_tpl)
+            if ok:
+                pm.mark_success(p)
+                print(f"[OK] Available (latency: {msg})")
+            else:
+                pm.mark_exhausted(p, msg)
+                print(f"[FAILED] {msg}")
+        print()
+        return 0
+
+    elif sub in ("reset", "unblock"):
+        target_p = argv[1].strip() if len(argv) > 1 else None
+        pm = GLOBAL_PROFILE_MANAGER
+        pm.reset_all(target_p)
+        print(f"[SUCCESS] Cooldown reset for: {target_p or 'all profiles'}.")
+        return 0
+
+    elif sub in ("copy", "sync", "scp"):
+        if len(argv) < 3:
+            print("[Error] Usage: python3 antigravity_bridge.py profile copy <profile_name> <remote_user@host>")
+            print("        Example: python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com")
+            return 1
+        name = argv[1].strip()
+        remote = argv[2].strip()
+        source_dir = os.path.join(profiles_dir, name)
+        if not os.path.exists(source_dir):
+            print(f"[Error] Local profile '{name}' not found at {source_dir}")
+            return 1
+
+        remote_dest = f"{remote}:~/.config/antigravity/profiles/"
+        print(f"[INFO] Copying profile '{name}' to {remote_dest}...")
+        res = subprocess.call(["scp", "-r", source_dir, remote_dest])
+        if res == 0:
+            print(f"[SUCCESS] Profile '{name}' successfully copied to {remote}!")
+        else:
+            print(f"[Error] scp failed with exit code {res}")
+        return res
+
+    else:
+        print(f"[Error] Unknown profile command '{sub}'. Run 'python3 antigravity_bridge.py profile --help' for usage.")
+        return 1
+
+
 def main():
+    # Handle Profile CLI subcommands before parser
+    if len(sys.argv) > 1 and sys.argv[1].lower() in ("profile", "profiles", "login", "auth"):
+        if sys.argv[1].lower() in ("profile", "profiles"):
+            sub_args = sys.argv[2:]
+        else:
+            sub_args = sys.argv[1:]
+        sys.exit(handle_profile_cli(sub_args))
+
     parser = argparse.ArgumentParser(
         description="Antigravity / agy OpenAI & Anthropic compatible API Bridge Server"
     )

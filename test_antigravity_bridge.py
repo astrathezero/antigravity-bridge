@@ -178,6 +178,18 @@ class TestAntigravityBridge(unittest.TestCase):
         flags_claude = resolve_model_flags("claude-sonnet-4.6-thinking")
         self.assertEqual(flags_claude, ["--model", "claude-sonnet-4.6"])
 
+    def test_handle_profile_cli(self):
+        """Test Profile Manager CLI helper and subcommands."""
+        handle_profile_cli = antigravity_bridge.handle_profile_cli
+        get_profile_account_email = antigravity_bridge.get_profile_account_email
+
+        # Test help
+        self.assertEqual(handle_profile_cli(["--help"]), 0)
+        # Test list
+        self.assertEqual(handle_profile_cli(["list"]), 0)
+        # Test reset
+        self.assertEqual(handle_profile_cli(["reset"]), 0)
+
     def test_server_http_endpoints(self):
         """Test HTTP server endpoints /health, /v1/models, /v1/chat/completions, /v1/messages."""
         server = ThreadedHTTPServer(("127.0.0.1", 0), AntigravityBridgeHandler)

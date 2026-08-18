@@ -75,6 +75,36 @@ It exposes standard REST endpoints locally (`http://127.0.0.1:8000/v1`), seamles
 
 ---
 
+## 👤 Profile Manager CLI
+
+You can manage, log in, probe, reset, and sync profiles directly from the command line:
+
+```bash
+# List all profiles, active Google accounts, quota status, and cooldowns:
+python3 antigravity_bridge.py profile list
+# (or shortcut: python3 antigravity_bridge.py profiles)
+
+# Log in / add a new profile interactively:
+python3 antigravity_bridge.py profile login attasitgits
+# (or shortcut: python3 antigravity_bridge.py login attasitgits)
+
+# Actively test/probe quota availability for all profiles or a specific profile:
+python3 antigravity_bridge.py profile test
+python3 antigravity_bridge.py profile test attasitgits
+
+# Reset cooldown state for a profile or all profiles:
+python3 antigravity_bridge.py profile reset attasitgits
+python3 antigravity_bridge.py profile reset
+
+# Delete an existing profile directory:
+python3 antigravity_bridge.py profile remove old_profile
+
+# Copy a profile credentials to a remote Linux server via SCP:
+python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com
+```
+
+---
+
 ## 🤖 Supported Models Matrix
 
 | Model ID (`model`) | Backend Engine / CLI Mapping | Reasoning Effort | Description | Max Context |
