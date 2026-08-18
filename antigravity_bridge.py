@@ -1375,7 +1375,7 @@ def execute_cli_with_fallback(
 
     candidate_profiles = mgr.get_ordered_profiles()
     errors: List[str] = []
-    per_profile_timeout = min(timeout, 45.0)
+    per_profile_timeout = timeout
 
     for profile in candidate_profiles:
         profile_key = profile or "default"
@@ -1615,6 +1615,32 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Multi-threaded HTTP server for handling concurrent API calls."""
     daemon_threads = True
     allow_reuse_address = True
+
+
+class SSEHeartbeat:
+    """Sends periodic SSE comment pings (: keep-alive) to prevent gateways/clients from timing out during long CLI executions."""
+    def __init__(self, wfile: Any, interval: float = 3.0):
+        self.wfile = wfile
+        self.interval = interval
+        self.running = True
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        while self.running:
+            time.sleep(self.interval)
+            if not self.running:
+                break
+            try:
+                with self.lock:
+                    self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.flush()
+            except Exception:
+                break
+
+    def stop(self) -> None:
+        self.running = False
 
 
 class AntigravityBridgeHandler(BaseHTTPRequestHandler):
@@ -2059,6 +2085,20 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             configured_profiles = getattr(self.server, "profiles", None)
             profile_manager = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
 
+            # If client requested streaming, send SSE headers immediately and start heartbeat to prevent gateway read timeouts
+            heartbeat = None
+            if stream:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("X-Accel-Buffering", "no")
+                if getattr(self.server, "enable_cors", False):
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.flush()
+                heartbeat = SSEHeartbeat(self.wfile, interval=3.0)
+
             try:
                 output_text, used_profile = execute_cli_with_fallback(
                     custom_tpl, prompt_text, profiles=configured_profiles, model_name=model, profile_manager=profile_manager
@@ -2066,11 +2106,29 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 logger.info("Successfully executed CLI using profile: %s (model=%s)", used_profile or "default", model)
             except Exception as exc:
                 logger.error("All agy profile attempts failed: %s", exc)
-                self._send_json_response(
-                    {"error": {"message": str(exc), "type": "api_error"}},
-                    status_code=500,
-                )
-                return
+                if stream:
+                    if heartbeat:
+                        heartbeat.stop()
+                    err_payload = {"error": {"message": str(exc), "type": "api_error"}}
+                    try:
+                        if is_anthropic:
+                            self.wfile.write(f"event: error\ndata: {json.dumps(err_payload)}\n\n".encode("utf-8"))
+                        else:
+                            self.wfile.write(f"data: {json.dumps(err_payload)}\n\n".encode("utf-8"))
+                            self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                    except Exception:
+                        pass
+                    return
+                else:
+                    self._send_json_response(
+                        {"error": {"message": str(exc), "type": "api_error"}},
+                        status_code=500,
+                    )
+                    return
+            finally:
+                if heartbeat:
+                    heartbeat.stop()
 
             created_ts = int(time.time())
 
@@ -2103,14 +2161,6 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     stop_reason = "end_turn"
 
                 if stream:
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Connection", "keep-alive")
-                    if getattr(self.server, "enable_cors", False):
-                        self.send_header("Access-Control-Allow-Origin", "*")
-                    self.end_headers()
-
                     events = [
                         ("message_start", {"type": "message_start", "message": {"id": msg_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": len(prompt_text) // 4, "output_tokens": 1}}}),
                     ]
@@ -2184,14 +2234,6 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 finish_reason = "stop"
 
             if stream:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
-                if getattr(self.server, "enable_cors", False):
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-
                 if parsed_tool_calls:
                     chunk_start = {
                         "id": completion_id,
