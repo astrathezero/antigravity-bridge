@@ -1081,30 +1081,46 @@ def execute_cli_command(
                     profile_dir = alt_dir
 
             if os.path.exists(profile_dir) and os.path.isdir(profile_dir):
-                gemini_dir = os.path.expanduser("~/.gemini")
-                os.makedirs(gemini_dir, exist_ok=True)
+                target_dirs = [
+                    os.path.expanduser("~/.gemini"),
+                    os.path.expanduser("~/.config/antigravity"),
+                    os.path.expanduser("~/.config/gemini"),
+                    os.path.expanduser("~/.gemini/antigravity-cli"),
+                ]
+                for td in target_dirs:
+                    os.makedirs(td, exist_ok=True)
+
                 copied_files = []
                 token_preview = "N/A"
                 email_preview = "N/A"
-                for f in ("oauth_creds.json", "google_accounts.json", "state.json"):
+                for f in ("oauth_creds.json", "google_accounts.json", "state.json", "settings.json"):
                     src = os.path.join(profile_dir, f)
-                    dst = os.path.join(gemini_dir, f)
                     if os.path.exists(src):
-                        try:
-                            shutil.copy2(src, dst)
-                            copied_files.append(f)
-                            if f == "google_accounts.json":
+                        for td in target_dirs:
+                            dst = os.path.join(td, f)
+                            if os.path.abspath(src) != os.path.abspath(dst):
+                                try:
+                                    shutil.copy2(src, dst)
+                                    copied_files.append(dst)
+                                except Exception as e:
+                                    logger.warning("Failed copying %s to %s: %s", src, dst, e)
+
+                        if f == "google_accounts.json":
+                            try:
                                 with open(src, "r", encoding="utf-8") as g_file:
                                     g_data = json.load(g_file)
                                     email_preview = g_data.get("active", "unknown")
-                            elif f == "oauth_creds.json":
+                            except Exception:
+                                pass
+                        elif f == "oauth_creds.json":
+                            try:
                                 with open(src, "r", encoding="utf-8") as o_file:
                                     o_data = json.load(o_file)
                                     t = o_data.get("access_token") or (o_data.get("token", {}).get("access_token") if isinstance(o_data.get("token"), dict) else "")
                                     if t:
                                         token_preview = f"{t[:12]}...{t[-6:]}" if len(t) > 20 else t
-                        except Exception as e:
-                            logger.warning("Failed copying %s to %s: %s", src, dst, e)
+                            except Exception:
+                                pass
 
                 # Inject credentials directly into system Keyring / macOS Keychain so agy picks up the swapped profile
                 oauth_file = os.path.join(profile_dir, "oauth_creds.json")
@@ -1134,24 +1150,23 @@ def execute_cli_command(
                     except Exception as e:
                         logger.warning("Failed injecting token into system keyring: %s", e)
 
-                # Sync or clean project & conversation cache files so agy does not get pinned to an exhausted conversation
+                # Sync or clean project & conversation cache files across all config directories
                 for sf in (
                     "default-cli-project.json", "default_project_id.txt", "jetski_state.pbtxt",
                     "conversation_summaries.db", "history.jsonl"
                 ):
                     src_sf = os.path.join(profile_dir, sf)
-                    dst_sf = os.path.join(gemini_dir, sf)
-                    cli_dst_sf = os.path.join(gemini_dir, "antigravity-cli", sf)
-                    if os.path.exists(src_sf):
-                        try:
-                            shutil.copy2(src_sf, dst_sf)
-                        except Exception:
-                            pass
-                    else:
-                        for target in (dst_sf, cli_dst_sf):
-                            if os.path.exists(target):
+                    for td in target_dirs:
+                        dst_sf = os.path.join(td, sf)
+                        if os.path.abspath(src_sf) != os.path.abspath(dst_sf):
+                            if os.path.exists(src_sf):
                                 try:
-                                    os.remove(target)
+                                    shutil.copy2(src_sf, dst_sf)
+                                except Exception:
+                                    pass
+                            elif os.path.exists(dst_sf):
+                                try:
+                                    os.remove(dst_sf)
                                 except Exception:
                                     pass
                 logger.info(
