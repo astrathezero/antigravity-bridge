@@ -868,20 +868,24 @@ def probe_profile(
     profile: Optional[str],
     cmd_template: Optional[str] = None,
     model_name: Optional[str] = None,
-    timeout: float = 15.0,
-) -> Tuple[bool, str]:
-    """Perform a lightweight active health check (probe) for a profile."""
+    timeout: float = 35.0,
+    prompt: Optional[str] = None,
+) -> Tuple[bool, str, str]:
+    """Perform a realistic active health check (probe) for a profile by generating real response tokens."""
     _, default_tpl = detect_cli_command()
     tpl = cmd_template or default_tpl
+    test_prompt = prompt or (
+        "Explain in 2 clear bullet points why Fibonacci series with memoization is O(N) time complexity."
+    )
     try:
         start_t = time.time()
-        output = execute_cli_command(tpl, "say hi", timeout=timeout, profile=profile, model_name=model_name)
+        output = execute_cli_command(tpl, test_prompt, timeout=timeout, profile=profile, model_name=model_name)
         duration = round(time.time() - start_t, 2)
         if is_quota_or_rate_limit_error(output):
-            return False, output
-        return True, f"Passed active check ({duration}s)"
+            return False, output, ""
+        return True, f"Passed active check ({duration}s)", output
     except Exception as exc:
-        return False, str(exc)
+        return False, str(exc), ""
 
 
 def sanitize_prompt_for_cli(prompt_text: str, max_bytes: int = 115000) -> str:
@@ -1521,15 +1525,17 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 cli_bin, cmd_tpl = detect_cli_command()
                 custom_tpl = getattr(self.server, "custom_cmd", None) or cmd_tpl
                 check_model = req_json.get("model")
+                check_prompt = req_json.get("prompt")
 
                 results: Dict[str, Any] = {}
                 for p in pm._profiles:
-                    ok, msg = probe_profile(p, cmd_template=custom_tpl, model_name=check_model)
+                    ok, msg, resp_text = probe_profile(p, cmd_template=custom_tpl, model_name=check_model, prompt=check_prompt)
                     if ok:
                         pm.mark_success(p)
+                        results[p or "default"] = {"ok": True, "latency": msg, "preview": resp_text[:150]}
                     else:
                         pm.mark_exhausted(p, msg)
-                    results[p or "default"] = {"ok": ok, "message": msg}
+                        results[p or "default"] = {"ok": False, "error": msg}
 
                 self._send_json_response({
                     "status": "ok",
@@ -2271,31 +2277,46 @@ Examples:
 
     elif sub in ("test", "check", "probe"):
         target_model = None
+        custom_prompt = None
         cleaned_args = list(argv[1:])
         if "--model" in cleaned_args:
             m_idx = cleaned_args.index("--model")
             if m_idx + 1 < len(cleaned_args):
                 target_model = cleaned_args[m_idx + 1]
                 del cleaned_args[m_idx:m_idx + 2]
+        if "--prompt" in cleaned_args:
+            p_idx = cleaned_args.index("--prompt")
+            if p_idx + 1 < len(cleaned_args):
+                custom_prompt = cleaned_args[p_idx + 1]
+                del cleaned_args[p_idx:p_idx + 2]
 
         target_p = cleaned_args[0].strip() if cleaned_args else None
         profiles_to_test = [target_p] if target_p else get_available_profiles()
         cli_bin, cmd_tpl = detect_cli_command()
         pm = GLOBAL_PROFILE_MANAGER
 
+        test_prompt = custom_prompt or (
+            "Explain in 2 clear bullet points why Fibonacci series with memoization is O(N) time complexity."
+        )
+
         model_label = f" (model: {target_model})" if target_model else ""
-        print(f"\n[INFO] Testing {len(profiles_to_test)} profile(s){model_label}...")
+        print(f"\n[INFO] Testing {len(profiles_to_test)} profile(s){model_label} with prompt: \"{test_prompt[:70]}...\"")
+        print("=" * 85)
         for p in profiles_to_test:
             email = get_profile_account_email(p)
-            print(f"Testing profile '{p or 'default'}' ({email})...", end=" ", flush=True)
-            ok, msg = probe_profile(p, cmd_template=cmd_tpl, model_name=target_model)
+            print(f"👉 Testing profile '{p or 'default'}' ({email})...", flush=True)
+            ok, msg, resp_text = probe_profile(p, cmd_template=cmd_tpl, model_name=target_model, prompt=test_prompt)
             if ok:
                 pm.mark_success(p)
-                print(f"[OK] Available (latency: {msg})")
+                print(f"   [OK] Available! Latency: {msg}")
+                snippet = resp_text.strip().replace("\n", " ")
+                if len(snippet) > 180:
+                    snippet = snippet[:180] + "..."
+                print(f"   💬 Model Response Preview: \"{snippet}\"\n")
             else:
                 pm.mark_exhausted(p, msg)
-                print(f"[FAILED] {msg}")
-        print()
+                print(f"   [FAILED] {msg}\n")
+        print("=" * 85)
         return 0
 
     elif sub in ("reset", "unblock"):
