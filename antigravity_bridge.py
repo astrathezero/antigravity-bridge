@@ -795,9 +795,10 @@ class ProfileManager:
 
     def get_ordered_profiles(self) -> List[Optional[str]]:
         """Return candidate profiles ordered by availability:
-        1. Ready / Healthy profiles (not in cooldown), rotated round-robin.
+        1. Ready / Healthy profiles (authenticated & not in cooldown), rotated round-robin.
         2. Recovering profiles (cooldown timestamp expired).
         3. Exhausted profiles (sorted by earliest cooldown expiration).
+        4. Unauthenticated profiles (last resort).
         """
         now = time.time()
         with self.lock:
@@ -805,12 +806,19 @@ class ProfileManager:
             ready: List[Optional[str]] = []
             recovering: List[Optional[str]] = []
             exhausted: List[Tuple[float, Optional[str]]] = []
+            unauthenticated: List[Optional[str]] = []
 
             for p in profiles:
                 key = p or "default"
                 info = self.state.get(key, {})
                 status = info.get("status", "OK")
                 if status == "DISABLED":
+                    continue
+
+                # Filter unauthenticated profiles so they don't block healthy profiles
+                email = get_profile_account_email(p)
+                if email == "Not Logged In" and p is not None:
+                    unauthenticated.append(p)
                     continue
 
                 exhausted_until = info.get("exhausted_until", 0)
@@ -833,7 +841,7 @@ class ProfileManager:
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
 
-            ordered = ready + recovering + exhausted_profiles
+            ordered = ready + recovering + exhausted_profiles + unauthenticated
             return ordered if ordered else [None]
 
     def get_status_summary(self) -> Dict[str, Any]:
@@ -1052,7 +1060,7 @@ def execute_cli_with_fallback(
 
     candidate_profiles = mgr.get_ordered_profiles()
     errors: List[str] = []
-    per_profile_timeout = min(timeout, 60.0)
+    per_profile_timeout = min(timeout, 45.0)
 
     for profile in candidate_profiles:
         profile_key = profile or "default"
@@ -1071,7 +1079,9 @@ def execute_cli_with_fallback(
         except Exception as exc:
             err_str = str(exc)
             logger.warning("Profile '%s' execution failed: %s", profile_key, exc)
-            if is_quota_or_rate_limit_error(err_str):
+            if "authentication required" in err_str.lower() or "not signed in" in err_str.lower():
+                mgr.mark_exhausted(profile, err_str, duration=3600.0)
+            elif is_quota_or_rate_limit_error(err_str):
                 mgr.mark_exhausted(profile, err_str)
             else:
                 mgr.mark_error(profile, err_str)
@@ -1997,6 +2007,7 @@ Usage:
   python3 antigravity_bridge.py profile disable <name>        Temporarily disable a profile from receiving requests
   python3 antigravity_bridge.py profile enable <name>         Re-enable a previously disabled profile
   python3 antigravity_bridge.py profile set <p1,p2,...>       Live hot-reload active profile list on running server
+  python3 antigravity_bridge.py profile order <p1,p2,...>     Set explicit round-robin rotation order of profiles
   python3 antigravity_bridge.py profile reset [name]          Reset cooldown state for a profile or all profiles
   python3 antigravity_bridge.py profile copy <name> <host>    Copy profile credentials to remote server via SCP
 
@@ -2006,7 +2017,8 @@ Shortcuts:
 
 Examples:
   python3 antigravity_bridge.py profile list
-  python3 antigravity_bridge.py profile set attasitgits,mrsermshop
+  python3 antigravity_bridge.py profile order panthornchuan,attasitgits,mrsermshop
+  python3 antigravity_bridge.py profile set panthornchuan,attasitgits,mrsermshop
   python3 antigravity_bridge.py profile disable astrathezero
   python3 antigravity_bridge.py profile enable astrathezero
   python3 antigravity_bridge.py profile login attasitgits
@@ -2038,9 +2050,9 @@ Examples:
         print("=" * 85 + "\n")
         return 0
 
-    elif sub in ("set", "use", "config"):
+    elif sub in ("set", "use", "config", "order", "rotate"):
         if len(argv) < 2:
-            print("[Error] Please specify profiles: python3 antigravity_bridge.py profile set attasitgits,mrsermshop")
+            print("[Error] Please specify profiles: python3 antigravity_bridge.py profile order panthornchuan,attasitgits,mrsermshop")
             return 1
         raw = argv[1].strip()
         new_profiles = [p.strip() for p in raw.split(",") if p.strip()]
