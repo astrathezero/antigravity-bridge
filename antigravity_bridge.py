@@ -2345,11 +2345,12 @@ Examples:
         cli_bin, cmd_tpl = detect_cli_command()
         pm = GLOBAL_PROFILE_MANAGER
 
+        test_model = target_model or "gemini-3.7-flash"
         test_prompt = custom_prompt or (
             "Explain in 2 clear bullet points why Fibonacci series with memoization is O(N) time complexity."
         )
 
-        model_label = f" (model: {target_model})" if target_model else ""
+        model_label = f" (model: {test_model})"
         print(f"\n[INFO] Testing {len(profiles_to_test)} profile(s){model_label} with prompt: \"{test_prompt[:70]}...\"")
         print("=" * 85)
         for p in profiles_to_test:
@@ -2374,7 +2375,7 @@ Examples:
 
             print(f"👉 Testing profile '{p or 'default'}' | Email: {email} | Token: {tok_snippet}", flush=True)
             print(f"   Directory: {p_dir}", flush=True)
-            ok, msg, resp_text = probe_profile(p, cmd_template=cmd_tpl, model_name=target_model, prompt=test_prompt)
+            ok, msg, resp_text = probe_profile(p, cmd_template=cmd_tpl, model_name=test_model, prompt=test_prompt)
             if ok:
                 pm.mark_success(p)
                 print(f"   [OK] Available! Latency: {msg}")
