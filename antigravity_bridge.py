@@ -1305,7 +1305,9 @@ def execute_cli_command(
         env["https_proxy"] = proxy_url
         env["HTTP_PROXY"] = proxy_url
         env["http_proxy"] = proxy_url
-        logger.info("[PROXY] Active Outbound Proxy: %s", proxy_url)
+        env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+        env["no_proxy"] = "127.0.0.1,localhost,::1"
+        logger.info("[PROXY] Active Outbound Proxy: %s (Bypassing 127.0.0.1,localhost)", proxy_url)
 
     with CLI_EXEC_LOCK:
         if profile:
