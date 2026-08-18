@@ -1005,17 +1005,20 @@ def detect_local_proxy() -> Optional[str]:
         if val:
             return val
 
-    # Auto-detect Cloudflare WARP proxy or local SOCKS5 proxy
-    for port in (40000, 1080, 7890):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.15)
-            res = s.connect_ex(("127.0.0.1", port))
-            s.close()
-            if res == 0:
-                return f"socks5://127.0.0.1:{port}"
-        except Exception:
-            pass
+    # Auto-detect Cloudflare WARP proxy or local SOCKS5 proxy across all loopback addresses
+    for host in ("127.0.0.1", "localhost", "::1"):
+        for port in (40000, 1080, 7890):
+            try:
+                for res in socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM):
+                    af, socktype, proto, canonname, sa = res
+                    s = socket.socket(af, socktype, proto)
+                    s.settimeout(0.3)
+                    conn_res = s.connect_ex(sa)
+                    s.close()
+                    if conn_res == 0:
+                        return f"socks5://127.0.0.1:{port}"
+            except Exception:
+                pass
     return None
 
 
