@@ -340,6 +340,12 @@ class TestAntigravityBridge(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+            test_cfg = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+            if os.path.exists(test_cfg):
+                try:
+                    os.remove(test_cfg)
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
