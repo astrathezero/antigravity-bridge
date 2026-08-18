@@ -659,13 +659,34 @@ class ProfileManager:
         exhausted_until = info.get("exhausted_until", 0)
         return time.time() < exhausted_until
 
+def parse_quota_reset_seconds(error_message: str) -> Optional[float]:
+    """Extract exact cooldown duration in seconds from Google error message (e.g. 'Resets in 74h7m25s.')."""
+    if not error_message:
+        return None
+    match = re.search(r"Resets in\s+(?:(\d+)d\s*)?(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+(?:\.\d+)?)s)?", error_message, re.IGNORECASE)
+    if match:
+        d_str, h_str, m_str, s_str = match.groups()
+        total_sec = 0.0
+        if d_str:
+            total_sec += float(d_str) * 86400
+        if h_str:
+            total_sec += float(h_str) * 3600
+        if m_str:
+            total_sec += float(m_str) * 60
+        if s_str:
+            total_sec += float(s_str)
+        if total_sec > 0:
+            return total_sec
+    return None
+
+
     def mark_exhausted(
         self,
         profile: Optional[str],
         reason: str,
         cooldown_seconds: Optional[float] = None,
     ) -> None:
-        """Mark a profile as exhausted and enter cooldown with exponential backoff."""
+        """Mark a profile as exhausted and enter cooldown with exponential backoff or exact reset time."""
         key = profile or "default"
         now = time.time()
         with self.lock:
@@ -683,8 +704,12 @@ class ProfileManager:
             self.state[key]["consecutive_errors"] = err_count
 
             if cooldown_seconds is None:
-                multiplier = min(2 ** (err_count - 1), 8)
-                duration = min(self.default_cooldown * multiplier, self.max_cooldown)
+                parsed_cooldown = parse_quota_reset_seconds(reason)
+                if parsed_cooldown:
+                    duration = parsed_cooldown
+                else:
+                    multiplier = min(2 ** (err_count - 1), 8)
+                    duration = min(self.default_cooldown * multiplier, self.max_cooldown)
             else:
                 duration = cooldown_seconds
 
@@ -837,11 +862,14 @@ class ProfileManager:
                 ready = ready[idx:] + ready[:idx]
                 self.current_idx = (idx + 1) % len(ready)
 
-            # Exhausted profiles sorted by earliest cooldown expiry
+            # Fast Path: If healthy ready/recovering profiles exist, return them exclusively to eliminate wasted failure latency
+            if ready or recovering:
+                return ready + recovering
+
+            # Last resort fallback: try earliest-recovering exhausted profiles only when all accounts are down
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
-
-            ordered = ready + recovering + exhausted_profiles + unauthenticated
+            ordered = exhausted_profiles + unauthenticated
             return ordered if ordered else [None]
 
     def get_status_summary(self) -> Dict[str, Any]:
