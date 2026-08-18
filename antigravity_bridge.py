@@ -2655,7 +2655,7 @@ def main():
     parser.add_argument("--quota-cache", default=DEFAULT_QUOTA_CACHE_FILE, help=f"Path to quota cache JSON file (default: {DEFAULT_QUOTA_CACHE_FILE})")
     parser.add_argument("--check-profiles-on-start", action="store_true", help="Probe profile availability actively on startup")
     parser.add_argument("--api-key", default=os.environ.get("ANTIGRAVITY_BRIDGE_API_KEY"), help="API Key for authentication")
-    parser.add_argument("--enable-cors", action="store_true", help="Enable wildcard CORS headers (Access-Control-Allow-Origin: *)")
+    parser.add_argument("--enable-cors", "--cors", action="store_true", help="Enable wildcard CORS headers (Access-Control-Allow-Origin: *)")
     parser.add_argument("--image-router-url", default=DEFAULT_IMAGE_ROUTER_URL, help=f"Image generation router URL (default: {DEFAULT_IMAGE_ROUTER_URL})")
     parser.add_argument("--image-router-key", default=DEFAULT_IMAGE_ROUTER_KEY, help="API Key for image generation router")
 
