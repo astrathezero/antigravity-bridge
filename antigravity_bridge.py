@@ -2087,8 +2087,24 @@ Examples:
         target_dir = os.path.join(profiles_dir, name)
         os.makedirs(target_dir, exist_ok=True)
 
+        # Clear any stale files in target_dir so agy starts clean authentication
+        for f in os.listdir(target_dir):
+            fp = os.path.join(target_dir, f)
+            if os.path.isfile(fp) or os.path.islink(fp):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
+
         print(f"\n[INFO] Starting interactive login for profile '{name}'...")
         print(f"[INFO] Profile directory: {target_dir}")
+        print("=" * 80)
+        print("💡 สำคัญมาก (IMPORTANT):")
+        print("   เมื่อเบราว์เซอร์เปิดขึ้นมา หากมีบัญชีเดิมล็อกอินค้างอยู่")
+        print("   กรุณากดเลือก 'Use another account' (ใช้บัญชีอื่น)")
+        print(f"   แล้วล็อกอินด้วย Google Account ที่คุณต้องการตั้งค่าให้กับ profile '{name}'")
+        print("=" * 80 + "\n")
+
         cli_bin, _ = detect_cli_command()
 
         # Run agy in interactive mode with ANTIGRAVITY_PROFILE
@@ -2102,7 +2118,10 @@ Examples:
             return 1
 
         email = get_profile_account_email(name)
-        print(f"\n[SUCCESS] Profile '{name}' login completed! Active Account: {email}\n")
+        if email and email != "Not Logged In":
+            print(f"\n[SUCCESS] Profile '{name}' login completed! Active Account: {email}\n")
+        else:
+            print(f"\n[WARNING] Profile '{name}' does not appear to be logged in. Run command again if needed.\n")
         return 0
 
     elif sub in ("remove", "delete", "rm"):
