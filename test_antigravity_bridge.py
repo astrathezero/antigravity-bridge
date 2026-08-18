@@ -185,8 +185,9 @@ class TestAntigravityBridge(unittest.TestCase):
 
         # Test help
         self.assertEqual(handle_profile_cli(["--help"]), 0)
-        # Test list
-        self.assertEqual(handle_profile_cli(["list"]), 0)
+        # Test disable / enable
+        self.assertEqual(handle_profile_cli(["disable", "astrathezero"]), 0)
+        self.assertEqual(handle_profile_cli(["enable", "astrathezero"]), 0)
         # Test reset
         self.assertEqual(handle_profile_cli(["reset"]), 0)
 

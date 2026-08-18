@@ -90,7 +90,13 @@ python3 antigravity_bridge.py profile login attasitgits
 
 # Actively test/probe quota availability for all profiles or a specific profile:
 python3 antigravity_bridge.py profile test
-python3 antigravity_bridge.py profile test attasitgits
+python3 antigravity_bridge.py profile test --model gemini-3.7-flash
+
+# Temporarily disable a profile from receiving requests:
+python3 antigravity_bridge.py profile disable astrathezero
+
+# Re-enable a disabled profile:
+python3 antigravity_bridge.py profile enable astrathezero
 
 # Reset cooldown state for a profile or all profiles:
 python3 antigravity_bridge.py profile reset attasitgits

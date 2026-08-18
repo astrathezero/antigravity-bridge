@@ -539,7 +539,10 @@ def get_available_profiles() -> List[Optional[str]]:
     if os.path.exists(profiles_dir) and os.path.isdir(profiles_dir):
         found = [
             d for d in sorted(os.listdir(profiles_dir))
-            if os.path.isdir(os.path.join(profiles_dir, d)) and not d.startswith(".")
+            if os.path.isdir(os.path.join(profiles_dir, d))
+            and not d.startswith(".")
+            and not d.endswith(".disabled")
+            and not d.endswith(".bak")
         ]
         if found:
             active = os.environ.get("ANTIGRAVITY_PROFILE", "").strip()
@@ -738,6 +741,31 @@ class ProfileManager:
             self.state[key]["last_checked"] = int(now)
             self.save_cache()
 
+    def mark_disabled(self, profile: Optional[str], reason: str = "Manually disabled by user") -> None:
+        """Manually disable a profile indefinitely until re-enabled."""
+        key = profile or "default"
+        with self.lock:
+            if key not in self.state:
+                self.state[key] = {
+                    "status": "OK",
+                    "exhausted_until": 0,
+                    "last_checked": 0,
+                    "last_used": 0,
+                    "last_reason": "",
+                    "consecutive_errors": 0,
+                    "success_count": 0,
+                }
+            self.state[key]["status"] = "DISABLED"
+            self.state[key]["exhausted_until"] = int(time.time() + 315360000)  # 10 years
+            self.state[key]["last_reason"] = reason
+            self.save_cache()
+        logger.info("Profile '%s' has been DISABLED manually.", key)
+
+    def enable(self, profile: Optional[str]) -> None:
+        """Re-enable a disabled profile or reset cooldown."""
+        self.reset_all(profile)
+        logger.info("Profile '%s' has been ENABLED.", profile or "all")
+
     def reset_all(self, profile: Optional[str] = None) -> None:
         """Reset cooldown and error states for a given profile or all profiles."""
         with self.lock:
@@ -770,8 +798,11 @@ class ProfileManager:
             for p in profiles:
                 key = p or "default"
                 info = self.state.get(key, {})
-                exhausted_until = info.get("exhausted_until", 0)
                 status = info.get("status", "OK")
+                if status == "DISABLED":
+                    continue
+
+                exhausted_until = info.get("exhausted_until", 0)
 
                 if exhausted_until == 0 or now >= exhausted_until:
                     if status in ("EXHAUSTED", "RATE_LIMITED", "ERROR_COOLDOWN"):
@@ -1883,6 +1914,8 @@ Usage:
   python3 antigravity_bridge.py profile login <name>          Log in or add a new profile interactively with agy
   python3 antigravity_bridge.py profile remove <name>         Delete a profile directory
   python3 antigravity_bridge.py profile test [name]           Actively test/probe profile quota availability
+  python3 antigravity_bridge.py profile disable <name>        Temporarily disable a profile from receiving requests
+  python3 antigravity_bridge.py profile enable <name>         Re-enable a previously disabled profile
   python3 antigravity_bridge.py profile reset [name]          Reset cooldown state for a profile or all profiles
   python3 antigravity_bridge.py profile copy <name> <host>    Copy profile credentials to remote server via SCP
 
@@ -1892,8 +1925,10 @@ Shortcuts:
 
 Examples:
   python3 antigravity_bridge.py profile list
+  python3 antigravity_bridge.py profile disable astrathezero
+  python3 antigravity_bridge.py profile enable astrathezero
   python3 antigravity_bridge.py profile login attasitgits
-  python3 antigravity_bridge.py profile test
+  python3 antigravity_bridge.py profile test --model gemini-3.7-flash
   python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com
 """)
         return 0
@@ -1963,6 +1998,26 @@ Examples:
                 del pm.state[name]
                 pm.save_cache()
         print(f"[SUCCESS] Profile '{name}' deleted successfully.")
+        return 0
+
+    elif sub in ("disable", "pause", "block"):
+        if len(argv) < 2:
+            print("[Error] Please specify profile name: python3 antigravity_bridge.py profile disable <profile_name>")
+            return 1
+        name = argv[1].strip()
+        pm = GLOBAL_PROFILE_MANAGER
+        pm.mark_disabled(name)
+        print(f"[SUCCESS] Profile '{name}' is now DISABLED (will be excluded from requests).")
+        return 0
+
+    elif sub in ("enable", "unpause", "resume"):
+        if len(argv) < 2:
+            print("[Error] Please specify profile name: python3 antigravity_bridge.py profile enable <profile_name>")
+            return 1
+        name = argv[1].strip()
+        pm = GLOBAL_PROFILE_MANAGER
+        pm.enable(name)
+        print(f"[SUCCESS] Profile '{name}' is now ENABLED (status reset to OK).")
         return 0
 
     elif sub in ("test", "check", "probe"):
