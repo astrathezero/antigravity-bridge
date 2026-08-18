@@ -2428,6 +2428,69 @@ Examples:
         print(f"[SUCCESS] Cooldown reset for: {target_p or 'all profiles'}.")
         return 0
 
+    elif sub in ("diag", "doctor", "debug", "info"):
+        print("\n🔍 Antigravity Bridge Diagnostic Doctor 🩺\n" + "=" * 60)
+        # 1. Check IP and outbound connection
+        try:
+            req = urllib.request.Request("https://ifconfig.me/ip", headers={"User-Agent": "curl/7.88.1"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                out_ip = r.read().decode().strip()
+                print(f"🌐 Direct Outbound IP: {out_ip}")
+        except Exception as e:
+            print(f"🌐 Direct Outbound IP: Error ({e})")
+
+        # 2. Check WARP SOCKS5 proxy
+        proxy_url = detect_local_proxy()
+        print(f"🛡️  Active Proxy Setting: {proxy_url or 'None (Direct connection)'}")
+
+        # 3. Clean any stale lock/project cache files in ~/.gemini
+        gemini_dir = os.path.expanduser("~/.gemini")
+        stale_files = ["default-cli-project.json", "default_project_id.txt", "jetski_state.pbtxt", "update.lock", "knowledge.lock"]
+        cleaned = []
+        for sf in stale_files:
+            fp = os.path.join(gemini_dir, sf)
+            if os.path.exists(fp):
+                try:
+                    os.remove(fp)
+                    cleaned.append(sf)
+                except Exception:
+                    pass
+        if cleaned:
+            print(f"🧹 Cleaned stale project cache files: {cleaned}")
+
+        # 4. Check each profile's token directly with Google OAuth API
+        profiles = get_available_profiles()
+        print(f"\n📋 Inspecting {len(profiles)} Profile Tokens directly with Google OAuth UserInfo API:")
+        for p in profiles:
+            p_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{p}") if p else gemini_dir
+            if p and not os.path.exists(p_dir):
+                alt = os.path.expanduser(f"~/.config/antigravity/{p}")
+                if os.path.exists(alt):
+                    p_dir = alt
+            oauth_file = os.path.join(p_dir, "oauth_creds.json")
+            if not os.path.exists(oauth_file):
+                print(f"  ❌ Profile '{p}': oauth_creds.json missing at {p_dir}")
+                continue
+            try:
+                with open(oauth_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    tok = data.get("access_token") or (data.get("token", {}).get("access_token") if isinstance(data.get("token"), dict) else "")
+                    if not tok:
+                        print(f"  ❌ Profile '{p}': access_token is empty")
+                        continue
+                    # Call Google OAuth UserInfo directly with Bearer token
+                    ui_req = urllib.request.Request("https://www.googleapis.com/oauth2/v3/userinfo", headers={"Authorization": f"Bearer {tok}"})
+                    with urllib.request.urlopen(ui_req, timeout=8) as resp:
+                        user_info = json.loads(resp.read().decode("utf-8"))
+                        real_email = user_info.get("email")
+                        print(f"  ✅ Profile '{p}': Token VALID! Verified Google Account: {real_email}")
+            except urllib.error.HTTPError as he:
+                print(f"  ⚠️  Profile '{p}': Google OAuth API returned HTTP {he.code}: {he.reason}")
+            except Exception as exc:
+                print(f"  ❌ Profile '{p}': Token check error: {exc}")
+        print("=" * 60 + "\n")
+        return 0
+
     elif sub in ("copy", "sync", "scp"):
         if len(argv) < 3:
             print("[Error] Usage: python3 antigravity_bridge.py profile copy <profile_name> <remote_user@host>")
