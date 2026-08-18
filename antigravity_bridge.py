@@ -2099,23 +2099,63 @@ Examples:
         print(f"\n[INFO] Starting interactive login for profile '{name}'...")
         print(f"[INFO] Profile directory: {target_dir}")
         print("=" * 80)
-        print("💡 สำคัญมาก (IMPORTANT):")
-        print("   เมื่อเบราว์เซอร์เปิดขึ้นมา หากมีบัญชีเดิมล็อกอินค้างอยู่")
-        print("   กรุณากดเลือก 'Use another account' (ใช้บัญชีอื่น)")
-        print(f"   แล้วล็อกอินด้วย Google Account ที่คุณต้องการตั้งค่าให้กับ profile '{name}'")
+        print("💡 เมื่อหน้าต่างเบราว์เซอร์เปิดขึ้นมา (Browser OAuth):")
+        print(f"   กรุณาล็อกอินด้วย Google Account ที่คุณต้องการผูกกับ profile '{name}'")
+        print("   (หากมีบัญชีอื่นค้างอยู่ ให้เลือก 'Use another account' / 'ใช้บัญชีอื่น')")
         print("=" * 80 + "\n")
 
-        cli_bin, _ = detect_cli_command()
+        gemini_dir = os.path.expanduser("~/.gemini")
+        oauth_file = os.path.join(gemini_dir, "oauth_creds.json")
+        accounts_file = os.path.join(gemini_dir, "google_accounts.json")
+        state_file = os.path.join(gemini_dir, "state.json")
 
-        # Run agy in interactive mode with ANTIGRAVITY_PROFILE
+        backup_oauth = os.path.join(gemini_dir, ".oauth_creds.json.bak")
+        backup_accounts = os.path.join(gemini_dir, ".google_accounts.json.bak")
+        backup_state = os.path.join(gemini_dir, ".state.json.bak")
+
+        # 1. Backup existing ~/.gemini auth files so agy is forced to trigger browser OAuth login
+        try:
+            if os.path.exists(oauth_file):
+                shutil.move(oauth_file, backup_oauth)
+            if os.path.exists(accounts_file):
+                shutil.move(accounts_file, backup_accounts)
+            if os.path.exists(state_file):
+                shutil.move(state_file, backup_state)
+        except Exception as exc:
+            logger.warning("Could not backup existing auth: %s", exc)
+
+        cli_bin, _ = detect_cli_command()
         env = os.environ.copy()
         env["ANTIGRAVITY_PROFILE"] = name
         cmd = [cli_bin] if os.path.isabs(cli_bin) else ["agy"]
+
         try:
             subprocess.call(cmd, env=env)
         except FileNotFoundError:
             print(f"[Error] '{cli_bin}' binary not found. Make sure agy is installed.")
             return 1
+        finally:
+            # 2. Copy newly created auth files to ~/.config/antigravity/profiles/<name>/
+            try:
+                if os.path.exists(oauth_file):
+                    shutil.copy2(oauth_file, os.path.join(target_dir, "oauth_creds.json"))
+                if os.path.exists(accounts_file):
+                    shutil.copy2(accounts_file, os.path.join(target_dir, "google_accounts.json"))
+                if os.path.exists(state_file):
+                    shutil.copy2(state_file, os.path.join(target_dir, "state.json"))
+            except Exception as exc:
+                logger.warning("Could not save profile auth: %s", exc)
+
+            # 3. Restore original ~/.gemini auth files
+            try:
+                if os.path.exists(backup_oauth):
+                    shutil.move(backup_oauth, oauth_file)
+                if os.path.exists(backup_accounts):
+                    shutil.move(backup_accounts, accounts_file)
+                if os.path.exists(backup_state):
+                    shutil.move(backup_state, state_file)
+            except Exception as exc:
+                logger.warning("Could not restore original auth: %s", exc)
 
         email = get_profile_account_email(name)
         if email and email != "Not Logged In":
