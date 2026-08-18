@@ -1093,7 +1093,7 @@ def execute_cli_command(
                 copied_files = []
                 token_preview = "N/A"
                 email_preview = "N/A"
-                for f in ("oauth_creds.json", "google_accounts.json", "state.json", "settings.json"):
+                for f in ("oauth_creds.json", "google_accounts.json", "state.json", "settings.json", "antigravity-oauth-token"):
                     src = os.path.join(profile_dir, f)
                     if os.path.exists(src):
                         for td in target_dirs:
@@ -1122,8 +1122,34 @@ def execute_cli_command(
                             except Exception:
                                 pass
 
-                # Inject credentials directly into system Keyring / macOS Keychain so agy picks up the swapped profile
+                # Generate and write antigravity-oauth-token (the primary token file read by agy on Linux/headless)
                 oauth_file = os.path.join(profile_dir, "oauth_creds.json")
+                if os.path.exists(oauth_file):
+                    try:
+                        with open(oauth_file, "r", encoding="utf-8") as o_f:
+                            o_data = json.load(o_f)
+                        raw_tok = o_data.get("token") if isinstance(o_data.get("token"), dict) else o_data
+                        auth_meth = o_data.get("auth_method", "consumer")
+                        token_obj = {
+                            "token": {
+                                "access_token": raw_tok.get("access_token", ""),
+                                "token_type": raw_tok.get("token_type", "Bearer"),
+                                "refresh_token": raw_tok.get("refresh_token", ""),
+                                "expiry": raw_tok.get("expiry", "2026-08-18T23:59:59+07:00"),
+                            },
+                            "auth_method": auth_meth,
+                        }
+                        tok_json_str = json.dumps(token_obj)
+                        for td in target_dirs:
+                            try:
+                                with open(os.path.join(td, "antigravity-oauth-token"), "w", encoding="utf-8") as aot_f:
+                                    aot_f.write(tok_json_str)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.warning("Failed generating antigravity-oauth-token: %s", e)
+
+                # Inject credentials directly into system Keyring / macOS Keychain so agy picks up the swapped profile
                 if os.path.exists(oauth_file):
                     try:
                         with open(oauth_file, "r", encoding="utf-8") as o_f:
