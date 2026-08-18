@@ -1083,8 +1083,23 @@ def execute_cli_command(
                                     t = o_data.get("access_token") or (o_data.get("token", {}).get("access_token") if isinstance(o_data.get("token"), dict) else "")
                                     if t:
                                         token_preview = f"{t[:12]}...{t[-6:]}" if len(t) > 20 else t
-                        except Exception as exc:
-                            logger.warning("[PROFILE SWAP] Failed copying %s: %s", f, exc)
+                        except Exception as e:
+                            logger.warning("Failed copying %s to %s: %s", src, dst, e)
+
+                # Sync or clean project cache files so agy does not get pinned to an exhausted project
+                for sf in ("default-cli-project.json", "default_project_id.txt", "jetski_state.pbtxt"):
+                    src_sf = os.path.join(profile_dir, sf)
+                    dst_sf = os.path.join(gemini_dir, sf)
+                    if os.path.exists(src_sf):
+                        try:
+                            shutil.copy2(src_sf, dst_sf)
+                        except Exception:
+                            pass
+                    elif os.path.exists(dst_sf):
+                        try:
+                            os.remove(dst_sf)
+                        except Exception:
+                            pass
                 logger.info(
                     "[PROFILE SWAP] Activated profile '%s' | Email: %s | Token: %s | Source: %s",
                     profile,
