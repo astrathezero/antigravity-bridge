@@ -2451,6 +2451,68 @@ Examples:
         print(f"[SUCCESS] Cooldown reset for: {target_p or 'all profiles'}.")
         return 0
 
+    elif sub in ("refresh", "reauth"):
+        print("\n🔄 Antigravity Profile Token Refresher 🔄\n" + "=" * 60)
+        profiles = get_available_profiles()
+        target_p = argv[1].strip() if len(argv) > 1 else None
+        to_refresh = [target_p] if target_p else profiles
+
+        cli_bin, _ = detect_cli_command()
+        agy_exec = cli_bin if os.path.isabs(cli_bin) else shutil.which("agy") or "agy"
+
+        for p in to_refresh:
+            p_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{p}") if p else os.path.expanduser("~/.gemini")
+            oauth_file = os.path.join(p_dir, "oauth_creds.json")
+            if not os.path.exists(oauth_file):
+                print(f"  ❌ Profile '{p}': oauth_creds.json missing at {p_dir}")
+                continue
+            with open(oauth_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            refresh_tok = data.get("refresh_token") or data.get("token", {}).get("refresh_token")
+            if not refresh_tok:
+                print(f"  ❌ Profile '{p}': refresh_token is missing")
+                continue
+
+            print(f"👉 Refreshing Profile '{p}' via OAuth Keychain Exchange...")
+            if sys.platform == "darwin":
+                keyring_payload = {
+                    "token": {
+                        "access_token": "",
+                        "refresh_token": refresh_tok,
+                        "token_type": "Bearer",
+                        "expiry": "2020-01-01T00:00:00Z"
+                    },
+                    "auth_method": "consumer"
+                }
+                b64_val = "go-keyring-base64:" + base64.b64encode(json.dumps(keyring_payload).encode()).decode()
+                subprocess.call(["security", "add-generic-password", "-U", "-s", "gemini", "-a", "antigravity", "-w", b64_val])
+
+                # Execute agy to trigger Google auto-refresh
+                subprocess.call([agy_exec, "--dangerously-skip-permissions", "-p", "hi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                try:
+                    out = subprocess.check_output(["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"]).decode().strip()
+                    raw = out.replace("go-keyring-base64:", "")
+                    fresh_d = json.loads(base64.b64decode(raw).decode())
+                    new_access_tok = fresh_d.get("token", {}).get("access_token")
+                    exp = fresh_d.get("token", {}).get("expiry", "")
+                    if new_access_tok:
+                        data["access_token"] = new_access_tok
+                        if "token" in data and isinstance(data["token"], dict):
+                            data["token"]["access_token"] = new_access_tok
+                            data["token"]["expiry"] = exp
+                        with open(oauth_file, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2)
+                        print(f"   [SUCCESS] New Access Token generated! Valid until {exp}")
+                    else:
+                        print(f"   [FAILED] Google rejected refresh_token (account may need re-login)")
+                except Exception as e:
+                    print(f"   [FAILED] Error: {e}")
+            else:
+                print(f"   [INFO] On Linux, tokens are auto-refreshed via agy execution.")
+        print("=" * 60 + "\n")
+        return 0
+
     elif sub in ("diag", "doctor", "debug", "info"):
         print("\n🔍 Antigravity Bridge Diagnostic Doctor 🩺\n" + "=" * 60)
         # 1. Check IP and outbound connection
