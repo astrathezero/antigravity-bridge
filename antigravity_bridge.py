@@ -1051,7 +1051,10 @@ def execute_cli_command(
 
     # Filtered environment to avoid leaking ambient secrets to CLI subprocess
     allowed_env_keys = {
-        "PATH", "HOME", "LANG", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP",
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL",
+        "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP",
+        "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME",
+        "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK",
         "ANTIGRAVITY_PROFILE", "ANTIGRAVITY_PROFILES", "ANTIGRAVITY_HOME",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
     }
