@@ -1235,6 +1235,11 @@ CLI_EXEC_LOCK = threading.Lock()
 
 def detect_local_proxy() -> Optional[str]:
     """Detect if an explicit proxy is configured in env or if local HTTP/SOCKS5 proxy is listening."""
+    if os.environ.get("ANTIGRAVITY_NO_PROXY", "").lower() in ("1", "true", "yes") or \
+       os.environ.get("DISABLE_PROXY", "").lower() in ("1", "true", "yes") or \
+       os.environ.get("NO_PROXY") == "*":
+        return None
+
     for env_var in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         val = os.environ.get(env_var, "").strip()
         if val:
@@ -3003,8 +3008,12 @@ def main():
     parser.add_argument("--enable-cors", "--cors", action="store_true", help="Enable wildcard CORS headers (Access-Control-Allow-Origin: *)")
     parser.add_argument("--image-router-url", default=DEFAULT_IMAGE_ROUTER_URL, help=f"Image generation router URL (default: {DEFAULT_IMAGE_ROUTER_URL})")
     parser.add_argument("--image-router-key", default=DEFAULT_IMAGE_ROUTER_KEY, help="API Key for image generation router")
+    parser.add_argument("--no-proxy", "--direct", action="store_true", help="Disable outbound proxy auto-detection and connect directly to Google")
 
     args = parser.parse_args()
+
+    if args.no_proxy:
+        os.environ["ANTIGRAVITY_NO_PROXY"] = "1"
 
     cli_bin, cmd_tpl = detect_cli_command()
     effective_cmd = args.cmd or cmd_tpl
