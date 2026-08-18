@@ -864,6 +864,241 @@ class ProfileManager:
 GLOBAL_PROFILE_MANAGER = ProfileManager()
 
 
+def get_os_type() -> str:
+    """Return normalized OS string: 'darwin', 'linux', or 'windows'."""
+    if sys.platform == "darwin":
+        return "darwin"
+    elif sys.platform.startswith("linux"):
+        return "linux"
+    elif sys.platform in ("win32", "cygwin"):
+        return "windows"
+    return sys.platform
+
+
+def get_auth_sync_directories() -> List[str]:
+    """Return all directories where agy or antigravity reads/writes auth files based on the OS."""
+    os_type = get_os_type()
+    dirs = [
+        os.path.expanduser("~/.gemini"),
+        os.path.expanduser("~/.gemini/antigravity-cli"),
+        os.path.expanduser("~/.config/antigravity"),
+        os.path.expanduser("~/.config/gemini"),
+    ]
+    if os_type == "darwin":
+        dirs.append(os.path.expanduser("~/Library/Application Support/Antigravity"))
+    elif os_type == "windows":
+        user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+        app_data = os.environ.get("APPDATA", os.path.join(user_profile, "AppData", "Roaming"))
+        local_app_data = os.environ.get("LOCALAPPDATA", os.path.join(user_profile, "AppData", "Local"))
+        dirs.extend([
+            os.path.join(user_profile, ".gemini"),
+            os.path.join(user_profile, ".gemini", "antigravity-cli"),
+            os.path.join(app_data, "antigravity"),
+            os.path.join(local_app_data, "antigravity"),
+        ])
+    seen = set()
+    result = []
+    for d in dirs:
+        norm = os.path.abspath(d)
+        if norm not in seen:
+            seen.add(norm)
+            result.append(d)
+    return result
+
+
+def inject_os_keyring_token(raw_oauth_str: str) -> bool:
+    """Inject OAuth token into OS-specific Keyring (macOS Keychain, Linux secret-tool, etc.)."""
+    os_type = get_os_type()
+    b64_val = "go-keyring-base64:" + base64.b64encode(raw_oauth_str.encode("utf-8")).decode("utf-8")
+
+    if os_type == "darwin":
+        try:
+            res = subprocess.call(
+                ["security", "add-generic-password", "-U", "-s", "gemini", "-a", "antigravity", "-w", b64_val],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return res == 0
+        except Exception as e:
+            logger.debug("macOS Keychain injection error: %s", e)
+            return False
+
+    elif os_type == "linux":
+        if shutil.which("secret-tool"):
+            try:
+                p = subprocess.Popen(
+                    ["secret-tool", "store", "--label=Antigravity", "service", "gemini", "account", "antigravity"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                p.communicate(input=b64_val.encode("utf-8"), timeout=2.0)
+                return p.returncode == 0
+            except Exception as e:
+                logger.debug("Linux secret-tool injection error: %s", e)
+                return False
+    return False
+
+
+def extract_os_keyring_token() -> Optional[Dict[str, Any]]:
+    """Extract OAuth token from OS-specific Keyring (macOS Keychain, Linux secret-tool, etc.)."""
+    os_type = get_os_type()
+    if os_type == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"],
+                stderr=subprocess.DEVNULL,
+            ).decode("utf-8").strip()
+            if out.startswith("go-keyring-base64:"):
+                raw_b64 = out[len("go-keyring-base64:"):]
+                return json.loads(base64.b64decode(raw_b64).decode("utf-8"))
+        except Exception as exc:
+            logger.debug("macOS Keychain extraction error: %s", exc)
+    elif os_type == "linux":
+        if shutil.which("secret-tool"):
+            try:
+                out = subprocess.check_output(
+                    ["secret-tool", "lookup", "service", "gemini", "account", "antigravity"],
+                    stderr=subprocess.DEVNULL,
+                ).decode("utf-8").strip()
+                if out.startswith("go-keyring-base64:"):
+                    raw_b64 = out[len("go-keyring-base64:"):]
+                    return json.loads(base64.b64decode(raw_b64).decode("utf-8"))
+            except Exception as exc:
+                logger.debug("Linux secret-tool lookup error: %s", exc)
+    return None
+
+
+def extract_os_file_token() -> Optional[Dict[str, Any]]:
+    """Extract OAuth token from OS filesystem fallbacks (antigravity-oauth-token or oauth_creds.json)."""
+    sync_dirs = get_auth_sync_directories()
+    for td in sync_dirs:
+        tok_file = os.path.join(td, "antigravity-oauth-token")
+        if os.path.exists(tok_file):
+            try:
+                with open(tok_file, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    tok = d.get("token") or d
+                    if tok.get("access_token") or tok.get("refresh_token"):
+                        return d
+            except Exception:
+                pass
+
+        oauth_file = os.path.join(td, "oauth_creds.json")
+        if os.path.exists(oauth_file):
+            try:
+                with open(oauth_file, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    tok = d.get("token") or d
+                    if tok.get("access_token") or tok.get("refresh_token"):
+                        return d
+            except Exception:
+                pass
+    return None
+
+
+def sync_profile_to_system(profile_name: str) -> Tuple[str, str]:
+    """Sync active profile credentials to all OS-specific auth directories and system keyrings."""
+    profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile_name}")
+    if not os.path.exists(profile_dir):
+        alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile_name}")
+        if os.path.exists(alt_dir) and os.path.isdir(alt_dir):
+            profile_dir = alt_dir
+
+    token_preview = "N/A"
+    email_preview = "N/A"
+
+    if not os.path.exists(profile_dir) or not os.path.isdir(profile_dir):
+        return email_preview, token_preview
+
+    target_dirs = get_auth_sync_directories()
+    for td in target_dirs:
+        os.makedirs(td, exist_ok=True)
+
+    # 1. Copy JSON & token files
+    for f in ("oauth_creds.json", "google_accounts.json", "state.json", "settings.json", "antigravity-oauth-token"):
+        src = os.path.join(profile_dir, f)
+        if os.path.exists(src):
+            for td in target_dirs:
+                dst = os.path.join(td, f)
+                if os.path.abspath(src) != os.path.abspath(dst):
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception as e:
+                        logger.debug("Failed copying %s to %s: %s", src, dst, e)
+
+            if f == "google_accounts.json":
+                try:
+                    with open(src, "r", encoding="utf-8") as g_file:
+                        g_data = json.load(g_file)
+                        email_preview = g_data.get("active", "unknown")
+                except Exception:
+                    pass
+            elif f == "oauth_creds.json":
+                try:
+                    with open(src, "r", encoding="utf-8") as o_file:
+                        o_data = json.load(o_file)
+                        t = o_data.get("access_token") or (o_data.get("token", {}).get("access_token") if isinstance(o_data.get("token"), dict) else "")
+                        if t:
+                            token_preview = f"{t[:12]}...{t[-6:]}" if len(t) > 20 else t
+                except Exception:
+                    pass
+
+    # 2. Generate and write antigravity-oauth-token (fallback for headless Linux)
+    oauth_file = os.path.join(profile_dir, "oauth_creds.json")
+    if os.path.exists(oauth_file):
+        try:
+            with open(oauth_file, "r", encoding="utf-8") as o_f:
+                raw_content = o_f.read()
+                o_data = json.loads(raw_content)
+
+            raw_tok = o_data.get("token") if isinstance(o_data.get("token"), dict) else o_data
+            auth_meth = o_data.get("auth_method", "consumer")
+            token_obj = {
+                "token": {
+                    "access_token": raw_tok.get("access_token", ""),
+                    "token_type": raw_tok.get("token_type", "Bearer"),
+                    "refresh_token": raw_tok.get("refresh_token", ""),
+                    "expiry": raw_tok.get("expiry", "2026-08-18T23:59:59+07:00"),
+                },
+                "auth_method": auth_meth,
+            }
+            tok_json_str = json.dumps(token_obj)
+            for td in target_dirs:
+                try:
+                    with open(os.path.join(td, "antigravity-oauth-token"), "w", encoding="utf-8") as aot_f:
+                        aot_f.write(tok_json_str)
+                except Exception:
+                    pass
+
+            # 3. Inject into system Keyring / macOS Keychain
+            inject_os_keyring_token(raw_content)
+        except Exception as e:
+            logger.debug("Failed preparing tokens for sync: %s", e)
+
+    # 4. Clean stale conversations / projects cache
+    for sf in (
+        "default-cli-project.json", "default_project_id.txt", "jetski_state.pbtxt",
+        "conversation_summaries.db", "history.jsonl"
+    ):
+        src_sf = os.path.join(profile_dir, sf)
+        for td in target_dirs:
+            dst_sf = os.path.join(td, sf)
+            if os.path.abspath(src_sf) != os.path.abspath(dst_sf):
+                if os.path.exists(src_sf):
+                    try:
+                        shutil.copy2(src_sf, dst_sf)
+                    except Exception:
+                        pass
+                elif os.path.exists(dst_sf):
+                    try:
+                        os.remove(dst_sf)
+                    except Exception:
+                        pass
+
+    return email_preview, token_preview
+
+
 def probe_profile(
     profile: Optional[str],
     cmd_template: Optional[str] = None,
@@ -1074,6 +1309,7 @@ def execute_cli_command(
 
     with CLI_EXEC_LOCK:
         if profile:
+            email_preview, token_preview = sync_profile_to_system(profile)
             profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}")
             if not os.path.exists(profile_dir):
                 alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile}")
@@ -1081,123 +1317,10 @@ def execute_cli_command(
                     profile_dir = alt_dir
 
             if os.path.exists(profile_dir) and os.path.isdir(profile_dir):
-                target_dirs = [
-                    os.path.expanduser("~/.gemini"),
-                    os.path.expanduser("~/.config/antigravity"),
-                    os.path.expanduser("~/.config/gemini"),
-                    os.path.expanduser("~/.gemini/antigravity-cli"),
-                ]
-                for td in target_dirs:
-                    os.makedirs(td, exist_ok=True)
-
-                copied_files = []
-                token_preview = "N/A"
-                email_preview = "N/A"
-                for f in ("oauth_creds.json", "google_accounts.json", "state.json", "settings.json", "antigravity-oauth-token"):
-                    src = os.path.join(profile_dir, f)
-                    if os.path.exists(src):
-                        for td in target_dirs:
-                            dst = os.path.join(td, f)
-                            if os.path.abspath(src) != os.path.abspath(dst):
-                                try:
-                                    shutil.copy2(src, dst)
-                                    copied_files.append(dst)
-                                except Exception as e:
-                                    logger.warning("Failed copying %s to %s: %s", src, dst, e)
-
-                        if f == "google_accounts.json":
-                            try:
-                                with open(src, "r", encoding="utf-8") as g_file:
-                                    g_data = json.load(g_file)
-                                    email_preview = g_data.get("active", "unknown")
-                            except Exception:
-                                pass
-                        elif f == "oauth_creds.json":
-                            try:
-                                with open(src, "r", encoding="utf-8") as o_file:
-                                    o_data = json.load(o_file)
-                                    t = o_data.get("access_token") or (o_data.get("token", {}).get("access_token") if isinstance(o_data.get("token"), dict) else "")
-                                    if t:
-                                        token_preview = f"{t[:12]}...{t[-6:]}" if len(t) > 20 else t
-                            except Exception:
-                                pass
-
-                # Generate and write antigravity-oauth-token (the primary token file read by agy on Linux/headless)
-                oauth_file = os.path.join(profile_dir, "oauth_creds.json")
-                if os.path.exists(oauth_file):
-                    try:
-                        with open(oauth_file, "r", encoding="utf-8") as o_f:
-                            o_data = json.load(o_f)
-                        raw_tok = o_data.get("token") if isinstance(o_data.get("token"), dict) else o_data
-                        auth_meth = o_data.get("auth_method", "consumer")
-                        token_obj = {
-                            "token": {
-                                "access_token": raw_tok.get("access_token", ""),
-                                "token_type": raw_tok.get("token_type", "Bearer"),
-                                "refresh_token": raw_tok.get("refresh_token", ""),
-                                "expiry": raw_tok.get("expiry", "2026-08-18T23:59:59+07:00"),
-                            },
-                            "auth_method": auth_meth,
-                        }
-                        tok_json_str = json.dumps(token_obj)
-                        for td in target_dirs:
-                            try:
-                                with open(os.path.join(td, "antigravity-oauth-token"), "w", encoding="utf-8") as aot_f:
-                                    aot_f.write(tok_json_str)
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        logger.warning("Failed generating antigravity-oauth-token: %s", e)
-
-                # Inject credentials directly into system Keyring / macOS Keychain so agy picks up the swapped profile
-                if os.path.exists(oauth_file):
-                    try:
-                        with open(oauth_file, "r", encoding="utf-8") as o_f:
-                            raw_oauth = o_f.read()
-                        b64_val = "go-keyring-base64:" + base64.b64encode(raw_oauth.encode("utf-8")).decode("utf-8")
-                        if sys.platform == "darwin":
-                            subprocess.call(
-                                ["security", "add-generic-password", "-U", "-s", "gemini", "-a", "antigravity", "-w", b64_val],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                            )
-                        elif sys.platform.startswith("linux"):
-                            if shutil.which("secret-tool"):
-                                try:
-                                    p = subprocess.Popen(
-                                        ["secret-tool", "store", "--label=Antigravity", "service", "gemini", "account", "antigravity"],
-                                        stdin=subprocess.PIPE,
-                                        stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL,
-                                    )
-                                    p.communicate(input=b64_val.encode("utf-8"), timeout=2.0)
-                                except Exception:
-                                    pass
-                    except Exception as e:
-                        logger.warning("Failed injecting token into system keyring: %s", e)
-
-                # Sync or clean project & conversation cache files across all config directories
-                for sf in (
-                    "default-cli-project.json", "default_project_id.txt", "jetski_state.pbtxt",
-                    "conversation_summaries.db", "history.jsonl"
-                ):
-                    src_sf = os.path.join(profile_dir, sf)
-                    for td in target_dirs:
-                        dst_sf = os.path.join(td, sf)
-                        if os.path.abspath(src_sf) != os.path.abspath(dst_sf):
-                            if os.path.exists(src_sf):
-                                try:
-                                    shutil.copy2(src_sf, dst_sf)
-                                except Exception:
-                                    pass
-                            elif os.path.exists(dst_sf):
-                                try:
-                                    os.remove(dst_sf)
-                                except Exception:
-                                    pass
                 logger.info(
-                    "[PROFILE SWAP] Activated profile '%s' | Email: %s | Token: %s | Source: %s",
+                    "[PROFILE SWAP] Activated profile '%s' (OS: %s) | Email: %s | Token: %s | Source: %s",
                     profile,
+                    get_os_type(),
                     email_preview,
                     token_preview,
                     profile_dir,
@@ -2355,52 +2478,87 @@ Examples:
             print(f"[Error] '{cli_bin}' binary not found. Make sure agy is installed.")
             return 1
         finally:
-            # 2. Extract newly created tokens (from Keychain on macOS or from ~/.gemini on Linux)
+            # 2. Extract newly created tokens (from Keychain on macOS or files on Linux/Windows)
             token_saved = False
             verified_email = None
 
-            if sys.platform == "darwin":
-                try:
-                    out = subprocess.check_output(
-                        ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"],
-                        stderr=subprocess.DEVNULL
-                    ).decode("utf-8").strip()
-                    if out.startswith("go-keyring-base64:"):
-                        raw_b64 = out[len("go-keyring-base64:"):]
-                        parsed = json.loads(base64.b64decode(raw_b64).decode("utf-8"))
-                        token_info = parsed.get("token", {})
-                        if token_info and token_info.get("access_token"):
-                            oauth_data = {
-                                "access_token": token_info.get("access_token"),
-                                "refresh_token": token_info.get("refresh_token"),
-                                "token_type": token_info.get("token_type", "Bearer"),
-                                "scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid",
-                                "expiry_date": 1789133170339,
-                                "token": {
-                                    "access_token": token_info.get("access_token"),
-                                    "refresh_token": token_info.get("refresh_token"),
-                                    "token_type": token_info.get("token_type", "Bearer"),
-                                    "expiry": token_info.get("expiry", "2026-08-18T23:59:59+07:00"),
-                                },
-                                "auth_method": parsed.get("auth_method", "consumer"),
-                            }
-                            with open(os.path.join(target_dir, "oauth_creds.json"), "w", encoding="utf-8") as f:
-                                json.dump(oauth_data, f, indent=2)
-                            token_saved = True
+            # Try OS keyring first (macOS Keychain / Linux SecretService)
+            keyring_data = extract_os_keyring_token()
+            if keyring_data:
+                token_info = keyring_data.get("token", {})
+                if token_info and token_info.get("access_token"):
+                    oauth_data = {
+                        "access_token": token_info.get("access_token"),
+                        "refresh_token": token_info.get("refresh_token"),
+                        "token_type": token_info.get("token_type", "Bearer"),
+                        "scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid",
+                        "expiry_date": 1789133170339,
+                        "token": {
+                            "access_token": token_info.get("access_token"),
+                            "refresh_token": token_info.get("refresh_token"),
+                            "token_type": token_info.get("token_type", "Bearer"),
+                            "expiry": token_info.get("expiry", "2026-08-18T23:59:59+07:00"),
+                        },
+                        "auth_method": keyring_data.get("auth_method", "consumer"),
+                    }
+                    with open(os.path.join(target_dir, "oauth_creds.json"), "w", encoding="utf-8") as f:
+                        json.dump(oauth_data, f, indent=2)
+                    with open(os.path.join(target_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
+                        json.dump({"token": oauth_data["token"], "auth_method": oauth_data["auth_method"]}, f, indent=2)
+                    token_saved = True
 
-                            # Fetch verified email from Google API using access token
-                            try:
-                                u_req = urllib.request.Request(
-                                    "https://www.googleapis.com/oauth2/v3/userinfo",
-                                    headers={"Authorization": f"Bearer {token_info['access_token']}"}
-                                )
-                                with urllib.request.urlopen(u_req, timeout=5.0) as u_resp:
-                                    u_data = json.loads(u_resp.read().decode("utf-8"))
-                                    verified_email = u_data.get("email")
-                            except Exception:
-                                pass
-                except Exception as exc:
-                    logger.debug("Keychain token extraction: %s", exc)
+                    # Fetch verified email from Google API using access token
+                    try:
+                        u_req = urllib.request.Request(
+                            "https://www.googleapis.com/oauth2/v3/userinfo",
+                            headers={"Authorization": f"Bearer {token_info['access_token']}"}
+                        )
+                        with urllib.request.urlopen(u_req, timeout=5.0) as u_resp:
+                            u_data = json.loads(u_resp.read().decode("utf-8"))
+                            verified_email = u_data.get("email")
+                    except Exception:
+                        pass
+
+            # Try OS file fallbacks (antigravity-oauth-token or oauth_creds.json)
+            if not token_saved:
+                file_data = extract_os_file_token()
+                if file_data:
+                    raw_tok = file_data.get("token") if isinstance(file_data.get("token"), dict) else file_data
+                    auth_meth = file_data.get("auth_method", "consumer")
+                    access_tok = raw_tok.get("access_token", "")
+                    refresh_tok = raw_tok.get("refresh_token", "")
+                    exp_tok = raw_tok.get("expiry", "2026-08-18T23:59:59+07:00")
+                    oauth_data = {
+                        "access_token": access_tok,
+                        "refresh_token": refresh_tok,
+                        "token_type": raw_tok.get("token_type", "Bearer"),
+                        "scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid",
+                        "expiry_date": 1789133170339,
+                        "token": {
+                            "access_token": access_tok,
+                            "refresh_token": refresh_tok,
+                            "token_type": raw_tok.get("token_type", "Bearer"),
+                            "expiry": exp_tok,
+                        },
+                        "auth_method": auth_meth,
+                    }
+                    with open(os.path.join(target_dir, "oauth_creds.json"), "w", encoding="utf-8") as f:
+                        json.dump(oauth_data, f, indent=2)
+                    with open(os.path.join(target_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
+                        json.dump({"token": oauth_data["token"], "auth_method": auth_meth}, f, indent=2)
+                    token_saved = True
+
+                    if access_tok:
+                        try:
+                            u_req = urllib.request.Request(
+                                "https://www.googleapis.com/oauth2/v3/userinfo",
+                                headers={"Authorization": f"Bearer {access_tok}"}
+                            )
+                            with urllib.request.urlopen(u_req, timeout=5.0) as u_resp:
+                                u_data = json.loads(u_resp.read().decode("utf-8"))
+                                verified_email = u_data.get("email")
+                        except Exception:
+                            pass
 
             if not token_saved:
                 try:
@@ -2432,7 +2590,7 @@ Examples:
 
         email = get_profile_account_email(name)
         if email and email != "Not Logged In":
-            print(f"\n[SUCCESS] Profile '{name}' login completed! Active Account: {email}\n")
+            print(f"\n[SUCCESS] Profile '{name}' login completed (OS: {get_os_type()})! Active Account: {email}\n")
         else:
             print(f"\n[WARNING] Profile '{name}' does not appear to be logged in. Run command again if needed.\n")
         return 0
@@ -2568,7 +2726,7 @@ Examples:
                 print(f"  ❌ Profile '{p}': refresh_token is missing")
                 continue
 
-            print(f"👉 Refreshing Profile '{p}' via OAuth Keychain Exchange...")
+            print(f"👉 Refreshing Profile '{p}' (OS: {get_os_type()}) via OAuth Exchange...")
             if sys.platform == "darwin":
                 keyring_payload = {
                     "token": {
@@ -2598,13 +2756,61 @@ Examples:
                             data["token"]["expiry"] = exp
                         with open(oauth_file, "w", encoding="utf-8") as f:
                             json.dump(data, f, indent=2)
+                        with open(os.path.join(p_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
+                            json.dump({"token": data["token"], "auth_method": data.get("auth_method", "consumer")}, f, indent=2)
                         print(f"   [SUCCESS] New Access Token generated! Valid until {exp}")
                     else:
                         print(f"   [FAILED] Google rejected refresh_token (account may need re-login)")
                 except Exception as e:
                     print(f"   [FAILED] Error: {e}")
             else:
-                print(f"   [INFO] On Linux, tokens are auto-refreshed via agy execution.")
+                # Linux & Windows OS handling: Prepare expired token payload in antigravity-oauth-token
+                fallback_payload = {
+                    "token": {
+                        "access_token": "",
+                        "refresh_token": refresh_tok,
+                        "token_type": "Bearer",
+                        "expiry": "2020-01-01T00:00:00Z"
+                    },
+                    "auth_method": "consumer"
+                }
+                for td in get_auth_sync_directories():
+                    os.makedirs(td, exist_ok=True)
+                    try:
+                        with open(os.path.join(td, "antigravity-oauth-token"), "w", encoding="utf-8") as a_f:
+                            json.dump(fallback_payload, a_f)
+                    except Exception:
+                        pass
+
+                # Execute agy to trigger Google auto-refresh
+                subprocess.call([agy_exec, "--dangerously-skip-permissions", "-p", "hi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                # Check for refreshed token in antigravity-oauth-token
+                token_found = False
+                for td in get_auth_sync_directories():
+                    tok_path = os.path.join(td, "antigravity-oauth-token")
+                    if os.path.exists(tok_path):
+                        try:
+                            with open(tok_path, "r", encoding="utf-8") as tf:
+                                fresh_d = json.load(tf)
+                            new_access_tok = fresh_d.get("token", {}).get("access_token") or fresh_d.get("access_token")
+                            exp = fresh_d.get("token", {}).get("expiry", "")
+                            if new_access_tok:
+                                data["access_token"] = new_access_tok
+                                if "token" in data and isinstance(data["token"], dict):
+                                    data["token"]["access_token"] = new_access_tok
+                                    data["token"]["expiry"] = exp
+                                with open(oauth_file, "w", encoding="utf-8") as f:
+                                    json.dump(data, f, indent=2)
+                                with open(os.path.join(p_dir, "antigravity-oauth-token"), "w", encoding="utf-8") as f:
+                                    json.dump({"token": data["token"], "auth_method": data.get("auth_method", "consumer")}, f, indent=2)
+                                print(f"   [SUCCESS] New Access Token generated! Valid until {exp}")
+                                token_found = True
+                                break
+                        except Exception:
+                            pass
+                if not token_found:
+                    print(f"   [INFO] On {get_os_type()}, tokens are auto-refreshed via agy execution.")
         print("=" * 60 + "\n")
         return 0
 
