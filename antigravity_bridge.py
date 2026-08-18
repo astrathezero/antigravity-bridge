@@ -1006,28 +1006,32 @@ def detect_local_proxy() -> Optional[str]:
             return val
 
     # 1. Check local HTTP CONNECT proxies (Privoxy on 8118, tinyproxy on 8888)
-    for port in (8118, 8888, 8080):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.15)
-            if s.connect_ex(("127.0.0.1", port)) == 0:
+    for host in ("127.0.0.1", "localhost", "::1"):
+        for port in (8118, 8888, 8080):
+            try:
+                af = socket.AF_INET6 if ":" in host else socket.AF_INET
+                s = socket.socket(af, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                res = s.connect_ex((host, port))
                 s.close()
-                return f"http://127.0.0.1:{port}"
-            s.close()
-        except Exception:
-            pass
+                if res == 0:
+                    return f"http://127.0.0.1:{port}"
+            except Exception:
+                pass
 
     # 2. Check local SOCKS5 proxies (WARP on 40000, Shadowsocks on 1080, Clash on 7890)
-    for port in (40000, 1080, 7890):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.15)
-            if s.connect_ex(("127.0.0.1", port)) == 0:
+    for host in ("127.0.0.1", "localhost", "::1"):
+        for port in (40000, 1080, 7890):
+            try:
+                af = socket.AF_INET6 if ":" in host else socket.AF_INET
+                s = socket.socket(af, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                res = s.connect_ex((host, port))
                 s.close()
-                return f"socks5://127.0.0.1:{port}"
-            s.close()
-        except Exception:
-            pass
+                if res == 0:
+                    return f"socks5://127.0.0.1:{port}"
+            except Exception:
+                pass
 
     return None
 
