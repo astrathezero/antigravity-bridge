@@ -1106,7 +1106,34 @@ def execute_cli_command(
                         except Exception as e:
                             logger.warning("Failed copying %s to %s: %s", src, dst, e)
 
-                # Sync or clean project cache files so agy does not get pinned to an exhausted project
+                # Inject credentials directly into system Keyring / macOS Keychain so agy picks up the swapped profile
+                oauth_file = os.path.join(profile_dir, "oauth_creds.json")
+                if os.path.exists(oauth_file):
+                    try:
+                        with open(oauth_file, "r", encoding="utf-8") as o_f:
+                            raw_oauth = o_f.read()
+                        b64_val = "go-keyring-base64:" + base64.b64encode(raw_oauth.encode("utf-8")).decode("utf-8")
+                        if sys.platform == "darwin":
+                            subprocess.call(
+                                ["security", "add-generic-password", "-U", "-s", "gemini", "-a", "antigravity", "-w", b64_val],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                        elif sys.platform.startswith("linux"):
+                            if shutil.which("secret-tool"):
+                                try:
+                                    p = subprocess.Popen(
+                                        ["secret-tool", "store", "--label=Antigravity", "service", "gemini", "account", "antigravity"],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL,
+                                    )
+                                    p.communicate(input=b64_val.encode("utf-8"), timeout=2.0)
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logger.warning("Failed injecting token into system keyring: %s", e)
+
                 # Sync or clean project & conversation cache files so agy does not get pinned to an exhausted conversation
                 for sf in (
                     "default-cli-project.json", "default_project_id.txt", "jetski_state.pbtxt",
