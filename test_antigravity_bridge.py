@@ -123,11 +123,18 @@ class TestAntigravityBridge(unittest.TestCase):
             cache_file = tf.name
         try:
             pm = ProfileManager(profiles=["p1", "p2"], cache_file=cache_file)
+            self.assertEqual(pm.get_estimated_quota_percent("p1"), 100)
+
             pm.mark_success("p1")
+            self.assertEqual(pm.get_estimated_quota_percent("p1"), 98)
+
             pm.mark_exhausted("p2", "Rate limit exceeded", cooldown_seconds=300)
+            self.assertEqual(pm.get_estimated_quota_percent("p2"), 0)
+
             banner = pm.build_profile_quota_banner("p1")
             self.assertIn("Antigravity Profile:** `p1`", banner)
-            self.assertIn("1/2** Profiles Ready", banner)
+            self.assertIn("Quota:** ~**98%**", banner)
+            self.assertIn("1/2** Ready", banner)
             self.assertIn("in Cooldown", banner)
             self.assertIn("p2", banner)
         finally:

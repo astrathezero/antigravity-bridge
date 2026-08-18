@@ -54,6 +54,8 @@ MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
 DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "https://aiapirouter.mrserm.com/v1")
 DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "sk-36a01df06cfa9e5f-5mbqa9-11db659b")
 DEFAULT_QUOTA_CACHE_FILE = os.path.expanduser("~/.config/antigravity/quota_cache.json")
+DEFAULT_QUOTA_WINDOW_SECONDS = 10800.0  # 3-hour sliding window for Google Gemini quota
+DEFAULT_FLASH_QUOTA_CAPACITY = 50       # Baseline 50 requests capacity per 3h window for Flash
 
 SUPPORTED_MODELS = {
     "gemini-3.7-flash": ("gemini-3.7-flash", "high"),
@@ -642,6 +644,8 @@ class ProfileManager:
                         "last_reason": "",
                         "consecutive_errors": 0,
                         "success_count": 0,
+                        "window_requests": 0,
+                        "window_start": 0,
                     }
 
     def load_cache(self) -> None:
@@ -658,6 +662,8 @@ class ProfileManager:
                         "last_reason": "",
                         "consecutive_errors": 0,
                         "success_count": 0,
+                        "window_requests": 0,
+                        "window_start": 0,
                     }
 
             if os.path.exists(self.cache_file) and os.path.getsize(self.cache_file) > 0:
@@ -676,6 +682,8 @@ class ProfileManager:
                                         "last_reason": "",
                                         "consecutive_errors": 0,
                                         "success_count": 0,
+                                        "window_requests": 0,
+                                        "window_start": 0,
                                     }
                                 self.state[k].update(v)
                 except Exception as exc:
@@ -738,6 +746,7 @@ class ProfileManager:
             self.state[key]["exhausted_until"] = int(now + duration)
             self.state[key]["last_checked"] = int(now)
             self.state[key]["last_reason"] = reason
+            self.state[key]["window_requests"] = DEFAULT_FLASH_QUOTA_CAPACITY
             self.save_cache()
 
         logger.warning(
@@ -762,6 +771,8 @@ class ProfileManager:
                     "last_reason": "",
                     "consecutive_errors": 0,
                     "success_count": 0,
+                    "window_requests": 0,
+                    "window_start": 0,
                 }
             err_count = self.state[key].get("consecutive_errors", 0) + 1
             self.state[key]["consecutive_errors"] = err_count
@@ -776,7 +787,7 @@ class ProfileManager:
             self.save_cache()
 
     def mark_success(self, profile: Optional[str]) -> None:
-        """Mark profile execution success and reset error count."""
+        """Mark profile execution success, update window counters and reset error count."""
         key = profile or "default"
         now = time.time()
         with self.lock:
@@ -789,11 +800,21 @@ class ProfileManager:
                     "last_reason": "",
                     "consecutive_errors": 0,
                     "success_count": 0,
+                    "window_requests": 0,
+                    "window_start": 0,
                 }
             self.state[key]["status"] = "OK"
             self.state[key]["exhausted_until"] = 0
             self.state[key]["consecutive_errors"] = 0
             self.state[key]["success_count"] = self.state[key].get("success_count", 0) + 1
+
+            w_start = self.state[key].get("window_start", 0)
+            if now - w_start > DEFAULT_QUOTA_WINDOW_SECONDS:
+                self.state[key]["window_start"] = int(now)
+                self.state[key]["window_requests"] = 1
+            else:
+                self.state[key]["window_requests"] = self.state[key].get("window_requests", 0) + 1
+
             self.state[key]["last_used"] = int(now)
             self.state[key]["last_checked"] = int(now)
             self.save_cache()
@@ -811,6 +832,8 @@ class ProfileManager:
                     "last_reason": "",
                     "consecutive_errors": 0,
                     "success_count": 0,
+                    "window_requests": 0,
+                    "window_start": 0,
                 }
             self.state[key]["status"] = "DISABLED"
             self.state[key]["exhausted_until"] = int(time.time() + 315360000)  # 10 years
@@ -824,7 +847,8 @@ class ProfileManager:
         logger.info("Profile '%s' has been ENABLED.", profile or "all")
 
     def reset_all(self, profile: Optional[str] = None) -> None:
-        """Reset cooldown and error states for a given profile or all profiles."""
+        """Reset cooldown, error states, and session quota window for a given profile or all profiles."""
+        now = time.time()
         with self.lock:
             if profile:
                 key = profile
@@ -832,11 +856,15 @@ class ProfileManager:
                     self.state[key]["status"] = "OK"
                     self.state[key]["exhausted_until"] = 0
                     self.state[key]["consecutive_errors"] = 0
+                    self.state[key]["window_requests"] = 0
+                    self.state[key]["window_start"] = int(now)
             else:
                 for k in self.state:
                     self.state[k]["status"] = "OK"
                     self.state[k]["exhausted_until"] = 0
                     self.state[k]["consecutive_errors"] = 0
+                    self.state[k]["window_requests"] = 0
+                    self.state[k]["window_start"] = int(now)
             self.save_cache()
 
     def get_ordered_profiles(self) -> List[Optional[str]]:
@@ -893,8 +921,28 @@ class ProfileManager:
             ordered = exhausted_profiles + unauthenticated
             return ordered if ordered else [None]
 
+    def get_estimated_quota_percent(self, profile: Optional[str]) -> int:
+        """Calculate rough remaining quota % (0-100%) based on Gemini Flash session budget."""
+        key = profile or "default"
+        info = self.state.get(key, {})
+        status = info.get("status", "OK")
+        if status == "DISABLED":
+            return 0
+        now = time.time()
+        ex_until = info.get("exhausted_until", 0)
+        if ex_until > now:
+            return 0
+        w_start = info.get("window_start", 0)
+        if now - w_start > DEFAULT_QUOTA_WINDOW_SECONDS:
+            return 100
+        reqs = info.get("window_requests", 0)
+        used_ratio = min(1.0, reqs / float(DEFAULT_FLASH_QUOTA_CAPACITY))
+        # Keep between 5% and 100% when active, 0% when exhausted
+        pct = max(5, int((1.0 - used_ratio) * 100))
+        return pct
+
     def get_status_summary(self) -> Dict[str, Any]:
-        """Return full status summary of all profiles."""
+        """Return full status summary of all profiles including quota percentage."""
         now = time.time()
         with self.lock:
             res: Dict[str, Any] = {}
@@ -903,14 +951,25 @@ class ProfileManager:
                 info = dict(self.state.get(key, {}))
                 exhausted_until = info.get("exhausted_until", 0)
                 cooldown_left = max(0, int(exhausted_until - now))
-                is_avail = (cooldown_left == 0)
+                is_avail = (cooldown_left == 0 and info.get("status") != "DISABLED")
                 info["available"] = is_avail
                 info["cooldown_seconds_remaining"] = cooldown_left
+
+                if info.get("status") == "DISABLED" or cooldown_left > 0:
+                    quota_pct = 0
+                else:
+                    w_start = info.get("window_start", 0)
+                    if now - w_start > DEFAULT_QUOTA_WINDOW_SECONDS:
+                        quota_pct = 100
+                    else:
+                        reqs = info.get("window_requests", 0)
+                        quota_pct = max(5, int((1.0 - min(1.0, reqs / float(DEFAULT_FLASH_QUOTA_CAPACITY))) * 100))
+                info["estimated_quota_percent"] = quota_pct
                 res[key] = info
             return res
 
     def build_profile_quota_banner(self, used_profile: Optional[str] = None) -> str:
-        """Build a clean, informative markdown footer showing active profile, account, and quota pool status."""
+        """Build a clean, informative markdown footer showing active profile, account, estimated quota %, and quota pool status."""
         now = time.time()
         with self.lock:
             key = used_profile or "default"
@@ -918,6 +977,9 @@ class ProfileManager:
             email_info = f" (`{email}`)" if email and email != "Not Logged In" else ""
             stat = self.state.get(key, {})
             succ = stat.get("success_count", 0)
+
+            # Profile quota %
+            quota_pct = self.get_estimated_quota_percent(used_profile)
 
             total_profiles = list(self._profiles)
             total_count = len(total_profiles)
@@ -941,23 +1003,24 @@ class ProfileManager:
                     ready_list.append(pk)
 
             ready_count = len(ready_list)
+            pool_pct = int((ready_count / float(total_count)) * 100) if total_count > 0 else 100
 
             lines = [
                 "",
                 "---",
-                f"> ⚡ **Antigravity Profile:** `{key}`{email_info} | Total Successes: **{succ}**",
+                f"> ⚡ **Antigravity Profile:** `{key}`{email_info} | 🔋 **Quota:** ~**{quota_pct}%** (Flash Est.)",
             ]
 
             if total_count > 1:
                 if cooldown_list:
                     cd_items = [f"`{p}` (⏳ {format_cooldown_duration(rem)})" for p, rem in sorted(cooldown_list, key=lambda x: x[1])]
-                    lines.append(f"> 📊 **Quota Pool:** 🟢 **{ready_count}/{total_count}** Profiles Ready • 🔴 **{len(cooldown_list)}** in Cooldown")
+                    lines.append(f"> 📊 **Quota Pool:** 🟢 **{ready_count}/{total_count}** Ready (**{pool_pct}%** Capacity) • 🔴 **{len(cooldown_list)}** in Cooldown")
                     lines.append(f"> ⏳ **In Cooldown:** {', '.join(cd_items)}")
                 else:
-                    lines.append(f"> 📊 **Quota Pool:** 🟢 **{ready_count}/{total_count}** Profiles Ready (All Quotas OK)")
+                    lines.append(f"> 📊 **Quota Pool:** 🟢 **{ready_count}/{total_count}** Profiles Ready (**100%** Capacity)")
             else:
                 status_desc = "🟢 Ready" if key in ready_list else "🔴 In Cooldown"
-                lines.append(f"> 📊 **Quota Status:** {status_desc}")
+                lines.append(f"> 📊 **Quota Status:** {status_desc} (~{quota_pct}%)")
 
             return "\n".join(lines)
 
@@ -2274,6 +2337,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 ready_ct = sum(1 for s in summary.values() if s.get("available"))
                 extra_resp_headers["X-Antigravity-Profiles-Ready"] = str(ready_ct)
                 extra_resp_headers["X-Antigravity-Profiles-Total"] = str(len(summary))
+                extra_resp_headers["X-Antigravity-Profile-Quota-Percent"] = str(profile_manager.get_estimated_quota_percent(used_profile))
 
             # --- Handle Anthropic API format (/v1/messages) ---
             if is_anthropic:
@@ -2534,9 +2598,9 @@ Examples:
         all_profiles = get_available_profiles()
         summary = pm.get_status_summary()
 
-        print("\n" + "=" * 85)
-        print(f"{'Profile Name':<18} {'Google Account Email':<32} {'Status':<12} {'Cooldown':<10} {'Success'}")
-        print("=" * 85)
+        print("\n" + "=" * 96)
+        print(f"{'Profile Name':<16} {'Google Account Email':<30} {'Status':<11} {'Cooldown':<10} {'Est. Quota':<12} {'Success'}")
+        print("=" * 96)
         for p in all_profiles:
             name = p or "default"
             email = get_profile_account_email(p)
@@ -2544,8 +2608,9 @@ Examples:
             status = info.get("status", "OK")
             cooldown = f"{info.get('cooldown_seconds_remaining', 0)}s" if info.get("cooldown_seconds_remaining", 0) > 0 else "Ready"
             succ = info.get("success_count", 0)
-            print(f"{name:<18} {email:<32} {status:<12} {cooldown:<10} {succ}")
-        print("=" * 85 + "\n")
+            q_pct = f"{info.get('estimated_quota_percent', 100)}%"
+            print(f"{name:<16} {email:<30} {status:<11} {cooldown:<10} {q_pct:<12} {succ}")
+        print("=" * 96 + "\n")
         return 0
 
     elif sub in ("set", "use", "config", "order", "rotate"):
