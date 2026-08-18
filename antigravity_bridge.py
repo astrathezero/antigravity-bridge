@@ -2577,10 +2577,42 @@ Examples:
         return 0
 
     elif sub in ("copy", "sync", "scp"):
-        if len(argv) < 3:
-            print("[Error] Usage: python3 antigravity_bridge.py profile copy <profile_name> <remote_user@host>")
-            print("        Example: python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com")
+        if len(argv) < 2:
+            print("[Error] Usage: python3 antigravity_bridge.py profile sync <remote_user@host>")
+            print("        Example: python3 antigravity_bridge.py profile sync attasit@n8n.mrserm.com")
             return 1
+
+        if len(argv) == 2:
+            # Sync ALL profiles (lightweight tar stream of auth JSONs only)
+            remote = argv[1].strip()
+            profiles = get_available_profiles()
+            print(f"[INFO] Syncing {len(profiles)} profile(s) to {remote}...")
+            import tempfile, tarfile
+            with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp_tar:
+                tar_path = tmp_tar.name
+
+            try:
+                with tarfile.open(tar_path, "w:gz") as tar:
+                    for p in profiles:
+                        p_dir = os.path.join(profiles_dir, p)
+                        for f in ("oauth_creds.json", "google_accounts.json", "state.json"):
+                            fp = os.path.join(p_dir, f)
+                            if os.path.exists(fp):
+                                tar.add(fp, arcname=f"{p}/{f}")
+
+                remote_cmd = "mkdir -p ~/.config/antigravity/profiles && tar -xzf - -C ~/.config/antigravity/profiles"
+                with open(tar_path, "rb") as tar_in:
+                    ssh_proc = subprocess.run(["ssh", remote, remote_cmd], stdin=tar_in)
+
+                if ssh_proc.returncode == 0:
+                    print(f"[SUCCESS] All {len(profiles)} profiles synced to {remote} successfully!")
+                else:
+                    print(f"[Error] Sync failed with exit code {ssh_proc.returncode}")
+                return ssh_proc.returncode
+            finally:
+                if os.path.exists(tar_path):
+                    os.remove(tar_path)
+
         name = argv[1].strip()
         remote = argv[2].strip()
         source_dir = os.path.join(profiles_dir, name)
