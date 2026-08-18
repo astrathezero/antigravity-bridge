@@ -1107,19 +1107,26 @@ def execute_cli_command(
                             logger.warning("Failed copying %s to %s: %s", src, dst, e)
 
                 # Sync or clean project cache files so agy does not get pinned to an exhausted project
-                for sf in ("default-cli-project.json", "default_project_id.txt", "jetski_state.pbtxt"):
+                # Sync or clean project & conversation cache files so agy does not get pinned to an exhausted conversation
+                for sf in (
+                    "default-cli-project.json", "default_project_id.txt", "jetski_state.pbtxt",
+                    "conversation_summaries.db", "history.jsonl"
+                ):
                     src_sf = os.path.join(profile_dir, sf)
                     dst_sf = os.path.join(gemini_dir, sf)
+                    cli_dst_sf = os.path.join(gemini_dir, "antigravity-cli", sf)
                     if os.path.exists(src_sf):
                         try:
                             shutil.copy2(src_sf, dst_sf)
                         except Exception:
                             pass
-                    elif os.path.exists(dst_sf):
-                        try:
-                            os.remove(dst_sf)
-                        except Exception:
-                            pass
+                    else:
+                        for target in (dst_sf, cli_dst_sf):
+                            if os.path.exists(target):
+                                try:
+                                    os.remove(target)
+                                except Exception:
+                                    pass
                 logger.info(
                     "[PROFILE SWAP] Activated profile '%s' | Email: %s | Token: %s | Source: %s",
                     profile,
