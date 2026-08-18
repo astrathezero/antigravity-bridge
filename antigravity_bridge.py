@@ -2985,8 +2985,13 @@ Examples:
 
 
 def main():
-    # Handle Profile CLI subcommands before parser
-    if len(sys.argv) > 1 and sys.argv[1].lower() in ("profile", "profiles", "login", "auth"):
+    # Handle Profile & Diagnostic CLI subcommands before parser
+    known_subs = {
+        "profile", "profiles", "login", "auth", "diag", "doctor", "debug", "info",
+        "test", "check", "probe", "reset", "unblock", "refresh", "reauth", "sync",
+        "list", "ls", "disable", "enable", "remove", "delete", "rm"
+    }
+    if len(sys.argv) > 1 and sys.argv[1].lower() in known_subs:
         if sys.argv[1].lower() in ("profile", "profiles"):
             sub_args = sys.argv[2:]
         else:
