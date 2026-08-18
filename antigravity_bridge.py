@@ -3103,17 +3103,34 @@ Examples:
                 with open(oauth_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     tok = data.get("access_token") or (data.get("token", {}).get("access_token") if isinstance(data.get("token"), dict) else "")
-                    if not tok:
-                        print(f"  ❌ Profile '{p}': access_token is empty")
+                    refresh_tok = data.get("refresh_token") or (data.get("token", {}).get("refresh_token") if isinstance(data.get("token"), dict) else "")
+                    acc_email = get_profile_account_email(p)
+
+                    if not tok and not refresh_tok:
+                        print(f"  ❌ Profile '{p}': tokens are empty in {oauth_file}")
                         continue
-                    # Call Google OAuth UserInfo directly with Bearer token
-                    ui_req = urllib.request.Request("https://www.googleapis.com/oauth2/v3/userinfo", headers={"Authorization": f"Bearer {tok}"})
-                    with urllib.request.urlopen(ui_req, timeout=8) as resp:
-                        user_info = json.loads(resp.read().decode("utf-8"))
-                        real_email = user_info.get("email")
-                        print(f"  ✅ Profile '{p}': Token VALID! Verified Google Account: {real_email}")
-            except urllib.error.HTTPError as he:
-                print(f"  ⚠️  Profile '{p}': Google OAuth API returned HTTP {he.code}: {he.reason}")
+
+                    # Call Google OAuth UserInfo directly with Bearer token if available
+                    if tok:
+                        try:
+                            ui_req = urllib.request.Request("https://www.googleapis.com/oauth2/v3/userinfo", headers={"Authorization": f"Bearer {tok}"})
+                            with urllib.request.urlopen(ui_req, timeout=8) as resp:
+                                user_info = json.loads(resp.read().decode("utf-8"))
+                                real_email = user_info.get("email")
+                                print(f"  ✅ Profile '{p}': Token ACTIVE & VALID! Verified Google Account: {real_email}")
+                                continue
+                        except urllib.error.HTTPError as he:
+                            if he.code == 401:
+                                if refresh_tok:
+                                    print(f"  🟡 Profile '{p}': Access token expired (normal after 1h) | Refresh Token: READY ✅ | Account: {acc_email}")
+                                else:
+                                    print(f"  ❌ Profile '{p}': Access token expired (401) and refresh_token is missing")
+                            else:
+                                print(f"  ⚠️  Profile '{p}': Google OAuth API returned HTTP {he.code}: {he.reason}")
+                        except Exception as exc:
+                            print(f"  ⚠️  Profile '{p}': UserInfo check error: {exc}")
+                    elif refresh_tok:
+                        print(f"  🟡 Profile '{p}': Refresh Token READY ✅ (Auto-generates access token on execution) | Account: {acc_email}")
             except Exception as exc:
                 print(f"  ❌ Profile '{p}': Token check error: {exc}")
         print("=" * 60 + "\n")
