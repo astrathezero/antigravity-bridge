@@ -566,6 +566,27 @@ def get_available_profiles() -> List[Optional[str]]:
     return [active] if active else [None]
 
 
+def parse_quota_reset_seconds(error_message: str) -> Optional[float]:
+    """Extract exact cooldown duration in seconds from Google error message (e.g. 'Resets in 74h7m25s.')."""
+    if not error_message:
+        return None
+    match = re.search(r"Resets in\s+(?:(\d+)d\s*)?(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+(?:\.\d+)?)s)?", error_message, re.IGNORECASE)
+    if match:
+        d_str, h_str, m_str, s_str = match.groups()
+        total_sec = 0.0
+        if d_str:
+            total_sec += float(d_str) * 86400
+        if h_str:
+            total_sec += float(h_str) * 3600
+        if m_str:
+            total_sec += float(m_str) * 60
+        if s_str:
+            total_sec += float(s_str)
+        if total_sec > 0:
+            return total_sec
+    return None
+
+
 class ProfileManager:
     """Thread-safe manager for tracking profile quota states, cooldowns, and smart routing."""
 
@@ -658,27 +679,6 @@ class ProfileManager:
         info = self.state.get(key, {})
         exhausted_until = info.get("exhausted_until", 0)
         return time.time() < exhausted_until
-
-def parse_quota_reset_seconds(error_message: str) -> Optional[float]:
-    """Extract exact cooldown duration in seconds from Google error message (e.g. 'Resets in 74h7m25s.')."""
-    if not error_message:
-        return None
-    match = re.search(r"Resets in\s+(?:(\d+)d\s*)?(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+(?:\.\d+)?)s)?", error_message, re.IGNORECASE)
-    if match:
-        d_str, h_str, m_str, s_str = match.groups()
-        total_sec = 0.0
-        if d_str:
-            total_sec += float(d_str) * 86400
-        if h_str:
-            total_sec += float(h_str) * 3600
-        if m_str:
-            total_sec += float(m_str) * 60
-        if s_str:
-            total_sec += float(s_str)
-        if total_sec > 0:
-            return total_sec
-    return None
-
 
     def mark_exhausted(
         self,
