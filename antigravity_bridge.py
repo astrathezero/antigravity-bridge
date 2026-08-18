@@ -2107,6 +2107,13 @@ Examples:
         print("      - พิมพ์ '/exit' หรือกด Ctrl+D เพื่อบันทึก Credential และกลับสู่หน้าหลัก")
         print("=" * 80 + "\n")
 
+        # Clear any stale keychain entry so agy starts clean authentication on macOS
+        if sys.platform == "darwin":
+            try:
+                subprocess.call(["security", "delete-generic-password", "-s", "gemini", "-a", "antigravity"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
         gemini_dir = os.path.expanduser("~/.gemini")
         oauth_file = os.path.join(gemini_dir, "oauth_creds.json")
         accounts_file = os.path.join(gemini_dir, "google_accounts.json")
@@ -2138,16 +2145,61 @@ Examples:
             print(f"[Error] '{cli_bin}' binary not found. Make sure agy is installed.")
             return 1
         finally:
-            # 2. Copy newly created auth files to ~/.config/antigravity/profiles/<name>/
-            try:
-                if os.path.exists(oauth_file):
-                    shutil.copy2(oauth_file, os.path.join(target_dir, "oauth_creds.json"))
-                if os.path.exists(accounts_file):
-                    shutil.copy2(accounts_file, os.path.join(target_dir, "google_accounts.json"))
-                if os.path.exists(state_file):
-                    shutil.copy2(state_file, os.path.join(target_dir, "state.json"))
-            except Exception as exc:
-                logger.warning("Could not save profile auth: %s", exc)
+            # 2. Extract newly created tokens (from Keychain on macOS or from ~/.gemini on Linux)
+            token_saved = False
+            verified_email = None
+
+            if sys.platform == "darwin":
+                try:
+                    out = subprocess.check_output(
+                        ["security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"],
+                        stderr=subprocess.DEVNULL
+                    ).decode("utf-8").strip()
+                    if out.startswith("go-keyring-base64:"):
+                        raw_b64 = out[len("go-keyring-base64:"):]
+                        parsed = json.loads(base64.b64decode(raw_b64).decode("utf-8"))
+                        token_info = parsed.get("token", {})
+                        if token_info and token_info.get("access_token"):
+                            oauth_data = {
+                                "access_token": token_info.get("access_token"),
+                                "refresh_token": token_info.get("refresh_token"),
+                                "token_type": token_info.get("token_type", "Bearer"),
+                                "scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid",
+                            }
+                            with open(os.path.join(target_dir, "oauth_creds.json"), "w", encoding="utf-8") as f:
+                                json.dump(oauth_data, f, indent=2)
+                            token_saved = True
+
+                            # Fetch verified email from Google API using access token
+                            try:
+                                u_req = urllib.request.Request(
+                                    "https://www.googleapis.com/oauth2/v3/userinfo",
+                                    headers={"Authorization": f"Bearer {token_info['access_token']}"}
+                                )
+                                with urllib.request.urlopen(u_req, timeout=5.0) as u_resp:
+                                    u_data = json.loads(u_resp.read().decode("utf-8"))
+                                    verified_email = u_data.get("email")
+                            except Exception:
+                                pass
+                except Exception as exc:
+                    logger.debug("Keychain token extraction: %s", exc)
+
+            if not token_saved:
+                try:
+                    if os.path.exists(oauth_file):
+                        shutil.copy2(oauth_file, os.path.join(target_dir, "oauth_creds.json"))
+                    if os.path.exists(accounts_file):
+                        shutil.copy2(accounts_file, os.path.join(target_dir, "google_accounts.json"))
+                    if os.path.exists(state_file):
+                        shutil.copy2(state_file, os.path.join(target_dir, "state.json"))
+                except Exception as exc:
+                    logger.warning("Could not save profile auth: %s", exc)
+
+            if verified_email:
+                with open(os.path.join(target_dir, "google_accounts.json"), "w", encoding="utf-8") as f:
+                    json.dump({"active": verified_email, "old": []}, f, indent=2)
+                with open(os.path.join(target_dir, "state.json"), "w", encoding="utf-8") as f:
+                    json.dump({"active": verified_email}, f, indent=2)
 
             # 3. Restore original ~/.gemini auth files
             try:
