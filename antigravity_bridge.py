@@ -999,26 +999,36 @@ CLI_EXEC_LOCK = threading.Lock()
 
 
 def detect_local_proxy() -> Optional[str]:
-    """Detect if an explicit proxy is configured in env or if local WARP/SOCKS5 proxy is listening."""
+    """Detect if an explicit proxy is configured in env or if local HTTP/SOCKS5 proxy is listening."""
     for env_var in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         val = os.environ.get(env_var, "").strip()
         if val:
             return val
 
-    # Auto-detect Cloudflare WARP proxy or local SOCKS5 proxy across all loopback addresses
-    for host in ("127.0.0.1", "localhost", "::1"):
-        for port in (40000, 1080, 7890):
-            try:
-                for res in socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM):
-                    af, socktype, proto, canonname, sa = res
-                    s = socket.socket(af, socktype, proto)
-                    s.settimeout(0.3)
-                    conn_res = s.connect_ex(sa)
-                    s.close()
-                    if conn_res == 0:
-                        return f"socks5://127.0.0.1:{port}"
-            except Exception:
-                pass
+    # 1. Check local HTTP CONNECT proxies (Privoxy on 8118, tinyproxy on 8888)
+    for port in (8118, 8888, 8080):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.15)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                s.close()
+                return f"http://127.0.0.1:{port}"
+            s.close()
+        except Exception:
+            pass
+
+    # 2. Check local SOCKS5 proxies (WARP on 40000, Shadowsocks on 1080, Clash on 7890)
+    for port in (40000, 1080, 7890):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.15)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                s.close()
+                return f"socks5://127.0.0.1:{port}"
+            s.close()
+        except Exception:
+            pass
+
     return None
 
 
