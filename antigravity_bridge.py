@@ -2265,6 +2265,14 @@ Examples:
                                 "refresh_token": token_info.get("refresh_token"),
                                 "token_type": token_info.get("token_type", "Bearer"),
                                 "scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile openid",
+                                "expiry_date": 1789133170339,
+                                "token": {
+                                    "access_token": token_info.get("access_token"),
+                                    "refresh_token": token_info.get("refresh_token"),
+                                    "token_type": token_info.get("token_type", "Bearer"),
+                                    "expiry": token_info.get("expiry", "2026-08-18T23:59:59+07:00"),
+                                },
+                                "auth_method": parsed.get("auth_method", "consumer"),
                             }
                             with open(os.path.join(target_dir, "oauth_creds.json"), "w", encoding="utf-8") as f:
                                 json.dump(oauth_data, f, indent=2)
