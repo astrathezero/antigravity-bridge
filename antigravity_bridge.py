@@ -1015,6 +1015,28 @@ def execute_cli_command(
     }
     env = {k: v for k, v in os.environ.items() if k in allowed_env_keys or k.startswith("ANTIGRAVITY_")}
     if profile:
+        profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}")
+        if os.path.exists(profile_dir) and os.path.isdir(profile_dir):
+            gemini_subdir = os.path.join(profile_dir, ".gemini")
+            os.makedirs(gemini_subdir, exist_ok=True)
+            for f in ("oauth_creds.json", "google_accounts.json", "state.json", "installation_id", "settings.json", "trustedFolders.json"):
+                src = os.path.join(profile_dir, f)
+                dst = os.path.join(gemini_subdir, f)
+                if os.path.exists(src) and not os.path.exists(dst):
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        pass
+                # Copy base config from main ~/.gemini if missing
+                main_src = os.path.expanduser(f"~/.gemini/{f}")
+                if not os.path.exists(dst) and os.path.exists(main_src) and f in ("installation_id", "settings.json", "trustedFolders.json"):
+                    try:
+                        shutil.copy2(main_src, dst)
+                    except Exception:
+                        pass
+
+            env["HOME"] = profile_dir
+            env["USERPROFILE"] = profile_dir
         env["ANTIGRAVITY_PROFILE"] = profile
 
     proc = subprocess.Popen(
