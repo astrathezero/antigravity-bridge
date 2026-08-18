@@ -1015,6 +1015,7 @@ def execute_cli_command(
     allowed_env_keys = {
         "PATH", "HOME", "LANG", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP",
         "ANTIGRAVITY_PROFILE", "ANTIGRAVITY_PROFILES", "ANTIGRAVITY_HOME",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
     }
     env = {k: v for k, v in os.environ.items() if k in allowed_env_keys or k.startswith("ANTIGRAVITY_")}
     if profile:
