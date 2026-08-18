@@ -311,6 +311,32 @@ class TestAntigravityBridge(unittest.TestCase):
                 resp_json = json.loads(resp.read().decode("utf-8"))
                 self.assertEqual(resp_json["status"], "ok")
                 self.assertIn("default_test", resp_json["profiles"])
+
+            # 10. Test /v1/profiles/config POST endpoint (Live dynamic reload)
+            config_url = f"http://127.0.0.1:{port}/v1/profiles/config"
+            config_req = json.dumps({"profiles": "p_alpha,p_beta"}).encode("utf-8")
+            req = urllib.request.Request(config_url, data=config_req, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp_json["status"], "ok")
+                self.assertEqual(resp_json["active_profiles"], ["p_alpha", "p_beta"])
+
+            # 11. Test /v1/profiles/disable and /v1/profiles/enable
+            disable_url = f"http://127.0.0.1:{port}/v1/profiles/disable"
+            disable_req = json.dumps({"profile": "p_alpha"}).encode("utf-8")
+            req = urllib.request.Request(disable_url, data=disable_req, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp_json["status"], "ok")
+                self.assertEqual(resp_json["profiles"]["p_alpha"]["status"], "DISABLED")
+
+            enable_url = f"http://127.0.0.1:{port}/v1/profiles/enable"
+            enable_req = json.dumps({"profile": "p_alpha"}).encode("utf-8")
+            req = urllib.request.Request(enable_url, data=enable_req, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp_json["status"], "ok")
+                self.assertEqual(resp_json["profiles"]["p_alpha"]["status"], "OK")
         finally:
             server.shutdown()
             server.server_close()

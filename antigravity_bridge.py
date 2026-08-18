@@ -535,6 +535,17 @@ def get_available_profiles() -> List[Optional[str]]:
         if profiles:
             return profiles
 
+    cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                configured = cfg.get("profiles")
+                if configured and isinstance(configured, list) and len(configured) > 0:
+                    return [str(p).strip() for p in configured if p]
+        except Exception:
+            pass
+
     profiles_dir = os.path.expanduser("~/.config/antigravity/profiles")
     if os.path.exists(profiles_dir) and os.path.isdir(profiles_dir):
         found = [
@@ -1373,8 +1384,11 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             is_image_gen = path in ("/v1/images/generations", "/images/generations")
             is_profiles_reset = path in ("/v1/profiles/reset", "/profiles/reset")
             is_profiles_check = path in ("/v1/profiles/check", "/profiles/check")
+            is_profiles_config = path in ("/v1/profiles/config", "/profiles/config", "/v1/config", "/config")
+            is_profiles_disable = path in ("/v1/profiles/disable", "/profiles/disable")
+            is_profiles_enable = path in ("/v1/profiles/enable", "/profiles/enable")
 
-            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check):
+            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check or is_profiles_config or is_profiles_disable or is_profiles_enable):
                 self._send_json_response({"error": "Not Found"}, status_code=404)
                 return
 
@@ -1415,6 +1429,72 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 req_json = {}
 
             # Handle Profile management endpoints
+            if is_profiles_config:
+                pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
+                raw_p = req_json.get("profiles")
+                if raw_p is not None:
+                    if isinstance(raw_p, str):
+                        new_profiles = [p.strip() for p in raw_p.split(",") if p.strip()]
+                    elif isinstance(raw_p, list):
+                        new_profiles = [str(p).strip() for p in raw_p if p]
+                    else:
+                        new_profiles = get_available_profiles()
+                    pm.set_profiles(new_profiles)
+                    if hasattr(self.server, "profiles"):
+                        self.server.profiles = new_profiles
+
+                    cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+                    try:
+                        os.makedirs(os.path.dirname(cfg_file), exist_ok=True)
+                        with open(cfg_file, "w", encoding="utf-8") as f:
+                            json.dump({"profiles": new_profiles}, f, indent=2)
+                    except Exception as exc:
+                        logger.warning("Failed to save bridge_config.json: %s", exc)
+
+                    logger.info("Live dynamic config update: active profiles changed to %s", new_profiles)
+                    self._send_json_response({
+                        "status": "ok",
+                        "message": f"Live profiles configuration updated: {new_profiles}",
+                        "active_profiles": new_profiles,
+                        "profiles": pm.get_status_summary(),
+                    })
+                    return
+                else:
+                    self._send_json_response({
+                        "status": "ok",
+                        "active_profiles": pm._profiles,
+                        "profiles": pm.get_status_summary(),
+                    })
+                    return
+
+            if is_profiles_disable:
+                pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
+                target_p = req_json.get("profile")
+                if target_p:
+                    pm.mark_disabled(target_p)
+                    self._send_json_response({
+                        "status": "ok",
+                        "message": f"Profile '{target_p}' is now DISABLED",
+                        "profiles": pm.get_status_summary(),
+                    })
+                else:
+                    self._send_json_response({"error": "Missing 'profile' in request body"}, status_code=400)
+                return
+
+            if is_profiles_enable:
+                pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
+                target_p = req_json.get("profile")
+                if target_p:
+                    pm.enable(target_p)
+                    self._send_json_response({
+                        "status": "ok",
+                        "message": f"Profile '{target_p}' is now ENABLED",
+                        "profiles": pm.get_status_summary(),
+                    })
+                else:
+                    self._send_json_response({"error": "Missing 'profile' in request body"}, status_code=400)
+                return
+
             if is_profiles_reset:
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
                 target_p = req_json.get("profile")
@@ -1916,6 +1996,7 @@ Usage:
   python3 antigravity_bridge.py profile test [name]           Actively test/probe profile quota availability
   python3 antigravity_bridge.py profile disable <name>        Temporarily disable a profile from receiving requests
   python3 antigravity_bridge.py profile enable <name>         Re-enable a previously disabled profile
+  python3 antigravity_bridge.py profile set <p1,p2,...>       Live hot-reload active profile list on running server
   python3 antigravity_bridge.py profile reset [name]          Reset cooldown state for a profile or all profiles
   python3 antigravity_bridge.py profile copy <name> <host>    Copy profile credentials to remote server via SCP
 
@@ -1925,6 +2006,7 @@ Shortcuts:
 
 Examples:
   python3 antigravity_bridge.py profile list
+  python3 antigravity_bridge.py profile set attasitgits,mrsermshop
   python3 antigravity_bridge.py profile disable astrathezero
   python3 antigravity_bridge.py profile enable astrathezero
   python3 antigravity_bridge.py profile login attasitgits
@@ -1954,6 +2036,47 @@ Examples:
             succ = info.get("success_count", 0)
             print(f"{name:<18} {email:<32} {status:<12} {cooldown:<10} {succ}")
         print("=" * 85 + "\n")
+        return 0
+
+    elif sub in ("set", "use", "config"):
+        if len(argv) < 2:
+            print("[Error] Please specify profiles: python3 antigravity_bridge.py profile set attasitgits,mrsermshop")
+            return 1
+        raw = argv[1].strip()
+        new_profiles = [p.strip() for p in raw.split(",") if p.strip()]
+
+        # 1. Try sending to live server if running
+        server_updated = False
+        port = 8000
+        try:
+            req_data = json.dumps({"profiles": new_profiles}).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/profiles/config",
+                data=req_data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                if resp.status == 200:
+                    server_updated = True
+        except Exception:
+            pass
+
+        # 2. Update local bridge_config.json
+        cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+        try:
+            os.makedirs(os.path.dirname(cfg_file), exist_ok=True)
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                json.dump({"profiles": new_profiles}, f, indent=2)
+        except Exception:
+            pass
+
+        GLOBAL_PROFILE_MANAGER.set_profiles(new_profiles)
+
+        if server_updated:
+            print(f"[SUCCESS] Live Bridge Server updated on the fly! Active Profiles: {new_profiles}")
+        else:
+            print(f"[SUCCESS] Profile configuration saved! Active Profiles: {new_profiles} (applied for future sessions)")
         return 0
 
     elif sub in ("login", "add", "new"):
