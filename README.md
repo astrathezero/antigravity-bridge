@@ -15,6 +15,14 @@
 
 - [🌟 Overview & Architecture](#-overview--architecture)
 - [✨ Key Features](#-key-features)
+- [📦 Installation & Quick Start](#-installation--quick-start)
+  - [1. Prerequisites](#1-prerequisites)
+  - [2. Clone Repository](#2-clone-repository)
+  - [3. Configure Environment (.env)](#3-configure-environment-env)
+  - [4. Add Google Login Profiles](#4-add-google-login-profiles)
+  - [5. Run Bridge Server](#5-run-bridge-server)
+  - [6. Verification & Health Check](#6-verification--health-check)
+  - [7. Updating Existing Installation](#7-updating-existing-installation)
 - [🤖 Supported Models Matrix](#-supported-models-matrix)
 - [👤 Complete Profile Manager CLI Reference](#-complete-profile-manager-cli-reference)
   - [1. List & Quota Status (`profiles`, `profile list`)](#1-list--quota-status-profiles-profile-list)
@@ -107,6 +115,83 @@ The **Antigravity Bridge Server** bridges AI clients, external bots, webhooks, a
 - 🧠 **Dynamic Reasoning Effort**: Maps models to CLI flags and reasoning effort parameters (`high`, `medium`, `low`, `thinking`).
 - 🩺 **Diagnostic Doctor (`diag` / `doctor`)**: Built-in self-test tool to inspect IP routing, clean stale lock files, and test OAuth token validity with Google's UserInfo API.
 - 🚀 **Zero External Dependencies**: Standard Python 3 library only. No `pip install` required!
+
+---
+
+## 📦 Installation & Quick Start
+
+Get Antigravity Bridge running on macOS or Linux VPS in minutes:
+
+### 1. Prerequisites
+- **Python 3.8+** installed (`python3 --version`).
+- **Antigravity CLI** (`antigravity` or `agy`) installed in your PATH.
+- **Git** installed.
+
+### 2. Clone Repository
+```bash
+git clone https://github.com/astrathezero/antigravity-bridge.git
+cd antigravity-bridge
+```
+
+### 3. Configure Environment (`.env`)
+Copy `.env.example` to `.env` to configure your server parameters:
+```bash
+cp .env.example .env
+# Edit with your preferred editor:
+nano .env
+```
+*(The `.env` file is ignored by git, keeping your private settings, custom URLs, and keys 100% safe across `git pull` updates)*.
+
+### 4. Add Google Login Profiles
+Add one or more Google accounts interactively:
+```bash
+python3 antigravity_bridge.py login profile_1
+python3 antigravity_bridge.py login profile_2
+```
+*Or copy profiles from your local machine to your VPS:*
+```bash
+# On your local machine:
+python3 antigravity_bridge.py profile sync user@your-vps-ip
+```
+
+### 5. Run Bridge Server
+
+Choose the execution method that fits your environment:
+
+#### Option A: Direct Foreground Execution (Testing & Logs)
+```bash
+python3 antigravity_bridge.py
+```
+
+#### Option B: 1-Click Systemd Service (Recommended for Linux VPS)
+The built-in `setup_systemd.sh` auto-detects your user, Python binary, and project directory:
+```bash
+chmod +x setup_systemd.sh
+./setup_systemd.sh
+```
+
+#### Option C: Run in Background (`tmux` or `screen`)
+```bash
+tmux new -s bridge 'python3 antigravity_bridge.py'
+# Detach: Press Ctrl+B then D | Re-attach: tmux attach -t bridge
+```
+
+### 6. Verification & Health Check
+Verify that all profiles are recognized and the server is responding:
+```bash
+# Check profile status and concurrency capacity:
+python3 antigravity_bridge.py profiles
+
+# Test HTTP Health Endpoint:
+curl http://127.0.0.1:8000/health
+```
+
+### 7. Updating Existing Installation
+Whenever new features or fixes are released:
+```bash
+git pull origin main
+sudo systemctl restart antigravity-bridge
+```
 
 ---
 
