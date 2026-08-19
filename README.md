@@ -7,107 +7,102 @@
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0%20external-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Standalone OpenAI & Anthropic compatible REST API Bridge Server for `antigravity` / `agy` CLI with Smart Profile Switching and Image Generation support.
+**Antigravity Bridge Server** is a high-performance, zero-dependency OpenAI & Anthropic compatible REST API Bridge Server designed for the `antigravity` / `agy` CLI ecosystem. It features smart multi-account profile rotation, automatic quota error recovery, OAuth token auto-refresh daemon, diagnostic doctor, and image generation.
 
 ---
 
 ## 📖 Table of Contents
 
-- [Overview](#-overview)
-- [Key Features](#-key-features)
-- [Supported Models Matrix](#-supported-models-matrix)
-- [Profile Management Endpoints](#-profile-management-endpoints)
-- [API Endpoints Reference](#-api-endpoints-reference)
+- [🌟 Overview & Architecture](#-overview--architecture)
+- [✨ Key Features](#-key-features)
+- [🤖 Supported Models Matrix](#-supported-models-matrix)
+- [👤 Complete Profile Manager CLI Reference](#-complete-profile-manager-cli-reference)
+  - [1. List & Quota Status (`profiles`, `profile list`)](#1-list--quota-status-profiles-profile-list)
+  - [2. Interactive Login & Add Profile (`login`, `profile login`)](#2-interactive-login--add-profile-login-profile-login)
+  - [3. Test & Probe Quota Health (`profile test`)](#3-test--probe-quota-health-profile-test)
+  - [4. Dynamic Rotation Order & Set Profiles (`profile set`, `profile order`)](#4-dynamic-rotation-order--set-profiles-profile-set-profile-order)
+  - [5. Disable & Enable Profiles (`profile disable`, `profile enable`)](#5-disable--enable-profiles-profile-disable-profile-enable)
+  - [6. Reset Cooldown (`profile reset`)](#6-reset-cooldown-profile-reset)
+  - [7. Token Refresh (`profile refresh`)](#7-token-refresh-profile-refresh)
+  - [8. Sync Profiles Across Servers (`profile sync`, `profile copy`)](#8-sync-profiles-across-servers-profile-sync-profile-copy)
+  - [9. Delete Profile (`profile remove`)](#9-delete-profile-profile-remove)
+  - [10. Diagnostic Doctor (`diag`, `doctor`)](#10-diagnostic-doctor-diag-doctor)
+- [📡 Complete REST API Endpoints Reference](#-complete-rest-api-endpoints-reference)
   - [1. Health Check (`GET /health`)](#1-health-check-get-health)
   - [2. List Models (`GET /v1/models`)](#2-list-models-get-v1models)
   - [3. OpenAI Chat Completions (`POST /v1/chat/completions`)](#3-openai-chat-completions-post-v1chatcompletions)
   - [4. Anthropic Messages (`POST /v1/messages`)](#4-anthropic-messages-post-v1messages)
   - [5. Image Generation (`POST /v1/images/generations`)](#5-image-generation-post-v1imagesgenerations)
-  - [6. Profile Management (`GET /v1/profiles`, `POST /v1/profiles/reset`, `POST /v1/profiles/check`)](#-profile-management-endpoints)
-- [Hermes Agent Integration (`config.yaml`)](#-hermes-agent-integration-configyaml)
-- [Client SDK Examples](#-client-sdk-examples)
+  - [6. Profile Status Summary (`GET /v1/profiles`)](#6-profile-status-summary-get-v1profiles)
+  - [7. Reset Profile Cooldowns (`POST /v1/profiles/reset`)](#7-reset-profile-cooldowns-post-v1profilesreset)
+  - [8. Active Quota Probing (`POST /v1/profiles/check`)](#8-active-quota-probing-post-v1profilescheck)
+  - [9. Live Profile Reconfiguration (`POST /v1/profiles/config`)](#9-live-profile-reconfiguration-post-v1profilesconfig)
+  - [10. Runtime Disable/Enable (`POST /v1/profiles/disable`, `POST /v1/profiles/enable`)](#10-runtime-disableenable-post-v1profilesdisable-post-v1profilesenable)
+- [⚙️ Server CLI Options & Environment Variables](#️-server-cli-options--environment-variables)
+  - [Server Command-Line Arguments](#server-command-line-arguments)
+  - [Environment Variables](#environment-variables)
+- [🤖 Hermes Agent Integration (`config.yaml`)](#-hermes-agent-integration-configyaml)
+- [💻 Client SDK Examples](#-client-sdk-examples)
   - [Python (OpenAI SDK)](#python-openai-sdk)
   - [Python (Anthropic SDK)](#python-anthropic-sdk)
   - [JavaScript / TypeScript (OpenAI SDK)](#javascript--typescript-openai-sdk)
-- [CLI Options & Environment Variables](#-cli-options--environment-variables)
-- [Production Deployment](#-production-deployment)
-  - [Deploy as Systemd Service (Recommended)](#1-deploy-as-systemd-service-recommended)
-  - [Deploy with PM2](#2-deploy-with-pm2)
-  - [Deploy with Nginx (Reverse Proxy + SSL)](#3-deploy-with-nginx-reverse-proxy--ssl)
-- [Running Unit Tests](#-running-unit-tests)
-- [License](#-license)
+  - [cURL](#curl)
+- [🚀 Production Deployment](#-production-deployment)
+  - [1. Deploy as Systemd Service (Linux)](#1-deploy-as-systemd-service-linux)
+  - [2. Deploy with PM2](#2-deploy-with-pm2)
+  - [3. Deploy with Nginx (Reverse Proxy + SSL)](#3-deploy-with-nginx-reverse-proxy--ssl)
+- [🔧 Troubleshooting & FAQ](#-troubleshooting--faq)
+- [🧪 Running Unit Tests](#-running-unit-tests)
+- [📄 License](#-license)
 
 ---
 
-## 🌟 Overview
+## 🌟 Overview & Architecture
 
-The **Antigravity Bridge Server** bridges external AI clients (e.g. **Hermes Agent**, **OpenAI SDK**, **Anthropic SDK**, **LangChain**, **LlamaIndex**, webhooks, bots) to your local `antigravity` / `agy` CLI environment.
+The **Antigravity Bridge Server** bridges AI clients, external bots, webhooks, and agent frameworks (such as **Hermes Agent**, **OpenAI SDK**, **Anthropic SDK**, **LangChain**, **LlamaIndex**, **n8n**) directly to your local or VPS `antigravity` / `agy` CLI environment.
 
-It exposes standard REST endpoints locally (`http://127.0.0.1:8000/v1`), seamlessly converting HTTP requests into headless `agy` CLI executions while providing automatic multi-profile rotation and circuit breaking to bypass quota and rate limits.
+```
+┌─────────────────────────────────────────────────────────┐
+│ External AI Clients (Hermes / OpenAI / Anthropic SDK)   │
+└────────────────────────────┬────────────────────────────┘
+                             │ HTTP REST / SSE Stream
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│             Antigravity Bridge Server (8000)            │
+│  - Dual API Compatibility (OpenAI & Anthropic formats)  │
+│  - Smart Profile Rotation & Quota Fallback Manager     │
+│  - Token Auto-Refresh Daemon (every 55 minutes)         │
+│  - Outbound Proxy Detector (WARP / SOCKS5)              │
+│  - Image Generation Router (Google Imagen 3)            │
+└────────────────────────────┬────────────────────────────┘
+                             │ Headless Subprocess Execution
+                             ▼
+┌─────────────────────────────────────────────────────────┐
+│     Multi-Profile Pool (~/.config/antigravity/profiles) │
+│  ├── Profile 1 (astrathezero)  ──► Google Gemini API    │
+│  ├── Profile 2 (attasitgits)   ──► Google Gemini API    │
+│  └── Profile N (...)           ──► Google Gemini API    │
+└─────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## ✨ Key Features
 
-- 🔄 **Dual Format Compatibility**: Full support for both **OpenAI** (`/v1/chat/completions`) and **Anthropic** (`/v1/messages`) API specifications.
-- 🛠️ **Tool Calling & Function Calling**: Full support for OpenAI `tools` / `functions` and Anthropic `tools` parameter, parsing tool calls automatically.
-- ⚡ **Real-Time SSE Streaming**: Supports Server-Sent Events (`text/event-stream`) for both OpenAI and Anthropic streaming consumers.
-- 🔀 **Smart Profile Manager & Automatic Quota Fallback**:
-  - Automatically discovers and dynamically rotates through `agy` profiles (`~/.config/antigravity/profiles/`).
-  - Detects `429 Too Many Requests`, `RESOURCE_EXHAUSTED`, and quota errors instantly.
-  - Automatically enters cooldown for exhausted profiles and immediately routes incoming requests to available/healthy profiles (e.g. `attasitgits`).
-  - Preserves quota health states across restarts via `~/.config/antigravity/quota_cache.json`.
-- 🎨 **Image Generation Support**: Built-in `/v1/images/generations` and image model routing.
-- 🧠 **Dynamic Reasoning Effort**: Maps model IDs to `--model` and `--effort` CLI parameters (`high`, `medium`, `low`) automatically.
-- 🛡️ **Zero External Dependencies**: Built entirely with Python 3 standard library (`http.server`, `urllib.request`, `subprocess`). No `pip install` required!
-- 🔒 **Security Hardening**: Built-in API Key authorization support, payload size limits (32MB), CLI argument sanitization, and environment isolation.
-
----
-
-## 👥 Profile Management Endpoints
-
-| Endpoint | Method | Description |
-| :--- | :--- | :--- |
-| `/health` | `GET` | Server health, active healthy profile, and profile quota status summary |
-| `/v1/profiles` | `GET` | List all profiles with availability, cooldown remaining, and success counts |
-| `/v1/profiles/reset` | `POST` | Reset cooldowns (`{"profile": "optional_name"}`) |
-| `/v1/profiles/check` | `POST` | Run active lightweight health probes across all profiles |
-
----
-
-## 👤 Profile Manager CLI
-
-You can manage, log in, probe, reset, and sync profiles directly from the command line:
-
-```bash
-# List all profiles, active Google accounts, quota status, and cooldowns:
-python3 antigravity_bridge.py profile list
-# (or shortcut: python3 antigravity_bridge.py profiles)
-
-# Log in / add a new profile interactively:
-python3 antigravity_bridge.py profile login attasitgits
-# (or shortcut: python3 antigravity_bridge.py login attasitgits)
-
-# Actively test/probe quota availability for all profiles or a specific profile:
-python3 antigravity_bridge.py profile test
-python3 antigravity_bridge.py profile test --model gemini-3.7-flash
-
-# Temporarily disable a profile from receiving requests:
-python3 antigravity_bridge.py profile disable astrathezero
-
-# Re-enable a disabled profile:
-python3 antigravity_bridge.py profile enable astrathezero
-
-# Reset cooldown state for a profile or all profiles:
-python3 antigravity_bridge.py profile reset attasitgits
-python3 antigravity_bridge.py profile reset
-
-# Delete an existing profile directory:
-python3 antigravity_bridge.py profile remove old_profile
-
-# Copy a profile credentials to a remote Linux server via SCP:
-python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com
-```
+- 🔄 **Dual Format Compatibility**: 100% compatible with both **OpenAI** (`/v1/chat/completions`) and **Anthropic** (`/v1/messages`) standards.
+- 🛠️ **Tool Calling & Function Calling**: Native extraction and parsing for OpenAI `tools` / `functions` and Anthropic `tools`.
+- ⚡ **Real-Time SSE Streaming**: Server-Sent Events (`text/event-stream`) for fast, fluid streaming completions.
+- 🔀 **Smart Profile Pool & Zero-Downtime Fallback**:
+  - Automatically loads and rotates multiple Google login profiles from `~/.config/antigravity/profiles/`.
+  - Instantly detects `429 Too Many Requests`, `RESOURCE_EXHAUSTED`, and quota errors.
+  - Automatically parses exact cooldown reset durations (e.g. `Resets in 74h 7m 25s`) and falls back immediately to the next healthy profile without failing the user request.
+  - Persists state across restarts in `~/.config/antigravity/quota_cache.json`.
+- 🔄 **Automatic OAuth Token Refresh Daemon**: Runs in a background thread every 55 minutes to keep all profile access tokens fresh.
+- 🛡️ **Built-in SOCKS5 / Cloudflare WARP Proxy Auto-Detection**: Auto-detects local WARP proxies (ports `40000`, `10808`, `7890`, etc.) for seamless outbound connectivity.
+- 🎨 **Image Generation Integration**: Generates images via Google Imagen 3 (`imagen-3.0-generate-002`) and Gemini Image routers (`/v1/images/generations` and chat completions).
+- 🧠 **Dynamic Reasoning Effort**: Maps models to CLI flags and reasoning effort parameters (`high`, `medium`, `low`, `thinking`).
+- 🩺 **Diagnostic Doctor (`diag` / `doctor`)**: Built-in self-test tool to inspect IP routing, clean stale lock files, and test OAuth token validity with Google's UserInfo API.
+- 🚀 **Zero External Dependencies**: Standard Python 3 library only. No `pip install` required!
 
 ---
 
@@ -123,7 +118,6 @@ python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com
 | **`gemini-3.6-flash-medium`** | `--model gemini-3.6-flash` | `medium` | Gemini 3.6 Flash (Medium Reasoning Effort) | 1,000,000 |
 | **`gemini-3.6-flash-low`** | `--model gemini-3.6-flash` | `low` | Gemini 3.6 Flash (Low Reasoning Effort) | 1,000,000 |
 | **`gemini-3.6-flash`** | `--model gemini-3.6-flash` | - | Gemini 3.6 Flash (Default) | 1,000,000 |
-
 | **`gemini-3.5-flash-medium`** | `--model gemini-3.5-flash` | `medium` | Gemini 3.5 Flash (Medium Reasoning Effort) | 1,000,000 |
 | **`gemini-3.5-flash-low`** | `--model gemini-3.5-flash` | `low` | Gemini 3.5 Flash (Low Reasoning Effort) | 1,000,000 |
 | **`gemini-3.5-flash`** | `--model gemini-3.5-flash` | - | Gemini 3.5 Flash (Default) | 1,000,000 |
@@ -138,14 +132,177 @@ python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com
 | **`gpt-oss-120b`** | `--model gpt-oss-120b` | - | GPT-OSS 120B | 1,000,000 |
 | **`imagen-3.0-generate-002`** | Google Imagen 3 API | - | High-Quality Image Generation (`/v1/images/generations`) | - |
 | **`imagen-3.0-fast-generate-001`**| Google Imagen 3 Fast API | - | Fast Image Generation (`/v1/images/generations`) | - |
+| **`gemini-3.1-flash-image`** | Google Gemini Image Router | - | Fast Gemini Image Generation | - |
+| **`antigravity`** / **`agy`** | Default CLI backend | - | Default fallback model routing | 1,000,000 |
 
 ---
 
-## 📡 API Endpoints Reference
+## 👤 Complete Profile Manager CLI Reference
+
+Manage multiple Google accounts, test quotas, refresh tokens, and sync credentials seamlessly.
+
+### 1. List & Quota Status (`profiles`, `profile list`)
+
+View a formatted table of all discovered profiles, active Google account emails, availability status, cooldown timers, estimated quota, and successful request counts:
+
+```bash
+python3 antigravity_bridge.py profiles
+# Or
+python3 antigravity_bridge.py profile list
+```
+
+**Output Preview:**
+```text
+================================================================================================
+Profile Name     Google Account Email           Status      Cooldown   Est. Quota   Success
+================================================================================================
+astramoney       astra.moneylicense@gmail.com   OK          Ready      100%         9
+astrasupergamer  astrasupergamer@gmail.com      OK          Ready      100%         0
+astrathezero     astrathezero@gmail.com         OK          Ready      86%          28
+attasitgits      attasitgits@gmail.com          OK          Ready      100%         12
+mrsermshop       mrsermshop@gmail.com           EXHAUSTED   246819s    0%           4
+panthornchuan    panthornchuan@gmail.com        OK          Ready      100%         15
+somporn          sompornjitdee80@gmail.com      EXHAUSTED   567484s    0%           0
+xiuxiubtc        xiuxiubtc@gmail.com            OK          Ready      98%          4
+================================================================================================
+```
+
+---
+
+### 2. Interactive Login & Add Profile (`login`, `profile login`)
+
+Adds or logs in to a new Google profile interactively:
+
+```bash
+python3 antigravity_bridge.py login my_new_profile
+# Or
+python3 antigravity_bridge.py profile login my_new_profile
+```
+
+**What happens:**
+1. Backs up current authentication files in `~/.gemini/`.
+2. Triggers Google OAuth browser authentication.
+3. Automatically extracts OAuth tokens (from macOS Keychain or Linux SecretService/files) and verifies the active Google email address.
+4. Stores credentials in `~/.config/antigravity/profiles/my_new_profile/`.
+5. Restores original configuration cleanly.
+
+---
+
+### 3. Test & Probe Quota Health (`profile test`)
+
+Actively sends lightweight test requests directly through Google's Gemini models to check API latency, quota availability, and token validity:
+
+```bash
+# Test all profiles:
+python3 antigravity_bridge.py profile test
+
+# Test a specific profile:
+python3 antigravity_bridge.py profile test attasitgits
+
+# Test with a specific model:
+python3 antigravity_bridge.py profile test attasitgits --model gemini-3.7-flash
+
+# Test with a custom prompt:
+python3 antigravity_bridge.py profile test --prompt "Hello! Confirm you are working."
+```
+
+---
+
+### 4. Dynamic Rotation Order & Set Profiles (`profile set`, `profile order`)
+
+Explicitly define the profile rotation order and active pool. This updates both the live running server dynamically via HTTP and saves the preference to `~/.config/antigravity/bridge_config.json`:
+
+```bash
+python3 antigravity_bridge.py profile set astrathezero,attasitgits,astramoney,panthornchuan
+# Or
+python3 antigravity_bridge.py profile order astrathezero,attasitgits,astramoney,panthornchuan
+```
+
+---
+
+### 5. Disable & Enable Profiles (`profile disable`, `profile enable`)
+
+Temporarily exclude a profile from receiving requests without deleting its credentials, or re-enable it when ready:
+
+```bash
+# Temporarily disable:
+python3 antigravity_bridge.py profile disable mrsermshop
+
+# Re-enable:
+python3 antigravity_bridge.py profile enable mrsermshop
+```
+
+---
+
+### 6. Reset Cooldown (`profile reset`)
+
+Clear cooldown states and reset estimated quotas:
+
+```bash
+# Reset a specific profile:
+python3 antigravity_bridge.py profile reset attasitgits
+
+# Reset all profiles:
+python3 antigravity_bridge.py profile reset
+```
+
+---
+
+### 7. Token Refresh (`profile refresh`)
+
+Perform an active OAuth token exchange with Google to regenerate access tokens:
+
+```bash
+# Refresh a specific profile:
+python3 antigravity_bridge.py profile refresh attasitgits
+
+# Refresh all profiles:
+python3 antigravity_bridge.py profile refresh
+```
+
+---
+
+### 8. Sync Profiles Across Servers (`profile sync`, `profile copy`)
+
+Quickly copy authentication profiles from your local machine to a remote VPS:
+
+```bash
+# Sync ALL profiles at once via compressed SSH stream:
+python3 antigravity_bridge.py profile sync attasit@vmi2924193
+
+# Copy a single profile via SCP:
+python3 antigravity_bridge.py profile copy attasitgits attasit@vmi2924193
+```
+
+---
+
+### 9. Delete Profile (`profile remove`)
+
+Permanently delete a profile directory:
+
+```bash
+python3 antigravity_bridge.py profile remove old_profile
+```
+
+---
+
+### 10. Diagnostic Doctor (`diag`, `doctor`)
+
+Runs a full system diagnosis including public IP checks, active SOCKS5 proxy detection, stale cache file cleanup, and OAuth token validation directly against the Google UserInfo API:
+
+```bash
+python3 antigravity_bridge.py diag
+# Or
+python3 antigravity_bridge.py doctor
+```
+
+---
+
+## 📡 Complete REST API Endpoints Reference
 
 ### 1. Health Check (`GET /health`)
 
-Check bridge server health and status.
+Returns server status, active profile, and quota overview.
 
 ```bash
 curl http://127.0.0.1:8000/health
@@ -155,7 +312,17 @@ curl http://127.0.0.1:8000/health
 ```json
 {
   "status": "ok",
-  "service": "antigravity-bridge"
+  "service": "antigravity-bridge",
+  "active_profile": "astrathezero",
+  "profiles": {
+    "astrathezero": {
+      "status": "OK",
+      "cooldown_seconds_remaining": 0,
+      "estimated_quota_percent": 100,
+      "success_count": 28,
+      "google_account": "astrathezero@gmail.com"
+    }
+  }
 }
 ```
 
@@ -163,63 +330,51 @@ curl http://127.0.0.1:8000/health
 
 ### 2. List Models (`GET /v1/models`)
 
-Lists all supported models compatible with OpenAI client model discovery.
+Returns all supported models in standard OpenAI format.
 
 ```bash
-curl http://127.0.0.1:8000/v1/models
+curl http://127.0.0.1:8000/v1/models \
+  -H "Authorization: Bearer sk-antigravity"
 ```
 
 ---
 
 ### 3. OpenAI Chat Completions (`POST /v1/chat/completions`)
 
-Standard OpenAI Chat Completions API with optional SSE streaming (`"stream": true`).
+Standard OpenAI Chat Completions endpoint supporting non-streaming, SSE streaming (`"stream": true`), and tool calling.
 
-#### Non-Streaming Example:
+#### Non-Streaming Request:
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-antigravity" \
   -d '{
-    "model": "gemini-3.6-flash-high",
+    "model": "gemini-3.7-flash-high",
     "messages": [
-      {"role": "system", "content": "You are a senior systems architect."},
-      {"role": "user", "content": "Explain raft consensus in 3 bullet points."}
+      {"role": "system", "content": "You are a cloud architect."},
+      {"role": "user", "content": "Explain Kubernetes ingress vs load balancer in 2 bullet points."}
     ],
     "stream": false
   }'
 ```
 
-**Response (`200 OK`):**
-```json
-{
-  "id": "chatcmpl-ag-7f9a2b1c",
-  "object": "chat.completion",
-  "created": 1755263810,
-  "model": "gemini-3.6-flash-high",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "1. Leader Election...\n2. Log Replication...\n3. Safety Invariants..."
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 28,
-    "completion_tokens": 85,
-    "total_tokens": 113
-  }
-}
+#### Streaming Request (SSE):
+```bash
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{
+    "model": "gemini-3.7-flash-high",
+    "messages": [{"role": "user", "content": "Write a Python script to scan ports."}],
+    "stream": true
+  }'
 ```
 
 ---
 
 ### 4. Anthropic Messages (`POST /v1/messages`)
 
-Standard Anthropic Messages API format with top-level `system` prompt and SSE streaming support.
+Anthropic Messages API standard supporting top-level `system` prompt, tool calling, and streaming.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/messages \
@@ -228,85 +383,148 @@ curl -X POST http://127.0.0.1:8000/v1/messages \
   -H "anthropic-version: 2023-06-01" \
   -d '{
     "model": "claude-sonnet-4.6-thinking",
-    "system": "You are an expert Python engineer.",
+    "system": "You are an expert algorithms developer.",
     "messages": [
-      {"role": "user", "content": "Write an asynchronous rate-limiter using token bucket algorithm."}
+      {"role": "user", "content": "Explain the time complexity of QuickSelect in worst vs average cases."}
     ]
   }'
-```
-
-**Response (`200 OK`):**
-```json
-{
-  "id": "msg-9e4a8b12",
-  "type": "message",
-  "role": "assistant",
-  "model": "claude-sonnet-4.6-thinking",
-  "content": [
-    {
-      "type": "text",
-      "text": "```python\nimport asyncio\nimport time\n\nclass TokenBucket:..."
-    }
-  ],
-  "stop_reason": "end_turn",
-  "stop_sequence": null,
-  "usage": {
-    "input_tokens": 25,
-    "output_tokens": 180
-  }
-}
 ```
 
 ---
 
 ### 5. Image Generation (`POST /v1/images/generations`)
 
-Standard OpenAI Image Generation API format powered by **Google Imagen 3** (`imagen-3.0-generate-002`).
+Standard OpenAI Image Generation API format powered by **Google Imagen 3**.
 
 > [!TIP]
-> **Why Google AI Studio Free API Key?**
-> The local `agy` CLI is specialized for text, reasoning, and coding agent workflows and does not have a local image diffusion engine.
-> Therefore, image generation is seamlessly powered by **Google AI Studio's Free API Key** via Google Imagen 3.
-> 
-> Simply get your free API key at [Google AI Studio](https://aistudio.google.com/) and save it to `.env`:
-> ```bash
-> echo "GEMINI_API_KEY=AIzaSyYourKeyHere" >> .env
-> ```
-> The bridge automatically discovers your key from `.env`, environment variables, or the client's `Authorization: Bearer <API_KEY>` header.
+> **Free Google AI Studio Key Support:**
+> Set `GEMINI_API_KEY=AIzaSy...` in your `.env` or pass it in the `Authorization: Bearer <KEY>` header.
 
 ```bash
-# Generate image via Bridge Server (uses GEMINI_API_KEY from .env or Bearer token)
 curl -X POST http://127.0.0.1:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-antigravity" \
   -d '{
     "model": "imagen-3.0-generate-002",
-    "prompt": "A cinematic shot of a futuristic neon cyberpunk metropolis at dusk, photorealistic, 8k",
+    "prompt": "A cinematic shot of a futuristic Tokyo skyscraper with glowing neon lights, photorealistic 8k",
     "size": "1024x1024",
     "n": 1
   }'
 ```
 
-#### Supported Image Sizes & Aspect Ratios:
-- `"1024x1024"` or `"1:1"` → Square (1:1)
-- `"1792x1024"` or `"16:9"` → Landscape Wide (16:9)
-- `"1024x1792"` or `"9:16"` → Portrait Mobile / Story (9:16)
-- `"1024x768"` or `"4:3"` → Landscape Standard (4:3)
-- `"768x1024"` or `"3:4"` → Portrait Standard (3:4)
+**Supported Sizes & Aspect Ratios:**
+- `"1024x1024"` / `"1:1"` (Square)
+- `"1792x1024"` / `"16:9"` (Landscape)
+- `"1024x1792"` / `"9:16"` (Portrait Story)
+- `"1024x768"` / `"4:3"` (Standard Landscape)
+- `"768x1024"` / `"3:4"` (Standard Portrait)
 
-**Response (`200 OK`):**
-```json
-{
-  "created": 1755263810,
-  "data": [
-    {
-      "b64_json": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBD...",
-      "revised_prompt": "A cinematic shot of a futuristic neon cyberpunk metropolis at dusk, photorealistic, 8k"
-    }
-  ]
-}
+---
+
+### 6. Profile Status Summary (`GET /v1/profiles`)
+
+Lists all profile health statuses, cooldowns, and success metrics:
+
+```bash
+curl http://127.0.0.1:8000/v1/profiles \
+  -H "Authorization: Bearer sk-antigravity"
 ```
 
+---
+
+### 7. Reset Profile Cooldowns (`POST /v1/profiles/reset`)
+
+Reset cooldowns for a single profile or all profiles:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/profiles/reset \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{"profile": "attasitgits"}'
+```
+
+---
+
+### 8. Active Quota Probing (`POST /v1/profiles/check`)
+
+Trigger active lightweight health checks across all profiles:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/profiles/check \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{"model": "gemini-3.7-flash"}'
+```
+
+---
+
+### 9. Live Profile Reconfiguration (`POST /v1/profiles/config`)
+
+Hot-reload active profile list on a live running bridge server without restarting:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/profiles/config \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{"profiles": ["astrathezero", "attasitgits", "astramoney"]}'
+```
+
+---
+
+### 10. Runtime Disable/Enable (`POST /v1/profiles/disable`, `POST /v1/profiles/enable`)
+
+```bash
+# Disable profile:
+curl -X POST http://127.0.0.1:8000/v1/profiles/disable \
+  -H "Content-Type: application/json" \
+  -d '{"profile": "mrsermshop"}'
+
+# Enable profile:
+curl -X POST http://127.0.0.1:8000/v1/profiles/enable \
+  -H "Content-Type: application/json" \
+  -d '{"profile": "mrsermshop"}'
+```
+
+---
+
+## ⚙️ Server CLI Options & Environment Variables
+
+### Server Command-Line Arguments
+
+Start the server using `python3 antigravity_bridge.py [OPTIONS]`:
+
+| Flag | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **`--host`** | `str` | `127.0.0.1` | Network interface to bind (`0.0.0.0` for all interfaces) |
+| **`--port`** | `int` | `8000` | Port number to listen on |
+| **`--cmd`** | `str` | *Auto-detected* | Custom command template (e.g. `'agy -p "{prompt}"'`) |
+| **`--profiles`** | `str` | *Auto-detected* | Comma-separated list of profile names to rotate |
+| **`--cooldown-sec`** | `float`| `300.0` | Base cooldown duration in seconds when quota error occurs |
+| **`--profile-timeout`** | `float`| `60.0` | Timeout per profile execution attempt in seconds |
+| **`--quota-cache`** | `str` | `~/.config/antigravity/quota_cache.json` | Path to persistent quota state JSON file |
+| **`--check-profiles-on-start`** | `flag` | `False` | Actively probe all profiles on server startup |
+| **`--api-key`** | `str` | `None` | API Key required for client authorization |
+| **`--enable-cors`**, **`--cors`** | `flag` | `False` | Enable wildcard CORS headers (`*`) |
+| **`--no-proxy`**, **`--direct`** | `flag` | `False` | Disable outbound proxy detection and connect directly |
+| **`--hide-profile-status`** | `flag` | `False` | Hide profile and quota status footer from chat completions |
+| **`--auto-refresh-min`** | `float`| `55.0` | Interval in minutes for background OAuth token refresh |
+| **`--no-auto-refresh`** | `flag` | `False` | Disable background OAuth token refresh daemon |
+| **`--image-router-url`** | `str` | *9router* | Custom image router URL |
+| **`--image-router-key`** | `str` | `None` | Custom image router API Key |
+
+### Environment Variables
+
+| Variable | Description |
+| :--- | :--- |
+| **`ANTIGRAVITY_PROFILES`** | Comma-separated profile names to rotate through. |
+| **`ANTIGRAVITY_PROFILE`** | Active default profile name. |
+| **`ANTIGRAVITY_BRIDGE_API_KEY`** | Default API key to protect bridge endpoints. |
+| **`ANTIGRAVITY_BRIDGE_CMD`** | Custom CLI execution template. |
+| **`ANTIGRAVITY_NO_PROXY`** | Set to `1` to disable proxy auto-detection. |
+| **`ANTIGRAVITY_NO_AUTO_REFRESH`** | Set to `1` to disable scheduled OAuth token refresh. |
+| **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | Set to `1` to hide the status footer from model responses. |
+| **`GEMINI_API_KEY`** / **`GOOGLE_API_KEY`** | Google AI Studio API Key for Imagen 3 generation. |
+| **`ANTIGRAVITY_IMAGE_ROUTER_URL`** | URL for external image generation router. |
 
 ---
 
@@ -342,7 +560,6 @@ custom_providers:
         context_length: 1000000
       gemini-3.6-flash:
         context_length: 1000000
-
       gemini-3.5-flash-medium:
         context_length: 1000000
       gemini-3.5-flash-low:
@@ -374,7 +591,7 @@ custom_providers:
 platforms:
   telegram:
     enabled: true
-    model: gemini-3.6-flash-high
+    model: gemini-3.7-flash-high
     provider: agy-cli
 ```
 
@@ -392,11 +609,11 @@ client = OpenAI(
     api_key="sk-antigravity",
 )
 
-# 1. Chat Completion
+# 1. Chat Completion with Reasoning
 completion = client.chat.completions.create(
-    model="gemini-3.6-flash-high",
+    model="gemini-3.7-flash-high",
     messages=[
-        {"role": "user", "content": "Explain microservices vs monoliths"}
+        {"role": "user", "content": "Explain microservices vs monolith architecture."}
     ]
 )
 print(completion.choices[0].message.content)
@@ -404,12 +621,12 @@ print(completion.choices[0].message.content)
 # 2. Image Generation
 image_resp = client.images.generate(
     model="imagen-3.0-generate-002",
-    prompt="A cute robot painter working on a canvas in an art gallery",
+    prompt="A cute cybernetic robot painter in an art studio, 8k render",
     size="1024x1024",
     response_format="b64_json"
 )
 import base64
-with open("robot_painter.jpg", "wb") as f:
+with open("robot.jpg", "wb") as f:
     f.write(base64.b64decode(image_resp.data[0].b64_json))
 ```
 
@@ -429,7 +646,7 @@ message = client.messages.create(
     model="claude-sonnet-4.6-thinking",
     max_tokens=1024,
     messages=[
-        {"role": "user", "content": "Analyze the time complexity of QuickSelect"}
+        {"role": "user", "content": "Analyze the time complexity of QuickSelect algorithm."}
     ]
 )
 print(message.content[0].text)
@@ -439,7 +656,7 @@ print(message.content[0].text)
 
 ### JavaScript / TypeScript (OpenAI SDK)
 
-```javascript
+```typescript
 import OpenAI from 'openai';
 import fs from 'fs';
 
@@ -451,21 +668,20 @@ const openai = new OpenAI({
 async function main() {
   // Chat Completion
   const chat = await openai.chat.completions.create({
-    model: 'gemini-3.6-flash-high',
-    messages: [{ role: 'user', content: 'Say hello from Antigravity Bridge!' }],
+    model: 'gemini-3.7-flash-high',
+    messages: [{ role: 'user', content: 'Hello from TypeScript!' }],
   });
   console.log(chat.choices[0].message.content);
 
   // Image Generation
   const image = await openai.images.generate({
     model: 'imagen-3.0-generate-002',
-    prompt: 'A futuristic floating city in the clouds at sunrise',
+    prompt: 'Futuristic floating sky city at dusk',
     size: '1024x1024',
     response_format: 'b64_json',
   });
   
-  const buffer = Buffer.from(image.data[0].b64_json, 'base64');
-  fs.writeFileSync('floating_city.jpg', buffer);
+  fs.writeFileSync('city.jpg', Buffer.from(image.data[0].b64_json, 'base64'));
 }
 
 main();
@@ -473,51 +689,49 @@ main();
 
 ---
 
-## ⚙️ CLI Options & Environment Variables
+### cURL
 
-### Command Line Flags
-
-| Flag | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| **`--host`** | `str` | `127.0.0.1` | Network interface to bind (`0.0.0.0` to allow external connections) |
-| **`--port`** | `int` | `8000` | Port number to listen on |
-| **`--cmd`** | `str` | *Auto-detected* | Custom command template (e.g. `'agy -p "{prompt}"'`) |
-| **`--profiles`** | `str` | *Auto-detected* | Comma-separated list of profile names to rotate on rate limits |
-| **`--api-key`** | `str` | `None` | Optional API Key to require for client authentication |
-| **`--enable-cors`**| `bool`| `False` | Enable wildcard CORS headers (`Access-Control-Allow-Origin: *`) |
-
-### Environment Variables
-
-| Variable | Description |
-| :--- | :--- |
-| **`GEMINI_API_KEY`** / **`gemini_api_key`** / **`GOOGLE_API_KEY`** | Google AI Studio Free API Key for Imagen 3 image generation. [Get Key Here](https://aistudio.google.com/) |
-| **`ANTIGRAVITY_PROFILES`** | Comma-separated list of `agy` profile directory names to rotate through. |
-| **`ANTIGRAVITY_PROFILE`** | Active default profile name. |
-| **`ANTIGRAVITY_BRIDGE_API_KEY`** | Default API key to protect bridge endpoints. |
-| **`ANTIGRAVITY_BRIDGE_CMD`** | Custom CLI execution template. |
+```bash
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{
+    "model": "gemini-3.7-flash-high",
+    "messages": [{"role": "user", "content": "List 3 benefits of async Python."}]
+  }'
+```
 
 ---
 
 ## 🚀 Production Deployment
 
-### 1. Deploy as Systemd Service (Recommended)
+### 1. Deploy as Systemd Service (Linux)
 
-1. **Edit and copy the service file:**
-   ```bash
-   sudo cp antigravity-bridge.service /etc/systemd/system/
+1. Create `/etc/systemd/system/antigravity-bridge.service`:
+   ```ini
+   [Unit]
+   Description=Antigravity API Bridge Server
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=attasit
+   WorkingDirectory=/home/attasit/antigravity-bridge
+   ExecStart=/usr/bin/python3 /home/attasit/antigravity-bridge/antigravity_bridge.py --host 0.0.0.0 --port 8000
+   Restart=always
+   RestartSec=5
+   Environment=PYTHONUNBUFFERED=1
+
+   [Install]
+   WantedBy=multi-user.target
    ```
 
-2. **Reload daemon, enable, and start service:**
+2. Enable and start service:
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable antigravity-bridge
    sudo systemctl start antigravity-bridge
-   ```
-
-3. **Check status & live logs:**
-   ```bash
    sudo systemctl status antigravity-bridge
-   journalctl -u antigravity-bridge -f
    ```
 
 ---
@@ -525,13 +739,15 @@ main();
 ### 2. Deploy with PM2
 
 ```bash
-# Start bridge with PM2
+# Start bridge process
 pm2 start antigravity_bridge.py --name "antigravity-bridge" --interpreter python3 -- --host 0.0.0.0 --port 8000
 
-# Save PM2 process list to auto-start on boot
+# Save process list for system reboot
 pm2 save
 pm2 startup
 ```
+
+---
 
 ### 3. Deploy with Nginx (Reverse Proxy + SSL)
 
@@ -548,9 +764,8 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_cache_bypass $http_upgrade;
 
-        # Disable buffering for SSE streaming
+        # Disable buffering for real-time SSE streaming
         proxy_buffering off;
         proxy_read_timeout 300s;
     }
@@ -559,9 +774,42 @@ server {
 
 ---
 
+## 🔧 Troubleshooting & FAQ
+
+### Q1: Copied a new profile to VPS, but `python3 antigravity_bridge.py profiles` doesn't show it?
+- **Cause**: If `~/.config/antigravity/bridge_config.json` exists on the VPS, the bridge reads that locked list instead of scanning folders.
+- **Fix**:
+  ```bash
+  # Delete the locked config to enable auto-detection of all profile folders:
+  rm -f ~/.config/antigravity/bridge_config.json
+  
+  # Check profiles again:
+  python3 antigravity_bridge.py profiles
+  ```
+
+### Q2: How do I test if a profile's Google OAuth token is still valid?
+- **Fix**: Run the diagnostic doctor:
+  ```bash
+  python3 antigravity_bridge.py diag
+  ```
+  Or probe with a test request:
+  ```bash
+  python3 antigravity_bridge.py profile test <profile_name>
+  ```
+
+### Q3: How do I reset a profile that got stuck in cooldown?
+- **Fix**:
+  ```bash
+  python3 antigravity_bridge.py profile reset <profile_name>
+  # Or reset all:
+  python3 antigravity_bridge.py profile reset
+  ```
+
+---
+
 ## 🧪 Running Unit Tests
 
-The test suite exercises all API endpoints (`/health`, `/v1/models`, `/v1/chat/completions`, `/v1/messages`, `/v1/images/generations`), profile rotations, CLI template parsers, and error cases:
+The test suite thoroughly verifies all HTTP endpoints, streaming handlers, profile ordering algorithms, fallback routing, and CLI subcommand handlers:
 
 ```bash
 python3 -m unittest test_antigravity_bridge.py -v
