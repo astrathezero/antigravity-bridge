@@ -1,4 +1,4 @@
-# Antigravity Bridge Server 🌉
+# Antigravity Bridge Server With Multi-Concurrent Pool 🌉
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green.svg)](https://platform.openai.com/docs/api-reference)
@@ -723,7 +723,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
    Type=simple
    User=attasit
    WorkingDirectory=/home/attasit/antigravity-bridge
-   ExecStart=/usr/bin/python3 /home/attasit/antigravity-bridge/antigravity_bridge.py --host 0.0.0.0 --port 8000
+   ExecStart=/usr/bin/python3 /home/attasit/antigravity-bridge/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 1
    Restart=always
    RestartSec=5
    Environment=PYTHONUNBUFFERED=1
@@ -746,7 +746,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 
 ```bash
 # Start bridge process
-pm2 start antigravity_bridge.py --name "antigravity-bridge" --interpreter python3 -- --host 0.0.0.0 --port 8000
+pm2 start antigravity_bridge.py --name "antigravity-bridge" --interpreter python3 -- --host 127.0.0.1 --port 8000 --profile-concurrency 1
 
 # Save process list for system reboot
 pm2 save
