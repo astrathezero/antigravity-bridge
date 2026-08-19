@@ -9,6 +9,14 @@
 
 **Antigravity Bridge Server** is a high-performance, zero-dependency OpenAI & Anthropic compatible REST API Bridge Server designed for the `antigravity` / `agy` CLI ecosystem. It features smart multi-account profile rotation, automatic quota error recovery, OAuth token auto-refresh daemon, diagnostic doctor, and image generation.
 
+> [!WARNING]
+> ### ⚠️ Important Disclaimer & Terms of Service Notice
+> **Please read carefully before using this software:**
+> - **Educational & Research Purpose Only:** This project is an independent community tool created for testing, personal interoperability, and local developer workflows.
+> - **Terms of Service (ToS) Compliance:** Using automated scripts, REST API wrappers, or multi-account rotation mechanisms may **violate the Terms of Service, Acceptable Use Policies, or API Usage Limits of Google, Gemini, and Antigravity**.
+> - **Risk of Account Suspension / Bans:** Excessive automated requests, rapid multi-account switching, or quota circumvention may lead to **temporary cooldowns, account rate-limits, or permanent account suspension/bans** by the upstream service provider.
+> - **Use at Your Own Risk:** The authors and contributors assume **no responsibility or liability** for any account bans, data loss, or consequences arising from the use of this project. Proceed at your own discretion.
+
 ---
 
 ## 📖 Table of Contents
