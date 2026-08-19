@@ -491,11 +491,42 @@ class TestAntigravityBridge(unittest.TestCase):
                 used_profiles = {r[1] for r in results}
                 # Verify that all 3 distinct profiles were utilized concurrently
                 self.assertEqual(used_profiles, {"p_alpha", "p_beta", "p_gamma"})
-                # All leases released
                 self.assertEqual(pm.get_total_in_flight(), 0)
         finally:
             if os.path.exists(cache_file):
                 os.remove(cache_file)
+
+    def test_server_api_key_auth(self):
+        """Test that API Key authentication blocks unauthorized requests with 401."""
+        server = ThreadedHTTPServer(("127.0.0.1", 0), AntigravityBridgeHandler)
+        server.profiles = ["default_test"]
+        server.api_key = "secret-test-key-123"
+        port = server.server_port
+
+        import threading
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            models_url = f"http://127.0.0.1:{port}/v1/models"
+            # 1. Unauthorized request should get 401
+            req_unauth = urllib.request.Request(models_url)
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req_unauth)
+            self.assertEqual(ctx.exception.code, 401)
+
+            # 2. Authorized with Bearer token should get 200
+            req_auth = urllib.request.Request(models_url, headers={"Authorization": "Bearer secret-test-key-123"})
+            with urllib.request.urlopen(req_auth) as resp:
+                self.assertEqual(resp.status, 200)
+
+            # 3. Authorized with x-api-key header should get 200
+            req_xauth = urllib.request.Request(models_url, headers={"x-api-key": "secret-test-key-123"})
+            with urllib.request.urlopen(req_xauth) as resp:
+                self.assertEqual(resp.status, 200)
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

@@ -2110,8 +2110,30 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _authorized(self) -> bool:
-        """Allow requests without blocking on API key authentication."""
-        return True
+        """Validate Authorization / x-api-key header against server configured api_key if set."""
+        expected_key = getattr(self.server, "api_key", None)
+        if not expected_key:
+            # If server has no --api-key configured, allow all requests
+            return True
+
+        # Check standard Authorization: Bearer <key>
+        auth_header = self.headers.get("Authorization", "").strip()
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
+            if token == expected_key:
+                return True
+
+        # Check Anthropic x-api-key: <key>
+        x_key = self.headers.get("x-api-key", "").strip()
+        if x_key and x_key == expected_key:
+            return True
+
+        # Check generic api-key: <key>
+        generic_key = self.headers.get("api-key", "").strip()
+        if generic_key and generic_key == expected_key:
+            return True
+
+        return False
 
     def _send_json_response(self, data: Dict[str, Any], status_code: int = 200, extra_headers: Optional[Dict[str, str]] = None) -> None:
         body = json.dumps(data).encode("utf-8")
