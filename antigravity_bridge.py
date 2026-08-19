@@ -42,10 +42,37 @@ from socketserver import ThreadingMixIn
 from typing import Any, Dict, List, Optional, Tuple
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+def load_dotenv(paths: Optional[List[str]] = None) -> None:
+    """Lightweight zero-dependency .env file parser and loader."""
+    if paths is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        paths = [
+            os.path.join(script_dir, ".env"),
+            os.path.join(os.getcwd(), ".env"),
+            os.path.expanduser("~/.config/antigravity/bridge.env"),
+            os.path.expanduser("~/.config/antigravity/.env"),
+            os.path.expanduser("~/.env"),
+        ]
+
+    for p in paths:
+        if os.path.exists(p) and os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+
+
+# Auto-load private environment configuration if present
+load_dotenv()
 
 logger = logging.getLogger("antigravity_bridge")
 

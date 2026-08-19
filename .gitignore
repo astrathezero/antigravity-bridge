@@ -10,3 +10,13 @@ scratch/
 *.png
 *.jpg
 *.jpeg
+
+# Private Environment & Configs (Ignored by Git)
+.env
+.env.*
+!.env.example
+deploy.env
+*.local.*
+deploy.local.sh
+local_patch.*
+*.service.local
