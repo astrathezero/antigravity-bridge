@@ -61,19 +61,19 @@ class TestAntigravityBridge(unittest.TestCase):
         mock_proc.communicate.return_value = ("CLI execution output", "")
         mock_popen.return_value = mock_proc
 
-        with patch.object(antigravity_bridge, "sync_profile_to_system", return_value=("test@gmail.com", "ya29.test")):
-            output = execute_cli_command('echo "{prompt}"', "Hello world", profile="astrathezero")
+        with patch.object(antigravity_bridge, "sync_profile_to_system", return_value=("test@example.com", "ya29.test")):
+            output = execute_cli_command('echo "{prompt}"', "Hello world", profile="profile_alpha")
             self.assertEqual(output, "CLI execution output")
             mock_popen.assert_called_once()
             _, kwargs = mock_popen.call_args
-            self.assertEqual(kwargs.get("env", {}).get("ANTIGRAVITY_PROFILE"), "astrathezero")
+            self.assertEqual(kwargs.get("env", {}).get("ANTIGRAVITY_PROFILE"), "profile_alpha")
 
     def test_is_quota_or_rate_limit_error(self):
         """Test detecting quota exhaustion and rate limit error patterns."""
         self.assertTrue(is_quota_or_rate_limit_error("Error 429: Too Many Requests"))
         self.assertTrue(is_quota_or_rate_limit_error("RESOURCE_EXHAUSTED: Quota exceeded for model"))
         self.assertTrue(is_quota_or_rate_limit_error("insufficient_quota on user account"))
-        self.assertTrue(is_quota_or_rate_limit_error("Rate limit reached for profile astrathezero"))
+        self.assertTrue(is_quota_or_rate_limit_error("Rate limit reached for profile profile_alpha"))
         self.assertTrue(is_quota_or_rate_limit_error("You have exceeded your current quota"))
         self.assertTrue(is_quota_or_rate_limit_error("out of credits"))
         self.assertTrue(is_quota_or_rate_limit_error("model overloaded"))
@@ -149,16 +149,16 @@ class TestAntigravityBridge(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
             cache_file = tf.name
         try:
-            pm = ProfileManager(profiles=["astrathezero", "mrsermshop", "attasitgits"], cache_file=cache_file)
-            pm.mark_exhausted("astrathezero", "429 Quota Exceeded")
-            pm.mark_exhausted("mrsermshop", "ResourceExhausted")
+            pm = ProfileManager(profiles=["profile_alpha", "profile_beta", "profile_gamma"], cache_file=cache_file)
+            pm.mark_exhausted("profile_alpha", "429 Quota Exceeded")
+            pm.mark_exhausted("profile_beta", "ResourceExhausted")
 
             # Fast path: only healthy profiles returned when available
             ordered = pm.get_ordered_profiles()
-            self.assertEqual(ordered, ["attasitgits"])
+            self.assertEqual(ordered, ["profile_gamma"])
 
             # When all are exhausted, fallback returns all sorted by earliest cooldown
-            pm.mark_exhausted("attasitgits", "ResourceExhausted")
+            pm.mark_exhausted("profile_gamma", "ResourceExhausted")
             fallback_ordered = pm.get_ordered_profiles()
             self.assertEqual(len(fallback_ordered), 3)
         finally:
@@ -171,31 +171,31 @@ class TestAntigravityBridge(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
             cache_file = tf.name
         try:
-            pm = ProfileManager(profiles=["astrathezero", "mrsermshop", "attasitgits"], cache_file=cache_file)
+            pm = ProfileManager(profiles=["profile_alpha", "profile_beta", "profile_gamma"], cache_file=cache_file)
             attempts = []
 
             def side_effect(cmd, prompt, timeout=60.0, profile=None, **kwargs):
                 attempts.append(profile)
-                if profile in ("astrathezero", "mrsermshop"):
+                if profile in ("profile_alpha", "profile_beta"):
                     raise RuntimeError(f"RESOURCE_EXHAUSTED on {profile}")
-                if profile == "attasitgits":
-                    return "Output from attasitgits"
+                if profile == "profile_gamma":
+                    return "Output from profile_gamma"
                 raise RuntimeError(f"Unknown profile {profile}")
 
             with patch.object(antigravity_bridge, "execute_cli_command", side_effect=side_effect):
-                # 1. First call: astrathezero and mrsermshop fail with quota error, attasitgits succeeds
+                # 1. First call: profile_alpha and profile_beta fail with quota error, profile_gamma succeeds
                 output1, used_profile1 = execute_cli_with_fallback('echo "{prompt}"', "test", profile_manager=pm)
-                self.assertEqual(output1, "Output from attasitgits")
-                self.assertEqual(used_profile1, "attasitgits")
-                self.assertEqual(attempts, ["astrathezero", "mrsermshop", "attasitgits"])
+                self.assertEqual(output1, "Output from profile_gamma")
+                self.assertEqual(used_profile1, "profile_gamma")
+                self.assertEqual(attempts, ["profile_alpha", "profile_beta", "profile_gamma"])
 
-                # 2. Second call: astrathezero and mrsermshop are now IN COOLDOWN!
-                # It must execute attasitgits directly without trying astrathezero or mrsermshop first!
+                # 2. Second call: profile_alpha and profile_beta are now IN COOLDOWN!
+                # It must execute profile_gamma directly without trying profile_alpha or profile_beta first!
                 attempts.clear()
                 output2, used_profile2 = execute_cli_with_fallback('echo "{prompt}"', "test", profile_manager=pm)
-                self.assertEqual(output2, "Output from attasitgits")
-                self.assertEqual(used_profile2, "attasitgits")
-                self.assertEqual(attempts, ["attasitgits"])
+                self.assertEqual(output2, "Output from profile_gamma")
+                self.assertEqual(used_profile2, "profile_gamma")
+                self.assertEqual(attempts, ["profile_gamma"])
         finally:
             if os.path.exists(cache_file):
                 os.remove(cache_file)
@@ -222,8 +222,8 @@ class TestAntigravityBridge(unittest.TestCase):
         # Test help
         self.assertEqual(handle_profile_cli(["--help"]), 0)
         # Test disable / enable
-        self.assertEqual(handle_profile_cli(["disable", "astrathezero"]), 0)
-        self.assertEqual(handle_profile_cli(["enable", "astrathezero"]), 0)
+        self.assertEqual(handle_profile_cli(["disable", "profile_alpha"]), 0)
+        self.assertEqual(handle_profile_cli(["enable", "profile_alpha"]), 0)
         # Test reset
         self.assertEqual(handle_profile_cli(["reset"]), 0)
 

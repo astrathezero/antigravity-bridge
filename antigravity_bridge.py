@@ -51,8 +51,8 @@ logger = logging.getLogger("antigravity_bridge")
 
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
 
-DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "https://aiapirouter.mrserm.com/v1")
-DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "sk-36a01df06cfa9e5f-5mbqa9-11db659b")
+DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "")
+DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "")
 DEFAULT_QUOTA_CACHE_FILE = os.path.expanduser("~/.config/antigravity/quota_cache.json")
 DEFAULT_QUOTA_WINDOW_SECONDS = 10800.0  # 3-hour sliding window for Google Gemini quota
 DEFAULT_FLASH_QUOTA_CAPACITY = 50       # Baseline 50 requests capacity per 3h window for Flash
@@ -896,21 +896,21 @@ class ProfileManager:
                 if status == "DISABLED":
                     continue
 
+                exhausted_until = info.get("exhausted_until", 0)
+                if exhausted_until > 0 and now < exhausted_until:
+                    exhausted.append((exhausted_until, p))
+                    continue
+
                 # Filter unauthenticated profiles so they don't block healthy profiles
                 email = get_profile_account_email(p)
-                if email == "Not Logged In" and p is not None:
+                if email == "Not Logged In" and p is not None and not info.get("success_count", 0):
                     unauthenticated.append(p)
                     continue
 
-                exhausted_until = info.get("exhausted_until", 0)
-
-                if exhausted_until == 0 or now >= exhausted_until:
-                    if status in ("EXHAUSTED", "RATE_LIMITED", "ERROR_COOLDOWN"):
-                        recovering.append(p)
-                    else:
-                        ready.append(p)
+                if status in ("EXHAUSTED", "RATE_LIMITED", "ERROR_COOLDOWN"):
+                    recovering.append(p)
                 else:
-                    exhausted.append((exhausted_until, p))
+                    ready.append(p)
 
             # Round-robin among ready profiles
             if ready:
@@ -918,15 +918,18 @@ class ProfileManager:
                 ready = ready[idx:] + ready[:idx]
                 self.current_idx = (idx + 1) % len(ready)
 
-            # Fast Path: If healthy ready/recovering profiles exist, return them exclusively to eliminate wasted failure latency
+            # Fast Path: If healthy ready/recovering profiles exist, return them exclusively
             if ready or recovering:
                 return ready + recovering
+
+            # If unauthenticated candidates exist (e.g. unprobed or test mocks), try them before exhausted
+            if unauthenticated:
+                return unauthenticated
 
             # Last resort fallback: try earliest-recovering exhausted profiles only when all accounts are down
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
-            ordered = exhausted_profiles + unauthenticated
-            return ordered if ordered else [None]
+            return exhausted_profiles if exhausted_profiles else [None]
 
     def acquire_profile(self, candidates: Optional[List[Optional[str]]] = None) -> Optional[str]:
         """Atomically select and acquire an idle/available candidate profile with free in-flight lease."""
@@ -2904,13 +2907,13 @@ Shortcuts:
 
 Examples:
   python3 antigravity_bridge.py profile list
-  python3 antigravity_bridge.py profile order panthornchuan,attasitgits,mrsermshop
-  python3 antigravity_bridge.py profile set panthornchuan,attasitgits,mrsermshop
-  python3 antigravity_bridge.py profile disable astrathezero
-  python3 antigravity_bridge.py profile enable astrathezero
-  python3 antigravity_bridge.py profile login attasitgits
+  python3 antigravity_bridge.py profile order profile_1,profile_2,profile_3
+  python3 antigravity_bridge.py profile set profile_1,profile_2,profile_3
+  python3 antigravity_bridge.py profile disable profile_3
+  python3 antigravity_bridge.py profile enable profile_3
+  python3 antigravity_bridge.py profile login profile_new
   python3 antigravity_bridge.py profile test --model gemini-3.7-flash
-  python3 antigravity_bridge.py profile copy attasitgits attasit@n8n.mrserm.com
+  python3 antigravity_bridge.py profile copy profile_1 user@remote-vps
 """)
         return 0
 
@@ -2941,7 +2944,7 @@ Examples:
 
     elif sub in ("set", "use", "config", "order", "rotate"):
         if len(argv) < 2:
-            print("[Error] Please specify profiles: python3 antigravity_bridge.py profile order panthornchuan,attasitgits,mrsermshop")
+            print("[Error] Please specify profiles: python3 antigravity_bridge.py profile order profile_1,profile_2,profile_3")
             return 1
         raw = argv[1].strip()
         new_profiles = [p.strip() for p in raw.split(",") if p.strip()]
@@ -3371,7 +3374,7 @@ Examples:
     elif sub in ("copy", "sync", "scp"):
         if len(argv) < 2:
             print("[Error] Usage: python3 antigravity_bridge.py profile sync <remote_user@host>")
-            print("        Example: python3 antigravity_bridge.py profile sync attasit@n8n.mrserm.com")
+            print("        Example: python3 antigravity_bridge.py profile sync user@remote-vps")
             return 1
 
         if len(argv) == 2:

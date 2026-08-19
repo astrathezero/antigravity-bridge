@@ -79,9 +79,9 @@ The **Antigravity Bridge Server** bridges AI clients, external bots, webhooks, a
                              ▼
 ┌─────────────────────────────────────────────────────────┐
 │     Multi-Profile Pool (~/.config/antigravity/profiles) │
-│  ├── Profile 1 (astrathezero)  ──► Google Gemini API    │
-│  ├── Profile 2 (attasitgits)   ──► Google Gemini API    │
-│  └── Profile N (...)           ──► Google Gemini API    │
+│  ├── Profile 1 (profile_work)     ──► Google Gemini API │
+│  ├── Profile 2 (profile_personal) ──► Google Gemini API │
+│  └── Profile N (...)              ──► Google Gemini API │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -160,14 +160,11 @@ python3 antigravity_bridge.py profile list
 ============================================================================================================
 Profile Name     Google Account Email           Status      In-Flight   Cooldown   Est. Quota   Success
 ============================================================================================================
-astramoney       astra.moneylicense@gmail.com   OK          0/1         Ready      100%         9
-astrasupergamer  astrasupergamer@gmail.com      OK          0/1         Ready      100%         0
-astrathezero     astrathezero@gmail.com         OK          0/1         Ready      86%          28
-attasitgits      attasitgits@gmail.com          OK          0/1         Ready      100%         12
-mrsermshop       mrsermshop@gmail.com           EXHAUSTED   0/1         246819s    0%           4
-panthornchuan    panthornchuan@gmail.com        OK          0/1         Ready      100%         15
-somporn          sompornjitdee80@gmail.com      EXHAUSTED   0/1         567484s    0%           0
-xiuxiubtc        xiuxiubtc@gmail.com            OK          0/1         Ready      98%          4
+profile_alpha    account1@example.com           OK          0/1         Ready      100%         15
+profile_beta     account2@example.com           OK          0/1         Ready      86%          28
+profile_gamma    account3@example.com           OK          0/1         Ready      100%         12
+profile_delta    account4@example.com           EXHAUSTED   0/1         246819s    0%           4
+profile_omega    account5@example.com           OK          0/1         Ready      98%          4
 ============================================================================================================
 ```
 
@@ -201,10 +198,10 @@ Actively sends lightweight test requests directly through Google's Gemini models
 python3 antigravity_bridge.py profile test
 
 # Test a specific profile:
-python3 antigravity_bridge.py profile test attasitgits
+python3 antigravity_bridge.py profile test profile_alpha
 
 # Test with a specific model:
-python3 antigravity_bridge.py profile test attasitgits --model gemini-3.7-flash
+python3 antigravity_bridge.py profile test profile_alpha --model gemini-3.7-flash
 
 # Test with a custom prompt:
 python3 antigravity_bridge.py profile test --prompt "Hello! Confirm you are working."
@@ -217,9 +214,9 @@ python3 antigravity_bridge.py profile test --prompt "Hello! Confirm you are work
 Explicitly define the profile rotation order and active pool. This updates both the live running server dynamically via HTTP and saves the preference to `~/.config/antigravity/bridge_config.json`:
 
 ```bash
-python3 antigravity_bridge.py profile set astrathezero,attasitgits,astramoney,panthornchuan
+python3 antigravity_bridge.py profile set profile_alpha,profile_beta,profile_gamma
 # Or
-python3 antigravity_bridge.py profile order astrathezero,attasitgits,astramoney,panthornchuan
+python3 antigravity_bridge.py profile order profile_alpha,profile_beta,profile_gamma
 ```
 
 ---
@@ -230,10 +227,10 @@ Temporarily exclude a profile from receiving requests without deleting its crede
 
 ```bash
 # Temporarily disable:
-python3 antigravity_bridge.py profile disable mrsermshop
+python3 antigravity_bridge.py profile disable profile_delta
 
 # Re-enable:
-python3 antigravity_bridge.py profile enable mrsermshop
+python3 antigravity_bridge.py profile enable profile_delta
 ```
 
 ---
@@ -244,7 +241,7 @@ Clear cooldown states and reset estimated quotas:
 
 ```bash
 # Reset a specific profile:
-python3 antigravity_bridge.py profile reset attasitgits
+python3 antigravity_bridge.py profile reset profile_alpha
 
 # Reset all profiles:
 python3 antigravity_bridge.py profile reset
@@ -258,7 +255,7 @@ Perform an active OAuth token exchange with Google to regenerate access tokens:
 
 ```bash
 # Refresh a specific profile:
-python3 antigravity_bridge.py profile refresh attasitgits
+python3 antigravity_bridge.py profile refresh profile_alpha
 
 # Refresh all profiles:
 python3 antigravity_bridge.py profile refresh
@@ -272,10 +269,10 @@ Quickly copy authentication profiles from your local machine to a remote VPS:
 
 ```bash
 # Sync ALL profiles at once via compressed SSH stream:
-python3 antigravity_bridge.py profile sync attasit@vmi2924193
+python3 antigravity_bridge.py profile sync user@remote-vps
 
 # Copy a single profile via SCP:
-python3 antigravity_bridge.py profile copy attasitgits attasit@vmi2924193
+python3 antigravity_bridge.py profile copy profile_alpha user@remote-vps
 ```
 
 ---
@@ -317,14 +314,21 @@ curl http://127.0.0.1:8000/health
 {
   "status": "ok",
   "service": "antigravity-bridge",
-  "active_profile": "astrathezero",
+  "active_profile": "profile_alpha",
+  "concurrency": {
+    "active_in_flight": 0,
+    "max_pool_capacity": 5,
+    "concurrency_per_profile": 1
+  },
   "profiles": {
-    "astrathezero": {
+    "profile_alpha": {
       "status": "OK",
+      "in_flight": 0,
+      "max_concurrency": 1,
       "cooldown_seconds_remaining": 0,
       "estimated_quota_percent": 100,
-      "success_count": 28,
-      "google_account": "astrathezero@gmail.com"
+      "success_count": 15,
+      "google_account": "account1@example.com"
     }
   }
 }
@@ -444,7 +448,7 @@ Reset cooldowns for a single profile or all profiles:
 curl -X POST http://127.0.0.1:8000/v1/profiles/reset \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-antigravity" \
-  -d '{"profile": "attasitgits"}'
+  -d '{"profile": "profile_alpha"}'
 ```
 
 ---
@@ -470,7 +474,7 @@ Hot-reload active profile list on a live running bridge server without restartin
 curl -X POST http://127.0.0.1:8000/v1/profiles/config \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-antigravity" \
-  -d '{"profiles": ["astrathezero", "attasitgits", "astramoney"]}'
+  -d '{"profiles": ["profile_alpha", "profile_beta", "profile_gamma"]}'
 ```
 
 ---
@@ -481,12 +485,12 @@ curl -X POST http://127.0.0.1:8000/v1/profiles/config \
 # Disable profile:
 curl -X POST http://127.0.0.1:8000/v1/profiles/disable \
   -H "Content-Type: application/json" \
-  -d '{"profile": "mrsermshop"}'
+  -d '{"profile": "profile_delta"}'
 
 # Enable profile:
 curl -X POST http://127.0.0.1:8000/v1/profiles/enable \
   -H "Content-Type: application/json" \
-  -d '{"profile": "mrsermshop"}'
+  -d '{"profile": "profile_delta"}'
 ```
 
 ---
@@ -721,9 +725,9 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 
    [Service]
    Type=simple
-   User=attasit
-   WorkingDirectory=/home/attasit/antigravity-bridge
-   ExecStart=/usr/bin/python3 /home/attasit/antigravity-bridge/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 1
+   User=your-username
+   WorkingDirectory=/home/your-username/antigravity-bridge
+   ExecStart=/usr/bin/python3 /home/your-username/antigravity-bridge/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 1
    Restart=always
    RestartSec=5
    Environment=PYTHONUNBUFFERED=1
