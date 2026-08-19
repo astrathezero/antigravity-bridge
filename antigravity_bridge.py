@@ -748,8 +748,12 @@ class ProfileManager:
         profile: Optional[str],
         reason: str,
         cooldown_seconds: Optional[float] = None,
+        duration: Optional[float] = None,
     ) -> None:
         """Mark a profile as exhausted and enter cooldown with exponential backoff or exact reset time."""
+        if cooldown_seconds is None and duration is not None:
+            cooldown_seconds = duration
+
         key = profile or "default"
         now = time.time()
         with self.lock:
@@ -1661,10 +1665,13 @@ def get_profile_sandbox_dir(profile_name: Optional[str]) -> str:
     key = profile_name or "default"
     sandbox_base = os.path.expanduser(f"~/.config/antigravity/sandboxes/{key}")
     gemini_dir = os.path.join(sandbox_base, ".gemini")
+    gemini_cli_dir = os.path.join(sandbox_base, ".gemini", "antigravity-cli")
     config_dir = os.path.join(sandbox_base, ".config", "antigravity")
+    config_gemini = os.path.join(sandbox_base, ".config", "gemini")
 
-    os.makedirs(gemini_dir, exist_ok=True)
-    os.makedirs(config_dir, exist_ok=True)
+    target_dirs = [gemini_dir, gemini_cli_dir, config_dir, config_gemini, sandbox_base]
+    for td in target_dirs:
+        os.makedirs(td, exist_ok=True)
 
     # Source profile directory
     src_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{key}") if profile_name else os.path.expanduser("~/.gemini")
@@ -1673,12 +1680,12 @@ def get_profile_sandbox_dir(profile_name: Optional[str]) -> str:
         if os.path.exists(alt):
             src_dir = alt
 
-    # Sync auth files into sandbox if modified
+    # Sync auth files into sandbox
     if os.path.exists(src_dir) and os.path.isdir(src_dir):
         for fname in ("oauth_creds.json", "google_accounts.json", "state.json", "settings.json", "antigravity-oauth-token"):
             src_file = os.path.join(src_dir, fname)
             if os.path.exists(src_file):
-                for dest_d in (gemini_dir, config_dir):
+                for dest_d in target_dirs:
                     dst_file = os.path.join(dest_d, fname)
                     try:
                         if not os.path.exists(dst_file) or os.path.getmtime(src_file) > os.path.getmtime(dst_file):
@@ -1686,14 +1693,45 @@ def get_profile_sandbox_dir(profile_name: Optional[str]) -> str:
                     except Exception:
                         pass
 
-    # Clean stale lock and cache files from sandbox
-    for lock_name in ("update.lock", "knowledge.lock", "jetski_state.pbtxt", "default-cli-project.json", "default_project_id.txt"):
-        lp = os.path.join(gemini_dir, lock_name)
-        if os.path.exists(lp):
+        # Generate antigravity-oauth-token inside sandbox if oauth_creds.json is present
+        oauth_file = os.path.join(src_dir, "oauth_creds.json")
+        if os.path.exists(oauth_file):
             try:
-                os.remove(lp)
+                with open(oauth_file, "r", encoding="utf-8") as o_f:
+                    raw_content = o_f.read()
+                    o_data = json.loads(raw_content)
+                raw_tok = o_data.get("token") if isinstance(o_data.get("token"), dict) else o_data
+                auth_meth = o_data.get("auth_method", "consumer")
+                token_obj = {
+                    "token": {
+                        "access_token": raw_tok.get("access_token", ""),
+                        "token_type": raw_tok.get("token_type", "Bearer"),
+                        "refresh_token": raw_tok.get("refresh_token", ""),
+                        "expiry": raw_tok.get("expiry", "2026-08-18T23:59:59+07:00"),
+                    },
+                    "auth_method": auth_meth,
+                }
+                tok_json_str = json.dumps(token_obj)
+                for td in target_dirs:
+                    try:
+                        dst_tok = os.path.join(td, "antigravity-oauth-token")
+                        if not os.path.exists(dst_tok) or os.path.getmtime(oauth_file) > os.path.getmtime(dst_tok):
+                            with open(dst_tok, "w", encoding="utf-8") as aot_f:
+                                aot_f.write(tok_json_str)
+                    except Exception:
+                        pass
             except Exception:
                 pass
+
+    # Clean stale lock and cache files from sandbox
+    for lock_name in ("update.lock", "knowledge.lock", "jetski_state.pbtxt", "default-cli-project.json", "default_project_id.txt"):
+        for td in (gemini_dir, sandbox_base):
+            lp = os.path.join(td, lock_name)
+            if os.path.exists(lp):
+                try:
+                    os.remove(lp)
+                except Exception:
+                    pass
 
     return sandbox_base
 
@@ -1885,7 +1923,7 @@ def execute_cli_with_fallback(
             err_str = str(exc)
             logger.warning("Profile '%s' execution failed: %s", profile_key, exc)
             if "authentication required" in err_str.lower() or "not signed in" in err_str.lower():
-                mgr.mark_exhausted(profile, err_str, duration=3600.0)
+                mgr.mark_exhausted(profile, err_str, cooldown_seconds=3600.0)
             elif is_quota_or_rate_limit_error(err_str):
                 mgr.mark_exhausted(profile, err_str)
             else:
