@@ -210,15 +210,15 @@ sudo systemctl restart antigravity-bridge
 | **`gemini-3.5-flash-medium`** | `--model gemini-3.5-flash` | `medium` | Gemini 3.5 Flash (Medium Reasoning Effort) | 1,000,000 |
 | **`gemini-3.5-flash-low`** | `--model gemini-3.5-flash` | `low` | Gemini 3.5 Flash (Low Reasoning Effort) | 1,000,000 |
 | **`gemini-3.5-flash`** | `--model gemini-3.5-flash` | - | Gemini 3.5 Flash (Default) | 1,000,000 |
-| **`gemini-3.1-pro-high`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (High Reasoning Effort) | 1,000,000 |
-| **`gemini-3.1-pro-low`** | `--model gemini-3.1-pro` | `low` | Gemini 3.1 Pro (Low Reasoning Effort) | 1,000,000 |
-| **`gemini-3.1-pro`** | `--model gemini-3.1-pro` | - | Gemini 3.1 Pro (Default) | 1,000,000 |
-| **`claude-sonnet-4.6-thinking`** | `--model claude-sonnet-4.6` | `thinking` | Anthropic Claude Sonnet 4.6 (Extended Thinking) | 1,000,000 |
-| **`claude-sonnet-4.6`** | `--model claude-sonnet-4.6` | - | Anthropic Claude Sonnet 4.6 | 1,000,000 |
-| **`claude-opus-4.6-thinking`** | `--model claude-opus-4.6` | `thinking` | Anthropic Claude Opus 4.6 (Extended Thinking) | 1,000,000 |
-| **`claude-opus-4.6`** | `--model claude-opus-4.6` | - | Anthropic Claude Opus 4.6 | 1,000,000 |
-| **`gpt-oss-120b-medium`** | `--model gpt-oss-120b` | `medium` | GPT-OSS 120B (Medium Reasoning) | 1,000,000 |
-| **`gpt-oss-120b`** | `--model gpt-oss-120b` | - | GPT-OSS 120B | 1,000,000 |
+| **`gemini-3.1-pro-high`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (High Reasoning Effort) | 2,000,000 |
+| **`gemini-3.1-pro-low`** | `--model gemini-3.1-pro` | `low` | Gemini 3.1 Pro (Low Reasoning Effort) | 2,000,000 |
+| **`gemini-3.1-pro`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (Default) | 2,000,000 |
+| **`claude-sonnet-4.6-thinking`** | `--model claude-sonnet-4.6` | `thinking` | Anthropic Claude Sonnet 4.6 (Extended Thinking) | 200,000 |
+| **`claude-sonnet-4.6`** | `--model claude-sonnet-4.6` | - | Anthropic Claude Sonnet 4.6 | 200,000 |
+| **`claude-opus-4.6-thinking`** | `--model claude-opus-4.6` | `thinking` | Anthropic Claude Opus 4.6 (Extended Thinking) | 200,000 |
+| **`claude-opus-4.6`** | `--model claude-opus-4.6` | - | Anthropic Claude Opus 4.6 | 200,000 |
+| **`gpt-oss-120b-medium`** | `--model gpt-oss-120b` | `medium` | GPT-OSS 120B (Medium Reasoning) | 128,000 |
+| **`gpt-oss-120b`** | `--model gpt-oss-120b` | - | GPT-OSS 120B | 128,000 |
 | **`imagen-3.0-generate-002`** | Google Imagen 3 API | - | High-Quality Image Generation (`/v1/images/generations`) | - |
 | **`imagen-3.0-fast-generate-001`**| Google Imagen 3 Fast API | - | Fast Image Generation (`/v1/images/generations`) | - |
 | **`gemini-3.1-flash-image`** | Google Gemini Image Router | - | Fast Gemini Image Generation | - |
@@ -662,23 +662,23 @@ custom_providers:
       gemini-3.5-flash:
         context_length: 1000000
       gemini-3.1-pro-high:
-        context_length: 1000000
+        context_length: 2000000
       gemini-3.1-pro-low:
-        context_length: 1000000
+        context_length: 2000000
       gemini-3.1-pro:
-        context_length: 1000000
+        context_length: 2000000
       claude-sonnet-4.6-thinking:
-        context_length: 1000000
+        context_length: 200000
       claude-sonnet-4.6:
-        context_length: 1000000
+        context_length: 200000
       claude-opus-4.6-thinking:
-        context_length: 1000000
+        context_length: 200000
       claude-opus-4.6:
-        context_length: 1000000
+        context_length: 200000
       gpt-oss-120b-medium:
-        context_length: 1000000
+        context_length: 128000
       gpt-oss-120b:
-        context_length: 1000000
+        context_length: 128000
 ```
 
 ### 2. Platform Gateway Configuration (e.g. Telegram / Discord)

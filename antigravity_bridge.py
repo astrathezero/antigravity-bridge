@@ -113,6 +113,36 @@ SUPPORTED_MODELS = {
     "imagen-3.0-fast-generate-001": ("ag/gemini-3.1-flash-image", None),
 }
 
+MODEL_CONTEXT_LIMITS = {
+    # Gemini Flash Models (1M tokens)
+    "gemini-3.7-flash": 1000000,
+    "gemini-3.7-flash-high": 1000000,
+    "gemini-3.7-flash-medium": 1000000,
+    "gemini-3.7-flash-low": 1000000,
+    "gemini-3.6-flash-high": 1000000,
+    "gemini-3.6-flash-medium": 1000000,
+    "gemini-3.6-flash-low": 1000000,
+    "gemini-3.6-flash": 1000000,
+    "gemini-3.5-flash-medium": 1000000,
+    "gemini-3.5-flash-low": 1000000,
+    "gemini-3.5-flash": 1000000,
+    # Gemini Pro Models (2M tokens)
+    "gemini-3.1-pro-high": 2000000,
+    "gemini-3.1-pro-low": 2000000,
+    "gemini-3.1-pro": 2000000,
+    # Anthropic Claude Models (200k tokens)
+    "claude-sonnet-4.6-thinking": 200000,
+    "claude-sonnet-4.6": 200000,
+    "claude-opus-4.6-thinking": 200000,
+    "claude-opus-4.6": 200000,
+    # GPT-OSS 120B Models (128k tokens)
+    "gpt-oss-120b-medium": 128000,
+    "gpt-oss-120b": 128000,
+    # Default CLI fallback
+    "antigravity": 1000000,
+    "agy": 1000000,
+}
+
 IMAGE_SIZE_TO_ASPECT_RATIO = {
     "1024x1024": "1:1",
     "512x512": "1:1",
@@ -2274,11 +2304,17 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             if path in ("/v1/models", "/models"):
                 now_ts = int(time.time())
                 models_list = [
-                    {"id": m, "object": "model", "created": now_ts, "owned_by": "local"}
+                    {
+                        "id": m,
+                        "object": "model",
+                        "created": now_ts,
+                        "owned_by": "local",
+                        "context_window": MODEL_CONTEXT_LIMITS.get(m),
+                    }
                     for m in SUPPORTED_MODELS.keys()
                 ] + [
-                    {"id": "antigravity", "object": "model", "created": now_ts, "owned_by": "local"},
-                    {"id": "agy", "object": "model", "created": now_ts, "owned_by": "local"},
+                    {"id": "antigravity", "object": "model", "created": now_ts, "owned_by": "local", "context_window": 1000000},
+                    {"id": "agy", "object": "model", "created": now_ts, "owned_by": "local", "context_window": 1000000},
                 ]
                 self._send_json_response({
                     "object": "list",
