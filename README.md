@@ -148,6 +148,13 @@ Add one or more Google accounts interactively:
 python3 antigravity_bridge.py login profile_1
 python3 antigravity_bridge.py login profile_2
 ```
+
+> [!IMPORTANT]
+> **Login Steps for New Profiles:**
+> 1. **Browser Login:** When your browser opens, choose the Google account for this profile and authorize OAuth access.
+> 2. **Initial Activation:** When returning to the interactive terminal prompt (where you see `>`), type `hi` and press `Enter` to verify and activate the account token.
+> 3. **Exit to Save:** Type `/exit` (or press `Ctrl+D`) to exit the interactive session. The bridge will automatically capture the credentials and save them to `~/.config/antigravity/profiles/<profile_name>/`.
+
 *Or copy profiles from your local machine to your VPS:*
 ```bash
 # On your local machine:
@@ -265,12 +272,13 @@ python3 antigravity_bridge.py login my_new_profile
 python3 antigravity_bridge.py profile login my_new_profile
 ```
 
-**What happens:**
-1. Backs up current authentication files in `~/.gemini/`.
-2. Triggers Google OAuth browser authentication.
-3. Automatically extracts OAuth tokens (from macOS Keychain or Linux SecretService/files) and verifies the active Google email address.
-4. Stores credentials in `~/.config/antigravity/profiles/my_new_profile/`.
-5. Restores original configuration cleanly.
+**Step-by-Step Login Flow:**
+1. **Backup Isolation:** The bridge temporarily backs up existing credentials in `~/.gemini/` to prevent account mixing.
+2. **Browser OAuth:** `agy` opens your default web browser (or provides a URL) to authenticate with Google.
+3. **Session Activation:** Once logged in, `agy` enters interactive prompt mode (showing `>`). **Type `hi` and press Enter** to initialize the session and verify that the new Google account has authorized access to Antigravity.
+4. **Exit & Save:** **Type `/exit` and press Enter** (or press `Ctrl+D`).
+5. **Credential Extraction:** The bridge automatically captures OAuth tokens (from macOS Keychain or Linux SecretService/filesystem), verifies the associated Google email via Google UserInfo API, and saves the profile to `~/.config/antigravity/profiles/my_new_profile/`.
+6. **Clean Restoration:** Restores previous global credentials cleanly.
 
 ---
 
