@@ -89,6 +89,10 @@ The **Antigravity Bridge Server** bridges AI clients, external bots, webhooks, a
 
 ## ✨ Key Features
 
+- ⚡ **Multi-Concurrent Profile Pool & Parallel Execution**:
+  - **Zero Lock Contention**: Runs each profile in an isolated runtime sandbox (`~/.config/antigravity/sandboxes/<profile>/`).
+  - **Independent Profile Leases**: Enables parallel execution across all healthy profiles simultaneously (e.g. 8 profiles = 8 parallel requests).
+  - Eliminates SQLite database lock contention (`conversation_summaries.db`) and auth file collisions.
 - 🔄 **Dual Format Compatibility**: 100% compatible with both **OpenAI** (`/v1/chat/completions`) and **Anthropic** (`/v1/messages`) standards.
 - 🛠️ **Tool Calling & Function Calling**: Native extraction and parsing for OpenAI `tools` / `functions` and Anthropic `tools`.
 - ⚡ **Real-Time SSE Streaming**: Server-Sent Events (`text/event-stream`) for fast, fluid streaming completions.
@@ -143,7 +147,7 @@ Manage multiple Google accounts, test quotas, refresh tokens, and sync credentia
 
 ### 1. List & Quota Status (`profiles`, `profile list`)
 
-View a formatted table of all discovered profiles, active Google account emails, availability status, cooldown timers, estimated quota, and successful request counts:
+View a formatted table of all discovered profiles, active Google account emails, availability status, in-flight concurrency, cooldown timers, estimated quota, and successful request counts:
 
 ```bash
 python3 antigravity_bridge.py profiles
@@ -153,18 +157,18 @@ python3 antigravity_bridge.py profile list
 
 **Output Preview:**
 ```text
-================================================================================================
-Profile Name     Google Account Email           Status      Cooldown   Est. Quota   Success
-================================================================================================
-astramoney       astra.moneylicense@gmail.com   OK          Ready      100%         9
-astrasupergamer  astrasupergamer@gmail.com      OK          Ready      100%         0
-astrathezero     astrathezero@gmail.com         OK          Ready      86%          28
-attasitgits      attasitgits@gmail.com          OK          Ready      100%         12
-mrsermshop       mrsermshop@gmail.com           EXHAUSTED   246819s    0%           4
-panthornchuan    panthornchuan@gmail.com        OK          Ready      100%         15
-somporn          sompornjitdee80@gmail.com      EXHAUSTED   567484s    0%           0
-xiuxiubtc        xiuxiubtc@gmail.com            OK          Ready      98%          4
-================================================================================================
+============================================================================================================
+Profile Name     Google Account Email           Status      In-Flight   Cooldown   Est. Quota   Success
+============================================================================================================
+astramoney       astra.moneylicense@gmail.com   OK          0/1         Ready      100%         9
+astrasupergamer  astrasupergamer@gmail.com      OK          0/1         Ready      100%         0
+astrathezero     astrathezero@gmail.com         OK          0/1         Ready      86%          28
+attasitgits      attasitgits@gmail.com          OK          0/1         Ready      100%         12
+mrsermshop       mrsermshop@gmail.com           EXHAUSTED   0/1         246819s    0%           4
+panthornchuan    panthornchuan@gmail.com        OK          0/1         Ready      100%         15
+somporn          sompornjitdee80@gmail.com      EXHAUSTED   0/1         567484s    0%           0
+xiuxiubtc        xiuxiubtc@gmail.com            OK          0/1         Ready      98%          4
+============================================================================================================
 ```
 
 ---
@@ -507,6 +511,7 @@ Start the server using `python3 antigravity_bridge.py [OPTIONS]`:
 | **`--enable-cors`**, **`--cors`** | `flag` | `False` | Enable wildcard CORS headers (`*`) |
 | **`--no-proxy`**, **`--direct`** | `flag` | `False` | Disable outbound proxy detection and connect directly |
 | **`--hide-profile-status`** | `flag` | `False` | Hide profile and quota status footer from chat completions |
+| **`--profile-concurrency`** | `int` | `1` | Max concurrent in-flight requests per profile (e.g. `2` for higher throughput) |
 | **`--auto-refresh-min`** | `float`| `55.0` | Interval in minutes for background OAuth token refresh |
 | **`--no-auto-refresh`** | `flag` | `False` | Disable background OAuth token refresh daemon |
 | **`--image-router-url`** | `str` | *9router* | Custom image router URL |
@@ -516,6 +521,7 @@ Start the server using `python3 antigravity_bridge.py [OPTIONS]`:
 
 | Variable | Description |
 | :--- | :--- |
+| **`ANTIGRAVITY_PROFILE_CONCURRENCY`** | Max concurrent in-flight requests per profile (default: `1`). |
 | **`ANTIGRAVITY_PROFILES`** | Comma-separated profile names to rotate through. |
 | **`ANTIGRAVITY_PROFILE`** | Active default profile name. |
 | **`ANTIGRAVITY_BRIDGE_API_KEY`** | Default API key to protect bridge endpoints. |

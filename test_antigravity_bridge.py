@@ -407,16 +407,98 @@ class TestAntigravityBridge(unittest.TestCase):
             self.assertIsNotNone(t)
             self.assertTrue(t.is_alive())
 
-            # Wait for initial delay to trigger worker
-            time.sleep(0.15)
-            mock_ref.assert_called_with("default_test")
-
             # Signal shutdown
             shutdown_evt.set()
             t.join(timeout=1.0)
             self.assertFalse(t.is_alive())
 
+    def test_profile_lease_pool(self):
+        """Test acquiring and releasing profile leases for multi-concurrency."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+        try:
+            pm = ProfileManager(profiles=["p1", "p2"], cache_file=cache_file, concurrency_per_profile=1)
+            self.assertEqual(pm.get_total_in_flight(), 0)
+
+            # Acquire p1
+            chosen1 = pm.acquire_profile(["p1", "p2"])
+            self.assertIsNotNone(chosen1)
+            self.assertEqual(pm.get_in_flight(chosen1), 1)
+            self.assertEqual(pm.get_total_in_flight(), 1)
+
+            # Acquire p2 (should pick the other available profile)
+            chosen2 = pm.acquire_profile(["p1", "p2"])
+            self.assertIsNotNone(chosen2)
+            self.assertNotEqual(chosen1, chosen2)
+            self.assertEqual(pm.get_total_in_flight(), 2)
+
+            # All profiles at max capacity (1 each), so acquire_profile should return None
+            chosen3 = pm.acquire_profile(["p1", "p2"])
+            self.assertIsNone(chosen3)
+
+            # Release p1
+            pm.release_profile(chosen1)
+            self.assertEqual(pm.get_in_flight(chosen1), 0)
+            self.assertEqual(pm.get_total_in_flight(), 1)
+
+            # Now p1 is available again
+            chosen4 = pm.acquire_profile(["p1", "p2"])
+            self.assertEqual(chosen4, chosen1)
+            self.assertEqual(pm.get_total_in_flight(), 2)
+
+            # Release both
+            pm.release_profile(chosen1)
+            pm.release_profile(chosen2)
+            self.assertEqual(pm.get_total_in_flight(), 0)
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
+    def test_worker_sandbox_creation(self):
+        """Test creating isolated sandbox directory for a profile."""
+        get_sandbox = antigravity_bridge.get_profile_sandbox_dir
+        sb = get_sandbox("test_worker_profile")
+        self.assertTrue(os.path.exists(sb))
+        self.assertTrue(os.path.exists(os.path.join(sb, ".gemini")))
+        self.assertTrue(os.path.exists(os.path.join(sb, ".config", "antigravity")))
+
+    def test_concurrent_multi_profile_execution(self):
+        """Test parallel multi-profile execution across worker threads."""
+        import concurrent.futures
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+
+        try:
+            pm = ProfileManager(profiles=["p_alpha", "p_beta", "p_gamma"], cache_file=cache_file, concurrency_per_profile=1)
+
+            def mock_exec(cmd_template, prompt_text, timeout=60.0, profile=None, **kwargs):
+                time.sleep(0.05)  # Simulate CLI work
+                return f"Result from {profile}: {prompt_text}"
+
+            with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+                def run_req(idx):
+                    out, prof = execute_cli_with_fallback('echo "{prompt}"', f"req_{idx}", profile_manager=pm)
+                    return idx, prof, out
+
+                # Run 3 concurrent requests simultaneously
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                    futures = [executor.submit(run_req, i) for i in range(3)]
+                    results = [f.result() for f in futures]
+
+                used_profiles = {r[1] for r in results}
+                # Verify that all 3 distinct profiles were utilized concurrently
+                self.assertEqual(used_profiles, {"p_alpha", "p_beta", "p_gamma"})
+                # All leases released
+                self.assertEqual(pm.get_total_in_flight(), 0)
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -619,14 +619,17 @@ class ProfileManager:
         cache_file: str = DEFAULT_QUOTA_CACHE_FILE,
         default_cooldown: float = 300.0,
         max_cooldown: float = 1800.0,
+        concurrency_per_profile: int = 1,
     ):
         self.cache_file = os.path.expanduser(cache_file)
         self.default_cooldown = default_cooldown
         self.max_cooldown = max_cooldown
+        self.concurrency_per_profile = max(1, int(concurrency_per_profile))
         self.lock = threading.Lock()
         self.current_idx = 0
         self._profiles: List[Optional[str]] = profiles if profiles is not None else get_available_profiles()
         self.state: Dict[str, Dict[str, Any]] = {}
+        self.in_flight: Dict[str, int] = {}
         self.load_cache()
 
     def set_profiles(self, profiles: List[Optional[str]]) -> None:
@@ -635,6 +638,8 @@ class ProfileManager:
             self._profiles = list(profiles)
             for p in self._profiles:
                 key = p or "default"
+                if key not in self.in_flight:
+                    self.in_flight[key] = 0
                 if key not in self.state:
                     self.state[key] = {
                         "status": "OK",
@@ -653,6 +658,8 @@ class ProfileManager:
         with self.lock:
             for p in self._profiles:
                 key = p or "default"
+                if key not in self.in_flight:
+                    self.in_flight[key] = 0
                 if key not in self.state:
                     self.state[key] = {
                         "status": "OK",
@@ -921,6 +928,65 @@ class ProfileManager:
             ordered = exhausted_profiles + unauthenticated
             return ordered if ordered else [None]
 
+    def acquire_profile(self, candidates: Optional[List[Optional[str]]] = None) -> Optional[str]:
+        """Atomically select and acquire an idle/available candidate profile with free in-flight lease."""
+        with self.lock:
+            target_list = list(candidates) if candidates is not None else self.get_ordered_profiles()
+            now = time.time()
+            # 1. Prefer ready candidates where in_flight < concurrency_per_profile
+            available = [
+                p for p in target_list
+                if self.in_flight.get(p or "default", 0) < self.concurrency_per_profile
+                and self.state.get(p or "default", {}).get("status") != "DISABLED"
+                and (self.state.get(p or "default", {}).get("exhausted_until", 0) == 0 or now >= self.state.get(p or "default", {}).get("exhausted_until", 0))
+            ]
+            if available:
+                if candidates is not None:
+                    chosen = available[0]
+                else:
+                    chosen = available[self.current_idx % len(available)]
+                    self.current_idx = (self.current_idx + 1) % len(available)
+                key = chosen or "default"
+                self.in_flight[key] = self.in_flight.get(key, 0) + 1
+                return chosen
+
+            # 2. Fallback to recovering/exhausted candidates if free in-flight capacity
+            recovering_available = [
+                p for p in target_list
+                if self.in_flight.get(p or "default", 0) < self.concurrency_per_profile
+                and self.state.get(p or "default", {}).get("status") != "DISABLED"
+            ]
+            if recovering_available:
+                chosen = recovering_available[0]
+                key = chosen or "default"
+                self.in_flight[key] = self.in_flight.get(key, 0) + 1
+                return chosen
+
+            return None
+
+    def acquire_specific_profile(self, profile: Optional[str]) -> None:
+        """Increment in-flight count for a specific profile."""
+        with self.lock:
+            key = profile or "default"
+            self.in_flight[key] = self.in_flight.get(key, 0) + 1
+
+    def release_profile(self, profile: Optional[str]) -> None:
+        """Atomically release an in-flight lease for a profile."""
+        with self.lock:
+            key = profile or "default"
+            if key in self.in_flight:
+                self.in_flight[key] = max(0, self.in_flight[key] - 1)
+
+    def get_in_flight(self, profile: Optional[str]) -> int:
+        """Get current in-flight count for a profile."""
+        with self.lock:
+            return self.in_flight.get(profile or "default", 0)
+
+    def get_total_in_flight(self) -> int:
+        """Get total in-flight requests across all profiles."""
+        with self.lock:
+            return sum(self.in_flight.values())
+
     def get_estimated_quota_percent(self, profile: Optional[str]) -> int:
         """Calculate rough remaining quota % (0-100%) based on Gemini Flash session budget."""
         key = profile or "default"
@@ -942,7 +1008,7 @@ class ProfileManager:
         return pct
 
     def get_status_summary(self) -> Dict[str, Any]:
-        """Return full status summary of all profiles including quota percentage."""
+        """Return full status summary of all profiles including quota percentage and concurrency metrics."""
         now = time.time()
         with self.lock:
             res: Dict[str, Any] = {}
@@ -954,6 +1020,8 @@ class ProfileManager:
                 is_avail = (cooldown_left == 0 and info.get("status") != "DISABLED")
                 info["available"] = is_avail
                 info["cooldown_seconds_remaining"] = cooldown_left
+                info["in_flight"] = self.in_flight.get(key, 0)
+                info["max_concurrency"] = self.concurrency_per_profile
 
                 if info.get("status") == "DISABLED" or cooldown_left > 0:
                     quota_pct = 0
@@ -1553,7 +1621,51 @@ def parse_cmd_template(
         return argv, prompt_text
 
 
-CLI_EXEC_LOCK = threading.Lock()
+MAC_KEYCHAIN_LOCK = threading.Lock()
+
+
+def get_profile_sandbox_dir(profile_name: Optional[str]) -> str:
+    """Create and prepare an isolated sandbox directory for a profile's CLI executions.
+    Guarantees zero lock/file collisions (SQLite, lock files, auth files) during concurrent runs.
+    """
+    key = profile_name or "default"
+    sandbox_base = os.path.expanduser(f"~/.config/antigravity/sandboxes/{key}")
+    gemini_dir = os.path.join(sandbox_base, ".gemini")
+    config_dir = os.path.join(sandbox_base, ".config", "antigravity")
+
+    os.makedirs(gemini_dir, exist_ok=True)
+    os.makedirs(config_dir, exist_ok=True)
+
+    # Source profile directory
+    src_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{key}") if profile_name else os.path.expanduser("~/.gemini")
+    if profile_name and not os.path.exists(src_dir):
+        alt = os.path.expanduser(f"~/.config/antigravity/{key}")
+        if os.path.exists(alt):
+            src_dir = alt
+
+    # Sync auth files into sandbox if modified
+    if os.path.exists(src_dir) and os.path.isdir(src_dir):
+        for fname in ("oauth_creds.json", "google_accounts.json", "state.json", "settings.json", "antigravity-oauth-token"):
+            src_file = os.path.join(src_dir, fname)
+            if os.path.exists(src_file):
+                for dest_d in (gemini_dir, config_dir):
+                    dst_file = os.path.join(dest_d, fname)
+                    try:
+                        if not os.path.exists(dst_file) or os.path.getmtime(src_file) > os.path.getmtime(dst_file):
+                            shutil.copy2(src_file, dst_file)
+                    except Exception:
+                        pass
+
+    # Clean stale lock and cache files from sandbox
+    for lock_name in ("update.lock", "knowledge.lock", "jetski_state.pbtxt", "default-cli-project.json", "default_project_id.txt"):
+        lp = os.path.join(gemini_dir, lock_name)
+        if os.path.exists(lp):
+            try:
+                os.remove(lp)
+            except Exception:
+                pass
+
+    return sandbox_base
 
 
 def detect_local_proxy() -> Optional[str]:
@@ -1606,22 +1718,28 @@ def execute_cli_command(
     profile: Optional[str] = None,
     model_name: Optional[str] = None,
 ) -> str:
-    """Execute local CLI command with prompt substitution or stdin piping for a given profile."""
+    """Execute local CLI command with prompt substitution or stdin piping for a given profile in an isolated sandbox."""
     argv, stdin_input = parse_cmd_template(cmd_template, prompt_text, model_name=model_name)
 
     log_str = " ".join(argv)[:120] if argv else cmd_template[:120]
     logger.info("Executing CLI command (profile=%s): %s", profile or "default", log_str)
 
-    # Filtered environment to avoid leaking ambient secrets to CLI subprocess
+    sandbox_dir = get_profile_sandbox_dir(profile)
+
+    # Filtered environment with isolated HOME and XDG variables
     allowed_env_keys = {
-        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL",
-        "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP",
-        "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_CACHE_HOME",
+        "PATH", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL",
+        "SYSTEMROOT", "TEMP", "TMP",
         "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK",
         "ANTIGRAVITY_PROFILE", "ANTIGRAVITY_PROFILES", "ANTIGRAVITY_HOME",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
     }
     env = {k: v for k, v in os.environ.items() if k in allowed_env_keys or k.startswith("ANTIGRAVITY_")}
+    env["HOME"] = sandbox_dir
+    env["USERPROFILE"] = sandbox_dir
+    env["XDG_CONFIG_HOME"] = os.path.join(sandbox_dir, ".config")
+    env["XDG_DATA_HOME"] = os.path.join(sandbox_dir, ".local", "share")
+    env["XDG_CACHE_HOME"] = os.path.join(sandbox_dir, ".cache")
     if profile:
         env["ANTIGRAVITY_PROFILE"] = profile
 
@@ -1637,57 +1755,57 @@ def execute_cli_command(
         env["no_proxy"] = "127.0.0.1,localhost,::1"
         logger.info("[PROXY] Active Outbound Proxy: %s (Bypassing 127.0.0.1,localhost)", proxy_url)
 
-    with CLI_EXEC_LOCK:
-        if profile:
-            email_preview, token_preview = sync_profile_to_system(profile)
-            profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}")
-            if not os.path.exists(profile_dir):
-                alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile}")
-                if os.path.exists(alt_dir) and os.path.isdir(alt_dir):
-                    profile_dir = alt_dir
+    if profile:
+        email_preview, token_preview = sync_profile_to_system(profile)
+        profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}")
+        if not os.path.exists(profile_dir):
+            alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile}")
+            if os.path.exists(alt_dir) and os.path.isdir(alt_dir):
+                profile_dir = alt_dir
 
-            if os.path.exists(profile_dir) and os.path.isdir(profile_dir):
-                logger.info(
-                    "[PROFILE SWAP] Activated profile '%s' (OS: %s) | Email: %s | Token: %s | Source: %s",
-                    profile,
-                    get_os_type(),
-                    email_preview,
-                    token_preview,
-                    profile_dir,
-                )
-            else:
-                logger.warning("[PROFILE SWAP] Profile directory not found for '%s' (checked %s)", profile, profile_dir)
+        if os.path.exists(profile_dir) and os.path.isdir(profile_dir):
+            logger.info(
+                "[PROFILE SWAP] Activated profile '%s' (OS: %s) | Email: %s | Token: %s | Source: %s",
+                profile,
+                get_os_type(),
+                email_preview,
+                token_preview,
+                profile_dir,
+            )
+        else:
+            logger.warning("[PROFILE SWAP] Profile directory not found for '%s' (checked %s)", profile, profile_dir)
 
-        proc = subprocess.Popen(
-            argv,
-            shell=False,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-        )
-        try:
-            stdout_data, stderr_data = proc.communicate(input=stdin_input, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout_data, stderr_data = proc.communicate()
-            raise RuntimeError(f"CLI Execution Timeout (profile={profile or 'default'})")
+    proc = subprocess.Popen(
+        argv,
+        cwd=sandbox_dir,
+        shell=False,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    try:
+        stdout_data, stderr_data = proc.communicate(input=stdin_input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout_data, stderr_data = proc.communicate()
+        raise RuntimeError(f"CLI Execution Timeout (profile={profile or 'default'})")
 
-        if proc.returncode != 0:
-            err_msg = stderr_data.strip() or stdout_data.strip() or f"Exit code {proc.returncode}"
-            logger.error("CLI execution failed for profile '%s' (code %d): %s", profile or "default", proc.returncode, err_msg)
-            raise RuntimeError(f"CLI Execution Error (profile={profile or 'default'}): {err_msg}")
+    if proc.returncode != 0:
+        err_msg = stderr_data.strip() or stdout_data.strip() or f"Exit code {proc.returncode}"
+        logger.error("CLI execution failed for profile '%s' (code %d): %s", profile or "default", proc.returncode, err_msg)
+        raise RuntimeError(f"CLI Execution Error (profile={profile or 'default'}): {err_msg}")
 
-        output_text = stdout_data.strip() or stderr_data.strip()
-        if not output_text:
-            err_hint = stderr_data.strip() or stdout_data.strip() or "Empty stdout/stderr"
-            logger.error("CLI execution returned empty output for profile '%s': %s", profile or "default", err_hint)
-            raise RuntimeError(f"CLI Execution returned empty output for profile '{profile or 'default'}': {err_hint}")
+    output_text = stdout_data.strip() or stderr_data.strip()
+    if not output_text:
+        err_hint = stderr_data.strip() or stdout_data.strip() or "Empty stdout/stderr"
+        logger.error("CLI execution returned empty output for profile '%s': %s", profile or "default", err_hint)
+        raise RuntimeError(f"CLI Execution returned empty output for profile '{profile or 'default'}': {err_hint}")
 
-        return output_text
+    return output_text
 
 
 def execute_cli_with_fallback(
@@ -1698,26 +1816,38 @@ def execute_cli_with_fallback(
     model_name: Optional[str] = None,
     profile_manager: Optional[ProfileManager] = None,
 ) -> Tuple[str, Optional[str]]:
-    """Execute CLI command trying profiles dynamically until one succeeds."""
+    """Execute CLI command trying profiles dynamically in parallel-safe worker pool until one succeeds."""
     mgr = profile_manager or GLOBAL_PROFILE_MANAGER
     if profiles is not None:
         mgr.set_profiles(profiles)
 
     candidate_profiles = mgr.get_ordered_profiles()
     errors: List[str] = []
-    per_profile_timeout = timeout
+    tried_profiles: set = set()
 
-    for profile in candidate_profiles:
+    for _ in range(len(candidate_profiles)):
+        available_candidates = [p for p in candidate_profiles if p not in tried_profiles]
+        if not available_candidates:
+            break
+
+        profile = mgr.acquire_profile(available_candidates)
+        if profile is None and available_candidates:
+            profile = available_candidates[0]
+            mgr.acquire_specific_profile(profile)
+
+        tried_profiles.add(profile)
         profile_key = profile or "default"
         is_cooldown = mgr.is_in_cooldown(profile)
+        in_flight_count = mgr.get_in_flight(profile)
+
         if is_cooldown:
-            logger.info("Attempting fallback profile in cooldown: %s (model=%s)", profile_key, model_name or "default")
+            logger.info("Attempting fallback profile in cooldown: %s (model=%s, in_flight=%d)", profile_key, model_name or "default", in_flight_count)
         else:
-            logger.info("Attempting CLI execution with profile: %s (model=%s)", profile_key, model_name or "default")
+            logger.info("Attempting CLI execution with profile: %s (model=%s, in_flight=%d)", profile_key, model_name or "default", in_flight_count)
 
         try:
             output = execute_cli_command(
-                cmd_template, prompt_text, timeout=per_profile_timeout, profile=profile, model_name=model_name
+                cmd_template, prompt_text, timeout=timeout, profile=profile, model_name=model_name
             )
             mgr.mark_success(profile)
             return output, profile
@@ -1731,6 +1861,8 @@ def execute_cli_with_fallback(
             else:
                 mgr.mark_error(profile, err_str)
             errors.append(f"Profile '{profile_key}': {exc}")
+        finally:
+            mgr.release_profile(profile)
 
     raise RuntimeError(f"All agy profile execution attempts failed. Details: {'; '.join(errors)}")
 
@@ -2014,10 +2146,16 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
                 active_profiles = pm.get_ordered_profiles()
                 active_p = active_profiles[0] if active_profiles else None
+                total_profiles = len(pm._profiles)
                 self._send_json_response({
                     "status": "ok",
                     "service": "antigravity-bridge",
                     "active_profile": active_p or "default",
+                    "concurrency": {
+                        "active_in_flight": pm.get_total_in_flight(),
+                        "max_pool_capacity": total_profiles * pm.concurrency_per_profile,
+                        "concurrency_per_profile": pm.concurrency_per_profile,
+                    },
                     "profiles": pm.get_status_summary(),
                 })
                 return
@@ -2031,8 +2169,14 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
             if path in ("/v1/profiles", "/profiles"):
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
+                total_profiles = len(pm._profiles)
                 self._send_json_response({
                     "object": "list",
+                    "concurrency": {
+                        "active_in_flight": pm.get_total_in_flight(),
+                        "max_pool_capacity": total_profiles * pm.concurrency_per_profile,
+                        "concurrency_per_profile": pm.concurrency_per_profile,
+                    },
                     "profiles": pm.get_status_summary(),
                 })
                 return
@@ -2757,19 +2901,20 @@ Examples:
         all_profiles = get_available_profiles()
         summary = pm.get_status_summary()
 
-        print("\n" + "=" * 96)
-        print(f"{'Profile Name':<16} {'Google Account Email':<30} {'Status':<11} {'Cooldown':<10} {'Est. Quota':<12} {'Success'}")
-        print("=" * 96)
+        print("\n" + "=" * 108)
+        print(f"{'Profile Name':<16} {'Google Account Email':<30} {'Status':<11} {'In-Flight':<11} {'Cooldown':<10} {'Est. Quota':<12} {'Success'}")
+        print("=" * 108)
         for p in all_profiles:
             name = p or "default"
             email = get_profile_account_email(p)
             info = summary.get(name, {})
             status = info.get("status", "OK")
+            in_flight = f"{info.get('in_flight', 0)}/{info.get('max_concurrency', 1)}"
             cooldown = f"{info.get('cooldown_seconds_remaining', 0)}s" if info.get("cooldown_seconds_remaining", 0) > 0 else "Ready"
             succ = info.get("success_count", 0)
             q_pct = f"{info.get('estimated_quota_percent', 100)}%"
-            print(f"{name:<16} {email:<30} {status:<11} {cooldown:<10} {q_pct:<12} {succ}")
-        print("=" * 96 + "\n")
+            print(f"{name:<16} {email:<30} {status:<11} {in_flight:<11} {cooldown:<10} {q_pct:<12} {succ}")
+        print("=" * 108 + "\n")
         return 0
 
     elif sub in ("set", "use", "config", "order", "rotate"):
@@ -3290,6 +3435,7 @@ def main():
     parser.add_argument("--image-router-key", default=DEFAULT_IMAGE_ROUTER_KEY, help="API Key for image generation router")
     parser.add_argument("--no-proxy", "--direct", action="store_true", help="Disable outbound proxy auto-detection and connect directly to Google")
     parser.add_argument("--hide-profile-status", "--no-profile-status", action="store_true", help="Hide profile & quota status footer from assistant responses")
+    parser.add_argument("--profile-concurrency", type=int, default=int(os.environ.get("ANTIGRAVITY_PROFILE_CONCURRENCY", "1")), help="Max concurrent requests per profile (default: 1)")
     parser.add_argument("--auto-refresh-min", type=float, default=55.0, help="Interval in minutes for automatic background token refresh (default: 55)")
     parser.add_argument("--no-auto-refresh", action="store_true", help="Disable periodic background OAuth token refresh")
 
@@ -3307,6 +3453,7 @@ def main():
         profiles=configured_profiles,
         cache_file=args.quota_cache,
         default_cooldown=args.cooldown_sec,
+        concurrency_per_profile=args.profile_concurrency,
     )
 
     if args.check_profiles_on_start:
@@ -3328,10 +3475,12 @@ def main():
 
     auto_refresh_sec = 0.0 if (args.no_auto_refresh or os.environ.get("ANTIGRAVITY_NO_AUTO_REFRESH", "").lower() in ("1", "true", "yes")) else (args.auto_refresh_min * 60.0)
 
+    max_concurrent_capacity = len(configured_profiles) * max(1, args.profile_concurrency)
     logger.info("Starting Antigravity API Bridge Server...")
     logger.info("Detected CLI Binary: %s", cli_bin)
     logger.info("Command Template:   %s", effective_cmd)
     logger.info("Configured Profiles: %s", configured_profiles)
+    logger.info("Concurrency Pool:    %d total parallel capacity (%d request(s) per profile)", max_concurrent_capacity, args.profile_concurrency)
     logger.info("Quota Cache File:   %s", profile_manager.cache_file)
     logger.info("Profile Status Foot: %s", "ENABLED" if show_profile_status else "DISABLED")
     logger.info("Token Auto-Refresh:  %s", f"ENABLED (every {int(args.auto_refresh_min)} min)" if auto_refresh_sec > 0 else "DISABLED")
