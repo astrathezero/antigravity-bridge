@@ -643,6 +643,141 @@ class TestAntigravityBridge(unittest.TestCase):
             if os.path.exists(cache_file):
                 os.remove(cache_file)
 
+    def test_v2_dashboard_html_and_stats(self):
+        """Test Web UI dashboard rendering and real-time stats endpoint."""
+        server = ThreadedHTTPServer(("127.0.0.1", 0), AntigravityBridgeHandler)
+        server.profiles = ["profile_v2_test"]
+        port = server.server_port
+
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            # 1. Test HTML Dashboard
+            req_html = urllib.request.Request(f"http://127.0.0.1:{port}/dashboard", headers={"Accept": "text/html"})
+            with urllib.request.urlopen(req_html) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.headers.get("Content-Type"), "text/html; charset=utf-8")
+                body = resp.read().decode("utf-8")
+                self.assertIn("Antigravity Bridge v2.0 - Control Panel", body)
+                self.assertIn("backdrop-filter", body)
+
+            # 2. Test Real-time Stats API
+            req_stats = urllib.request.Request(f"http://127.0.0.1:{port}/v1/dashboard/stats")
+            with urllib.request.urlopen(req_stats) as resp:
+                self.assertEqual(resp.status, 200)
+                data = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(data.get("status"), "ok")
+                self.assertIn("metrics", data)
+                self.assertIn("profiles", data)
+                self.assertIn("logs", data)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_v2_model_family_granular_quotas(self):
+        """Test model family categorization and family-specific quota isolation."""
+        from antigravity_bridge import get_model_family
+        self.assertEqual(get_model_family("gemini-3.1-pro"), "pro")
+        self.assertEqual(get_model_family("gemini-3.7-flash"), "flash")
+        self.assertEqual(get_model_family("claude-sonnet-4.6"), "claude")
+        self.assertEqual(get_model_family("gemini-3.1-flash-image"), "image")
+
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+        try:
+            pm = ProfileManager(profiles=["p_pro_exhausted", "p_healthy"], cache_file=cache_file)
+            # Mark pro model family exhausted on p_pro_exhausted
+            pm.mark_exhausted("p_pro_exhausted", "429 Pro Quota Exceeded", cooldown_seconds=300, model_name="gemini-3.1-pro")
+
+            # Check cooldown status per model family
+            self.assertTrue(pm.is_in_cooldown("p_pro_exhausted", model_name="gemini-3.1-pro"))
+            self.assertFalse(pm.is_in_cooldown("p_pro_exhausted", model_name="gemini-3.7-flash"))
+
+            # Ordering for Pro should place p_healthy first
+            ordered_pro = pm.get_ordered_profiles(model_name="gemini-3.1-pro")
+            self.assertEqual(ordered_pro[0], "p_healthy")
+
+            # Ordering for Flash can still use p_pro_exhausted
+            ordered_flash = pm.get_ordered_profiles(model_name="gemini-3.7-flash")
+            self.assertIn("p_pro_exhausted", ordered_flash)
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
+    def test_v2_per_profile_proxy(self):
+        """Test setting and retrieving dedicated outbound proxies per profile."""
+        from antigravity_bridge import get_profile_proxy, set_profile_proxy
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("os.path.expanduser", side_effect=lambda p: p.replace("~/.config/antigravity/profiles", tmp_dir)):
+                self.assertIsNone(get_profile_proxy("profile_proxy_test"))
+                set_profile_proxy("profile_proxy_test", "socks5://127.0.0.1:1080")
+                self.assertEqual(get_profile_proxy("profile_proxy_test"), "socks5://127.0.0.1:1080")
+
+                # Clearing proxy
+                set_profile_proxy("profile_proxy_test", "")
+                self.assertIsNone(get_profile_proxy("profile_proxy_test"))
+
+    def test_v2_json_export_and_import(self):
+        """Test portable JSON profile pool export and restore."""
+        from antigravity_bridge import export_profiles_to_json, import_profiles_from_json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_profiles_dir:
+            # Create a mock profile
+            p_dir = os.path.join(tmp_profiles_dir, "test_exp_p1")
+            os.makedirs(p_dir, exist_ok=True)
+            with open(os.path.join(p_dir, "google_accounts.json"), "w") as f:
+                json.dump({"active": "exp1@gmail.com"}, f)
+            with open(os.path.join(p_dir, "oauth_creds.json"), "w") as f:
+                json.dump({"access_token": "ya29.exp1", "refresh_token": "1//exp1"}, f)
+
+            with patch("antigravity_bridge.get_available_profiles", return_value=["test_exp_p1"]), \
+                 patch("os.path.expanduser", side_effect=lambda p: p.replace("~/.config/antigravity/profiles", tmp_profiles_dir)):
+                exported = export_profiles_to_json(include_tokens=True)
+                self.assertEqual(exported.get("version"), "2.0")
+                self.assertIn("test_exp_p1", exported.get("profiles", {}))
+                self.assertEqual(exported["profiles"]["test_exp_p1"].get("email"), "exp1@gmail.com")
+
+            # Restore into clean directory
+            with tempfile.TemporaryDirectory() as restore_dir:
+                with patch("os.path.expanduser", side_effect=lambda p: p.replace("~/.config/antigravity/profiles", restore_dir)):
+                    count, imported_list = import_profiles_from_json(exported, overwrite=True)
+                    self.assertEqual(count, 1)
+                    self.assertEqual(imported_list, ["test_exp_p1"])
+                    self.assertTrue(os.path.exists(os.path.join(restore_dir, "test_exp_p1", "google_accounts.json")))
+
+    def test_v2_client_config_generator(self):
+        """Test client configuration snippet generator for Cursor, Cline, LibreChat, Open WebUI, Python, cURL."""
+        from antigravity_bridge import generate_client_config
+
+        for c_type in ["cursor", "cline", "librechat", "openwebui", "python", "curl"]:
+            cfg = generate_client_config(c_type, host="127.0.0.1", port=8000, api_key="sk-test-123")
+            self.assertEqual(cfg.get("client_key"), c_type)
+            self.assertIn("snippet", cfg)
+            self.assertIn("127.0.0.1:8000", cfg["snippet"])
+
+    def test_v2_live_request_telemetry(self):
+        """Test in-memory telemetry recording and stats tracking."""
+        from antigravity_bridge import record_live_request, DASHBOARD_METRICS, LIVE_REQUEST_LOGS
+
+        initial_total = DASHBOARD_METRICS["total_requests"]
+        record_live_request(
+            endpoint="/v1/chat/completions",
+            model="gemini-3.7-flash",
+            profile_used="profile_telemetry_test",
+            status_code=200,
+            elapsed_sec=0.45,
+            prompt_tokens=100,
+            completion_tokens=50,
+        )
+        self.assertEqual(DASHBOARD_METRICS["total_requests"], initial_total + 1)
+        self.assertEqual(LIVE_REQUEST_LOGS[0]["profile"], "profile_telemetry_test")
+        self.assertEqual(LIVE_REQUEST_LOGS[0]["status_code"], 200)
+
 
 if __name__ == "__main__":
     unittest.main()

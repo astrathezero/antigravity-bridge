@@ -92,8 +92,21 @@ Antigravity Bridge acts as a unified HTTP gateway between your applications (Her
 
 ---
 
-## ✨ Key Features
+## ✨ Key Features (Version 2.0)
 
+- 🌐 **Modern Glassmorphism Web Dashboard**:
+  - Full-featured browser control panel served directly from the bridge server at `http://127.0.0.1:8000/dashboard` or `http://127.0.0.1:8000/`.
+  - Live SSE request stream, real-time in-flight concurrency gauges, quota health bars, search filters, and one-click actions (Probe, Reset, Disable, Configure Proxy).
+- 📥 **1-Click Antigravity IDE Auto-Import**:
+  - Auto-scans Antigravity IDE local SQLite state database (`state.vscdb`), OS Keyring, and `~/.gemini/` sessions to import existing credentials with zero manual login required (`python3 antigravity_bridge.py profile import-ide`).
+- 🎯 **Multi-Model Granular Quota Isolation**:
+  - Independent cooldown tracking by model family (`pro`, `flash`, `claude`, `image`). If a profile hits rate limits on `gemini-3.1-pro`, it remains 100% active and healthy for `gemini-3.7-flash` requests!
+- 🌐 **Dedicated Per-Profile Outbound Proxies**:
+  - Configure isolated HTTP/SOCKS5 proxies per profile (`profile proxy <name> <url>`) to prevent IP-based rate limiting across accounts.
+- 📦 **JSON Profile Pool Backup & Restore**:
+  - Portable JSON pool export/import with OAuth tokens and proxy configurations (`profile export` / `profile import`).
+- 🛠️ **One-Click Client Setup Hub**:
+  - Generates ready-to-paste configurations for **Cursor**, **Cline / Roo Code**, **LibreChat**, **Open WebUI**, **Python OpenAI SDK**, and **cURL** (`python3 antigravity_bridge.py config cursor`).
 - ⚡ **Multi-Concurrent Profile Pool**:
   - **Isolated Sandboxes**: Each profile runs in its own isolated runtime directory (`~/.config/antigravity/sandboxes/<profile>/`), completely eliminating SQLite database locks (`conversation_summaries.db`) and auth file collisions.
   - **Parallel Capacity**: Configurable concurrent requests per profile (e.g. 14 profiles × 2 concurrency = **28 parallel requests**).
@@ -106,9 +119,7 @@ Antigravity Bridge acts as a unified HTTP gateway between your applications (Her
   - Automatically parses cooldown reset durations (e.g. `Resets in 74h 7m 25s`) and falls back immediately to the next healthy profile without failing the user request.
 - 🛡️ **Adaptive Context Compaction**: Automatically sanitizes prompts and compacts oversized conversation histories from heavy analytical agents to prevent buffer overflows and CLI crashes.
 - 🔄 **Automatic OAuth Refresh Daemon**: Background thread refreshes Google access tokens every 55 minutes to prevent session expiration.
-- 🌐 **SOCKS5 / Cloudflare WARP Proxy Auto-Detection**: Auto-detects local WARP proxies (ports `40000`, `10808`, `7890`, etc.) for uninterrupted outbound connectivity.
 - 🎨 **Image Generation Integration**: Generates images via Google Imagen 3 (`imagen-3.0-generate-002`) and Gemini Image routers (`/v1/images/generations`).
-- 🩺 **Diagnostic Doctor (`doctor` / `diag`)**: Built-in diagnostic tool to test OAuth token validity, public IP routing, and clean stale lock files.
 - 🚀 **Zero External Dependencies**: Standard Python 3 standard library only (`http.server`, `urllib`, `sqlite3`, `subprocess`). No `pip install` required!
 
 ---
@@ -208,7 +219,13 @@ The CLI provides built-in subcommands to manage multiple Google profiles:
 
 | Command | Shortcut | Description |
 | :--- | :--- | :--- |
-| `python3 antigravity_bridge.py profile list` | `profiles` | Display table of profiles, Google emails, in-flight leases, cooldowns, and quota |
+| `python3 antigravity_bridge.py ui [port]` | `ui` | Open Web Control Panel dashboard in default browser |
+| `python3 antigravity_bridge.py profile list` | `profiles` | Display table of profiles, Google emails, in-flight leases, cooldowns, and proxy |
+| `python3 antigravity_bridge.py profile import-ide [name]` | `import-ide` | Auto-import active logged-in account from Antigravity IDE SQLite state |
+| `python3 antigravity_bridge.py profile export [file.json]`| `export` | Export profile pool and proxy settings to portable JSON backup |
+| `python3 antigravity_bridge.py profile import <file.json>`| `import` | Restore profile pool from a JSON backup |
+| `python3 antigravity_bridge.py profile proxy <name> [url]`| `proxy` | Set or inspect dedicated HTTP/SOCKS5 outbound proxy for a profile |
+| `python3 antigravity_bridge.py config [cursor\|cline\|...]`| `config` | Generate ready-to-paste client integration snippets |
 | `python3 antigravity_bridge.py profile login <name>` | `login <name>` | Interactively authenticate and register a new Google profile |
 | `python3 antigravity_bridge.py profile test [name]` | - | Actively probe quota availability and model responsiveness |
 | `python3 antigravity_bridge.py profile set <p1,p2>` | `profile order` | Dynamically set profile rotation pool and priority order |

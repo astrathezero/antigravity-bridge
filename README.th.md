@@ -92,8 +92,21 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
 
 ---
 
-## ✨ ฟีเจอร์หลัก (Key Features)
+## ✨ ฟีเจอร์หลัก (Key Features - Version 2.0)
 
+- 🌐 **หน้าเว็บควบคุม Glassmorphism Web Dashboard**:
+  - แผงควบคุมระบบบนเว็บเบราว์เซอร์ที่สวยงามและใช้งานง่าย เสิร์ฟตรงจากเซิร์ฟเวอร์ที่ `http://127.0.0.1:8000/dashboard` หรือ `http://127.0.0.1:8000/`
+  - แสดงกระแสคำขอ Real-Time ผ่าน SSE, เกจวัด Concurrency คิวงานแบบสด, แถบสุขภาพโควตา, ช่องค้นหากรองโปรไฟล์ และปุ่มสั่งการคลิกเดียว (Probe, Reset, Disable, ตั้งค่า Proxy)
+- 📥 **นำเข้าโปรไฟล์จาก Antigravity IDE ในคลิกเดียว (1-Click Auto-Import)**:
+  - สแกนฐานข้อมูล SQLite ภายในเครื่อง (`state.vscdb`), OS Keyring และประวัติล็อกอิน `~/.gemini/` เพื่อดึง Token มาสร้างโปรไฟล์ได้ทันทีโดยไม่ต้องล็อกอินผ่านเบราว์เซอร์ใหม่ (`python3 antigravity_bridge.py profile import-ide`)
+- 🎯 **ระบบแยก Cooldown รายตระกูลโมเดล (Multi-Model Granular Quotas)**:
+  - แยกการนับโควตาระหว่างตระกูลโมเดล (`pro`, `flash`, `claude`, `image`) อิสระ หากโปรไฟล์ติด Limit ใน `gemini-3.1-pro` โปรไฟล์นั้นยังสามารถตอบคำขอใน `gemini-3.7-flash` ได้ตามปกติ 100%!
+- 🌐 **กำหนด Outbound Proxy แยกเฉพาะรายโปรไฟล์ (Dedicated Proxy per Profile)**:
+  - กำหนด HTTP หรือ SOCKS5 Proxy ประจำแต่ละโปรไฟล์ (`profile proxy <ชื่อ> <url>`) ป้องกันปัญหาโดนแบนหรือติด Rate Limit ระดับ IP
+- 📦 **สำรองและกู้คืนโปรไฟล์แบบ JSON (Portable Backup & Restore)**:
+  - ส่งออกและนำเข้าโปรไฟล์ทั้งหมดพร้อม Token และการตั้งค่า Proxy เป็นไฟล์ JSON พกพาได้สะดวก (`profile export` / `profile import`)
+- 🛠️ **ศูนย์สร้างการตั้งค่า Client อัตโนมัติ (Client Setup Hub)**:
+  - คัดลอกการตั้งค่าไปวางใน **Cursor**, **Cline / Roo Code**, **LibreChat**, **Open WebUI**, **Python SDK**, และ **cURL** ได้ทันทีในคลิกเดียว (`python3 antigravity_bridge.py config cursor`)
 - ⚡ **Multi-Concurrent Profile Pool & การประมวลผลแบบขนาน**:
   - **Isolated Sandboxes**: รันแต่ละโปรไฟล์ในไดเรกทอรีเฉพาะแยกขาดจากกัน (`~/.config/antigravity/sandboxes/<profile>/`) หมดปัญหา SQLite database lock (`conversation_summaries.db`) และการชนกันของไฟล์ Auth
   - **ความจุขนานสูง**: กำหนดจำนวนคำขอพร้อมกันต่อโปรไฟล์ได้ (เช่น 14 โปรไฟล์ × 2 Concurrency = **รองรับพร้อมกันสูงสุด 28 คำขอ**)
@@ -106,9 +119,7 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
   - อ่านระยะเวลาฟื้นฟูโควตาจากข้อความระบบ (เช่น `Resets in 74h 7m 25s`) เพื่อตั้ง Cooldown แม่นยำ และสลับไปใช้โปรไฟล์ถัดไปทันทีโดยที่ Client ไม่หลุด
 - 🛡️ **Adaptive Context Compaction**: มีระบบบีบอัดประวัติการสนทนาและตัด Markdown อย่างชาญฉลาดเมื่อ Payload มีขนาดยาวเกิน เพื่อป้องกันปัญหา Memory Overflow หรือ CLI ค้าง
 - 🔄 **ระบบรีเฟรช Token อัตโนมัติในเบื้องหลัง**: Background Daemon ทำงานทุก 55 นาทีเพื่อต่ออายุ Google OAuth Access Token ป้องกัน Session หมดอายุ
-- 🌐 **ตรวจจับ SOCKS5 / Cloudflare WARP Proxy อัตโนมัติ**: ตรวจหาพอร์ต Local Proxy (เช่น `40000`, `10808`, `7890`) อัตโนมัติเพื่อเชื่อมต่ออินเทอร์เน็ตได้ราบรื่น
 - 🎨 **สร้างรูปภาพผ่าน Google Imagen 3**: รองรับเอนด์พอยต์ `/v1/images/generations` และแปลงคำสั่งสร้างภาพในแชท
-- 🩺 **ระบบหมอตรวจเช็คระบบ (`doctor` / `diag`)**: ตรวจสอบการเชื่อมต่อ IP, ตรวจสถานะ Token กับ Google UserInfo API และล้างไฟล์ขยะ
 - 🚀 **Zero External Dependencies**: พัฒนาด้วย Python 3 Standard Library ล้วน ไม่ต้องติดตั้งไลบรารีภายนอกด้วย `pip`
 
 ---
@@ -208,7 +219,13 @@ curl http://127.0.0.1:8000/health
 
 | คำสั่ง | คำสั่งลัด | คำอธิบายการทำงาน |
 | :--- | :--- | :--- |
-| `python3 antigravity_bridge.py profile list` | `profiles` | แสดงตารางโปรไฟล์ อีเมล บัญชี สถานะ Cooldown โควตา และจำนวนคิว |
+| `python3 antigravity_bridge.py ui [port]` | `ui` | เปิดหน้าเว็บ Web Control Panel Dashboard ในเบราว์เซอร์ |
+| `python3 antigravity_bridge.py profile list` | `profiles` | แสดงตารางโปรไฟล์ อีเมล บัญชี สถานะ Cooldown โควตา และ Proxy |
+| `python3 antigravity_bridge.py profile import-ide [ชื่อ]` | `import-ide` | ดึงบัญชีที่ล็อกอินอยู่ใน Antigravity IDE เข้ามาเป็นโปรไฟล์อัตโนมัติ |
+| `python3 antigravity_bridge.py profile export [ไฟล์.json]`| `export` | สำรองข้อมูลโปรไฟล์และ Proxy ทั้งหมดออกมาเป็นไฟล์ JSON |
+| `python3 antigravity_bridge.py profile import <ไฟล์.json>`| `import` | กู้คืนโปรไฟล์ทั้งหมดจากไฟล์สำรอง JSON |
+| `python3 antigravity_bridge.py profile proxy <ชื่อ> [url]`| `proxy` | ตั้งค่าหรือตรวจสอบ Proxy ประจำโปรไฟล์ (HTTP/SOCKS5) |
+| `python3 antigravity_bridge.py config [cursor\|cline\|...]`| `config` | สร้างโค้ดและ Snippet การตั้งค่าพร้อมใช้งานสำหรับ Client ต่างๆ |
 | `python3 antigravity_bridge.py profile login <ชื่อ>` | `login <ชื่อ>` | ล็อกอินและเพิ่มโปรไฟล์บัญชี Google ใหม่ |
 | `python3 antigravity_bridge.py profile test [ชื่อ]` | - | ส่งคำขอทดสอบความพร้อมของโควตาและการตอบสนองของโมเดล |
 | `python3 antigravity_bridge.py profile set <p1,p2>` | `profile order` | ปรับเปลี่ยนลำดับการสลับโปรไฟล์แบบ Live ทันที |

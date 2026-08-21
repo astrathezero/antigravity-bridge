@@ -29,17 +29,22 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
+from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 
 def load_dotenv(paths: Optional[List[str]] = None) -> None:
@@ -851,6 +856,22 @@ def parse_quota_reset_seconds(error_message: str) -> Optional[float]:
     return None
 
 
+def get_model_family(model_name: Optional[str]) -> str:
+    """Categorize model into family for granular quota management (flash, pro, claude, image, oss)."""
+    if not model_name:
+        return "flash"
+    m = model_name.lower()
+    if "pro" in m:
+        return "pro"
+    elif any(k in m for k in ("claude", "sonnet", "opus", "haiku")):
+        return "claude"
+    elif any(k in m for k in ("image", "imagen", "banana")):
+        return "image"
+    elif "oss" in m:
+        return "oss"
+    return "flash"
+
+
 def format_cooldown_duration(seconds: float) -> str:
     """Format seconds into human-readable duration (e.g. '74h 7m 25s', '12m 30s', '45s')."""
     if seconds <= 0:
@@ -913,6 +934,7 @@ class ProfileManager:
                         "success_count": 0,
                         "window_requests": 0,
                         "window_start": 0,
+                        "model_cooldowns": {},
                     }
 
     def load_cache(self) -> None:
@@ -933,6 +955,7 @@ class ProfileManager:
                         "success_count": 0,
                         "window_requests": 0,
                         "window_start": 0,
+                        "model_cooldowns": {},
                     }
 
             if os.path.exists(self.cache_file) and os.path.getsize(self.cache_file) > 0:
@@ -953,6 +976,7 @@ class ProfileManager:
                                         "success_count": 0,
                                         "window_requests": 0,
                                         "window_start": 0,
+                                        "model_cooldowns": {},
                                     }
                                 self.state[k].update(v)
                 except Exception as exc:
@@ -971,12 +995,20 @@ class ProfileManager:
         except Exception as exc:
             logger.warning("Failed to save quota cache to %s: %s", self.cache_file, exc)
 
-    def is_in_cooldown(self, profile: Optional[str]) -> bool:
-        """Check if a profile is currently in cooldown."""
+    def is_in_cooldown(self, profile: Optional[str], model_name: Optional[str] = None) -> bool:
+        """Check if a profile is currently in cooldown (globally or for a specific model family)."""
         key = profile or "default"
         info = self.state.get(key, {})
         exhausted_until = info.get("exhausted_until", 0)
-        return time.time() < exhausted_until
+        now = time.time()
+        if now < exhausted_until:
+            return True
+        if model_name:
+            fam = get_model_family(model_name)
+            fam_cooldown = info.get("model_cooldowns", {}).get(fam, 0)
+            if now < fam_cooldown:
+                return True
+        return False
 
     def mark_exhausted(
         self,
@@ -984,6 +1016,7 @@ class ProfileManager:
         reason: str,
         cooldown_seconds: Optional[float] = None,
         duration: Optional[float] = None,
+        model_name: Optional[str] = None,
     ) -> None:
         """Mark a profile as exhausted and enter cooldown with exponential backoff or exact reset time."""
         if cooldown_seconds is None and duration is not None:
@@ -1001,7 +1034,11 @@ class ProfileManager:
                     "last_reason": "",
                     "consecutive_errors": 0,
                     "success_count": 0,
+                    "model_cooldowns": {},
                 }
+            if "model_cooldowns" not in self.state[key]:
+                self.state[key]["model_cooldowns"] = {}
+
             err_count = self.state[key].get("consecutive_errors", 0) + 1
             self.state[key]["consecutive_errors"] = err_count
 
@@ -1015,11 +1052,16 @@ class ProfileManager:
             else:
                 duration = cooldown_seconds
 
-            self.state[key]["status"] = "EXHAUSTED"
-            self.state[key]["exhausted_until"] = int(now + duration)
+            if model_name:
+                fam = get_model_family(model_name)
+                self.state[key]["model_cooldowns"][fam] = int(now + duration)
+            else:
+                self.state[key]["status"] = "EXHAUSTED"
+                self.state[key]["exhausted_until"] = int(now + duration)
+                self.state[key]["window_requests"] = DEFAULT_FLASH_QUOTA_CAPACITY
+
             self.state[key]["last_checked"] = int(now)
             self.state[key]["last_reason"] = reason
-            self.state[key]["window_requests"] = DEFAULT_FLASH_QUOTA_CAPACITY
             self.save_cache()
 
         logger.warning(
@@ -1046,6 +1088,7 @@ class ProfileManager:
                     "success_count": 0,
                     "window_requests": 0,
                     "window_start": 0,
+                    "model_cooldowns": {},
                 }
             err_count = self.state[key].get("consecutive_errors", 0) + 1
             self.state[key]["consecutive_errors"] = err_count
@@ -1074,6 +1117,7 @@ class ProfileManager:
                     "success_count": 0,
                     "window_requests": 0,
                     "window_start": 0,
+                    "model_cooldowns": {},
                 }
             self.state[key]["status"] = "OK"
             self.state[key]["exhausted_until"] = 0
@@ -1106,78 +1150,112 @@ class ProfileManager:
                     "success_count": 0,
                     "window_requests": 0,
                     "window_start": 0,
+                    "model_cooldowns": {},
                 }
             self.state[key]["status"] = "DISABLED"
-            self.state[key]["exhausted_until"] = int(time.time() + 315360000)  # 10 years
             self.state[key]["last_reason"] = reason
             self.save_cache()
-        logger.info("Profile '%s' has been DISABLED manually.", key)
+        logger.info("[PROFILE DISABLED] Profile '%s' disabled.", key)
 
-    def enable(self, profile: Optional[str]) -> None:
-        """Re-enable a disabled profile or reset cooldown."""
-        self.reset_all(profile)
-        logger.info("Profile '%s' has been ENABLED.", profile or "all")
-
-    def reset_all(self, profile: Optional[str] = None) -> None:
-        """Reset cooldown, error states, and session quota window for a given profile or all profiles."""
-        now = time.time()
+    def mark_enabled(self, profile: Optional[str]) -> None:
+        """Re-enable a previously disabled profile and reset its status to OK."""
+        key = profile or "default"
         with self.lock:
-            if profile:
-                key = profile
+            if key not in self.state:
+                self.state[key] = {
+                    "status": "OK",
+                    "exhausted_until": 0,
+                    "last_checked": 0,
+                    "last_used": 0,
+                    "last_reason": "",
+                    "consecutive_errors": 0,
+                    "success_count": 0,
+                    "window_requests": 0,
+                    "window_start": 0,
+                    "model_cooldowns": {},
+                }
+            self.state[key]["status"] = "OK"
+            self.state[key]["exhausted_until"] = 0
+            self.state[key]["consecutive_errors"] = 0
+            self.save_cache()
+        logger.info("[PROFILE ENABLED] Profile '%s' re-enabled.", key)
+
+    def mark_unauthenticated(self, profile: Optional[str], reason: str = "Not logged in") -> None:
+        """Mark a profile as unauthenticated (needs login)."""
+        key = profile or "default"
+        with self.lock:
+            if key not in self.state:
+                self.state[key] = {
+                    "status": "OK",
+                    "exhausted_until": 0,
+                    "last_checked": 0,
+                    "last_used": 0,
+                    "last_reason": "",
+                    "consecutive_errors": 0,
+                    "success_count": 0,
+                    "window_requests": 0,
+                    "window_start": 0,
+                    "model_cooldowns": {},
+                }
+            self.state[key]["status"] = "UNAUTHENTICATED"
+            self.state[key]["last_reason"] = reason
+            self.save_cache()
+
+    def reset_cooldown(self, profile: Optional[str] = None) -> None:
+        """Reset cooldown state for a specific profile or all profiles."""
+        with self.lock:
+            targets = [profile or "default"] if profile else list(self.state.keys())
+            for key in targets:
                 if key in self.state:
                     self.state[key]["status"] = "OK"
                     self.state[key]["exhausted_until"] = 0
                     self.state[key]["consecutive_errors"] = 0
                     self.state[key]["window_requests"] = 0
-                    self.state[key]["window_start"] = int(now)
-            else:
-                for k in self.state:
-                    self.state[k]["status"] = "OK"
-                    self.state[k]["exhausted_until"] = 0
-                    self.state[k]["consecutive_errors"] = 0
-                    self.state[k]["window_requests"] = 0
-                    self.state[k]["window_start"] = int(now)
+                    self.state[key]["model_cooldowns"] = {}
             self.save_cache()
+        logger.info("[COOLDOWN RESET] Reset cooldown for %s", profile or "all profiles")
 
-    def get_ordered_profiles(self) -> List[Optional[str]]:
-        """Return candidate profiles ordered by availability:
-        1. Ready / Healthy profiles (authenticated & not in cooldown), rotated round-robin.
-        2. Recovering profiles (cooldown timestamp expired).
-        3. Exhausted profiles (sorted by earliest cooldown expiration).
-        4. Unauthenticated profiles (last resort).
-        """
-        now = time.time()
+    # Method aliases for backward compatibility and CLI convenience
+    enable = mark_enabled
+    disable = mark_disabled
+    reset_all = reset_cooldown
+
+    def get_ordered_profiles(self, model_name: Optional[str] = None) -> List[Optional[str]]:
+        """Return candidate profiles ordered by: Ready (least recently used) -> Recovering -> Unauthenticated -> Exhausted."""
         with self.lock:
-            profiles = list(self._profiles)
+            now = time.time()
             ready: List[Optional[str]] = []
             recovering: List[Optional[str]] = []
-            exhausted: List[Tuple[float, Optional[str]]] = []
             unauthenticated: List[Optional[str]] = []
+            exhausted: List[Tuple[float, Optional[str]]] = []
 
-            for p in profiles:
+            for p in self._profiles:
                 key = p or "default"
                 info = self.state.get(key, {})
                 status = info.get("status", "OK")
+
                 if status == "DISABLED":
                     continue
 
-                exhausted_until = info.get("exhausted_until", 0)
-                if exhausted_until > 0 and now < exhausted_until:
-                    exhausted.append((exhausted_until, p))
-                    continue
-
-                # Filter unauthenticated profiles so they don't block healthy profiles
-                email = get_profile_account_email(p)
-                if email == "Not Logged In" and p is not None and not info.get("success_count", 0):
+                if status == "UNAUTHENTICATED":
                     unauthenticated.append(p)
                     continue
 
-                if status in ("EXHAUSTED", "RATE_LIMITED", "ERROR_COOLDOWN"):
+                exhausted_until = info.get("exhausted_until", 0)
+                if model_name:
+                    fam = get_model_family(model_name)
+                    fam_cooldown = info.get("model_cooldowns", {}).get(fam, 0)
+                    if fam_cooldown > exhausted_until:
+                        exhausted_until = fam_cooldown
+
+                if now < exhausted_until:
+                    exhausted.append((exhausted_until, p))
+                elif status in ("EXHAUSTED", "ERROR_COOLDOWN"):
                     recovering.append(p)
                 else:
                     ready.append(p)
 
-            # Round-robin among ready profiles
+            # Round-robin rotation for ready profiles
             if ready:
                 idx = self.current_idx % len(ready)
                 ready = ready[idx:] + ready[:idx]
@@ -1187,11 +1265,7 @@ class ProfileManager:
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
 
-            # Complete prioritized fallback chain across ALL configured profiles:
-            # 1. Ready & healthy profiles (rotated round-robin)
-            # 2. Recovering profiles (cooldown expired / temporary error backoff)
-            # 3. Unauthenticated / untested profiles
-            # 4. Exhausted profiles (last resort fallback, earliest reset first)
+            # Complete prioritized fallback chain across ALL configured profiles
             all_ordered = ready + recovering + unauthenticated + exhausted_profiles
             return all_ordered if all_ordered else [None]
 
@@ -2057,7 +2131,8 @@ def execute_cli_command(
     if profile:
         env["ANTIGRAVITY_PROFILE"] = profile
 
-    proxy_url = detect_local_proxy()
+    profile_proxy = get_profile_proxy(profile)
+    proxy_url = profile_proxy or detect_local_proxy()
     if proxy_url:
         env["ALL_PROXY"] = proxy_url
         env["all_proxy"] = proxy_url
@@ -2067,7 +2142,7 @@ def execute_cli_command(
         env["http_proxy"] = proxy_url
         env["NO_PROXY"] = "127.0.0.1,localhost,::1"
         env["no_proxy"] = "127.0.0.1,localhost,::1"
-        logger.info("[PROXY] Active Outbound Proxy: %s (Bypassing 127.0.0.1,localhost)", proxy_url)
+        logger.info("[PROXY] Active Outbound Proxy for '%s': %s (Bypassing 127.0.0.1,localhost)", profile or "default", proxy_url)
 
     if profile:
         email_preview, token_preview = sync_profile_to_system(profile)
@@ -2415,11 +2490,1185 @@ def generate_image_with_agy(
         except Exception as e:
             logger.error("Failed to read found image %s: %s", newest_file, e)
 
-    logger.error("No image file or base64 data found. agy output preview: %s", output_text[:300])
-    raise RuntimeError(f"No image was generated by agy CLI (output: {output_text[:160]})")
+def get_profile_proxy(profile_name: Optional[str]) -> Optional[str]:
+    """Retrieve dedicated proxy URL configured for a specific profile."""
+    if not profile_name or profile_name == "default":
+        return None
+    p_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile_name}")
+    settings_file = os.path.join(p_dir, "settings.json")
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("proxy") or data.get("proxy_url")
+        except Exception:
+            pass
+    return None
 
 
+def set_profile_proxy(profile_name: str, proxy_url: Optional[str]) -> bool:
+    """Save dedicated proxy URL for a specific profile in its settings.json."""
+    if not profile_name:
+        return False
+    p_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile_name}")
+    os.makedirs(p_dir, exist_ok=True)
+    settings_file = os.path.join(p_dir, "settings.json")
+    data: Dict[str, Any] = {}
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    if proxy_url and proxy_url.strip():
+        data["proxy"] = proxy_url.strip()
+    else:
+        data.pop("proxy", None)
+        data.pop("proxy_url", None)
+    try:
+        with open(settings_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception:
+        return False
 
+
+def import_profile_from_ide(profile_name: Optional[str] = None) -> Tuple[bool, str, Dict[str, Any]]:
+    """Scan local Antigravity IDE SQLite state (state.vscdb), OS Keyring, and ~/.gemini to import active IDE account into a named profile."""
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, "Library/Application Support/Antigravity IDE/User/globalStorage/state.vscdb"),
+        os.path.join(home, "Library/Application Support/Antigravity/User/globalStorage/state.vscdb"),
+        os.path.join(home, ".config/Antigravity IDE/User/globalStorage/state.vscdb"),
+        os.path.join(home, ".config/antigravity/User/globalStorage/state.vscdb"),
+        os.path.join(home, "AppData/Roaming/Antigravity IDE/User/globalStorage/state.vscdb"),
+        os.path.join(home, "AppData/Roaming/Antigravity/User/globalStorage/state.vscdb"),
+    ]
+
+    extracted_token: Optional[Dict[str, Any]] = None
+    extracted_email: Optional[str] = None
+
+    # 1. Check active ~/.gemini/ files
+    gemini_oauth = os.path.join(home, ".gemini/oauth_creds.json")
+    gemini_acc = os.path.join(home, ".gemini/google_accounts.json")
+    if os.path.exists(gemini_oauth):
+        try:
+            with open(gemini_oauth, "r", encoding="utf-8") as f:
+                extracted_token = json.load(f)
+        except Exception:
+            pass
+    if os.path.exists(gemini_acc):
+        try:
+            with open(gemini_acc, "r", encoding="utf-8") as f:
+                extracted_email = json.load(f).get("active")
+        except Exception:
+            pass
+
+    # 2. Check OS Keyring / Keychain
+    if not extracted_token:
+        keyring_data = extract_os_keyring_token()
+        if keyring_data:
+            extracted_token = keyring_data
+
+    # 3. Check SQLite DB if not yet found
+    for db_path in candidates:
+        if os.path.exists(db_path):
+            try:
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                if not extracted_email:
+                    try:
+                        cur.execute("SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus' OR key = 'google.antigravity';")
+                        for row in cur.fetchall():
+                            if row and row[0]:
+                                try:
+                                    d = json.loads(row[0])
+                                    extracted_email = d.get("email") or d.get("active")
+                                    if extracted_email:
+                                        break
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                conn.close()
+            except Exception:
+                pass
+
+    if not extracted_token and not extracted_email:
+        file_tok = extract_os_file_token()
+        if file_tok:
+            extracted_token = file_tok
+
+    if not extracted_token and not extracted_email:
+        return False, "No active Antigravity IDE credentials or login sessions detected on system.", {}
+
+    email_clean = (extracted_email or "active").split("@")[0].replace(".", "_").lower()
+    name = profile_name or email_clean or f"ide_imported_{int(time.time())}"
+
+    target_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{name}")
+    os.makedirs(target_dir, exist_ok=True)
+
+    if extracted_token:
+        with open(os.path.join(target_dir, "oauth_creds.json"), "w", encoding="utf-8") as f:
+            json.dump(extracted_token, f, indent=2)
+
+    if extracted_email:
+        with open(os.path.join(target_dir, "google_accounts.json"), "w", encoding="utf-8") as f:
+            json.dump({"active": extracted_email, "accounts": [extracted_email]}, f, indent=2)
+
+    sync_profile_to_system(name)
+    GLOBAL_PROFILE_MANAGER.set_profiles(get_available_profiles())
+    return True, f"Successfully imported IDE account '{extracted_email or name}' into profile '{name}'!", {
+        "name": name,
+        "email": extracted_email or "unknown",
+        "directory": target_dir,
+    }
+
+
+def export_profiles_to_json(include_tokens: bool = True) -> Dict[str, Any]:
+    """Export all local profiles, settings, and metadata into a single portable JSON payload."""
+    profiles_dir = os.path.expanduser("~/.config/antigravity/profiles")
+    result: Dict[str, Any] = {
+        "version": "2.0",
+        "exported_at": int(time.time()),
+        "profiles": {},
+    }
+    if not os.path.exists(profiles_dir):
+        return result
+    for d in sorted(os.listdir(profiles_dir)):
+        p_dir = os.path.join(profiles_dir, d)
+        if not os.path.isdir(p_dir) or d.startswith("."):
+            continue
+        p_data: Dict[str, Any] = {"name": d}
+        for fn in ("google_accounts.json", "settings.json"):
+            fp = os.path.join(p_dir, fn)
+            if os.path.exists(fp):
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        p_data[fn.split(".")[0]] = json.load(f)
+                except Exception:
+                    pass
+        if include_tokens:
+            fp = os.path.join(p_dir, "oauth_creds.json")
+            if os.path.exists(fp):
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        p_data["oauth_creds"] = json.load(f)
+                except Exception:
+                    pass
+        p_data["email"] = (p_data.get("google_accounts") or {}).get("active") or get_profile_account_email(d)
+        p_data["proxy"] = (p_data.get("settings") or {}).get("proxy") or get_profile_proxy(d)
+        result["profiles"][d] = p_data
+    result["total_profiles"] = len(result["profiles"])
+    return result
+
+
+def import_profiles_from_json(data: Dict[str, Any], overwrite: bool = True) -> Tuple[int, List[str]]:
+    """Import profiles from a JSON payload into the local profile pool."""
+    profiles_dir = os.path.expanduser("~/.config/antigravity/profiles")
+    os.makedirs(profiles_dir, exist_ok=True)
+    profiles_dict = data.get("profiles", {})
+    if not isinstance(profiles_dict, dict):
+        return 0, []
+    imported = []
+    for name, p_data in profiles_dict.items():
+        if not isinstance(p_data, dict):
+            continue
+        clean_name = re.sub(r"[^\w\-_]", "_", name)
+        if not clean_name:
+            continue
+        target_dir = os.path.join(profiles_dir, clean_name)
+        if os.path.exists(target_dir) and not overwrite:
+            continue
+        os.makedirs(target_dir, exist_ok=True)
+        if "oauth_creds" in p_data:
+            with open(os.path.join(target_dir, "oauth_creds.json"), "w", encoding="utf-8") as f:
+                json.dump(p_data["oauth_creds"], f, indent=2)
+        if "google_accounts" in p_data:
+            with open(os.path.join(target_dir, "google_accounts.json"), "w", encoding="utf-8") as f:
+                json.dump(p_data["google_accounts"], f, indent=2)
+        if "settings" in p_data:
+            with open(os.path.join(target_dir, "settings.json"), "w", encoding="utf-8") as f:
+                json.dump(p_data["settings"], f, indent=2)
+        sync_profile_to_system(clean_name)
+        imported.append(clean_name)
+    if imported:
+        GLOBAL_PROFILE_MANAGER.set_profiles(get_available_profiles())
+    return len(imported), imported
+
+
+def generate_client_config(client_type: str, host: str = "127.0.0.1", port: int = 8000, api_key: Optional[str] = None) -> Dict[str, Any]:
+    """Generate ready-to-paste configurations and code snippets for various clients."""
+    base_url = f"http://{host}:{port}/v1"
+    key = api_key or "sk-antigravity"
+    client = client_type.lower().strip()
+    models = list(SUPPORTED_MODELS.keys())
+    primary_model = "gemini-3.7-flash"
+
+    if client in ("cursor", "cursorrules"):
+        snippet = f"""{{
+  "modelOverride": "{primary_model}",
+  "openaiApiKey": "{key}",
+  "openaiBaseUrl": "{base_url}"
+}}"""
+        return {
+            "client": "Cursor",
+            "client_key": "cursor",
+            "format": "json",
+            "base_url": base_url,
+            "api_key": key,
+            "model": primary_model,
+            "models": models,
+            "snippet": snippet,
+            "config": {
+                "modelOverride": primary_model,
+                "openaiApiKey": key,
+                "openaiBaseUrl": base_url,
+            },
+            "instructions": f"In Cursor Settings -> Models -> Add custom OpenAI endpoint: {base_url} with API Key: {key}",
+        }
+    elif client in ("cline", "roo", "roocode"):
+        snippet = f"""{{
+  "apiProvider": "openai-native",
+  "openAiBaseUrl": "{base_url}",
+  "openAiApiKey": "{key}",
+  "openAiModelId": "{primary_model}"
+}}"""
+        return {
+            "client": "Cline / Roo Code",
+            "client_key": "cline",
+            "format": "json",
+            "base_url": base_url,
+            "api_key": key,
+            "model": primary_model,
+            "snippet": snippet,
+            "config": {
+                "apiProvider": "openai-native",
+                "openAiBaseUrl": base_url,
+                "openAiApiKey": key,
+                "openAiModelId": primary_model,
+            },
+            "instructions": f"In Cline Settings -> API Provider: OpenAI Compatible -> Base URL: {base_url} -> API Key: {key}",
+        }
+    elif client in ("librechat", "yaml"):
+        return {
+            "client": "LibreChat",
+            "client_key": "librechat",
+            "format": "yaml",
+            "snippet": f"""endpoints:
+  custom:
+    - name: "Antigravity Bridge v2"
+      apiKey: "{key}"
+      baseURL: "{base_url}"
+      models:
+        default: ["gemini-3.7-flash", "gemini-3.1-pro", "claude-sonnet-4.6-thinking", "gemini-3.1-flash-image"]
+        fetch: true
+      titleModel: "gemini-3.7-flash"
+      modelDisplayLabel: "Antigravity"
+""",
+            "instructions": "Paste this snippet into your librechat.yaml under 'endpoints.custom'",
+        }
+    elif client in ("openwebui", "open-webui", "webui"):
+        snippet = f"""Base URL: {base_url}
+API Key:  {key}"""
+        return {
+            "client": "Open WebUI",
+            "client_key": "openwebui",
+            "format": "text",
+            "base_url": base_url,
+            "api_key": key,
+            "snippet": snippet,
+            "instructions": f"In Open WebUI -> Admin Panel -> Settings -> Connections -> Add OpenAI API: URL = '{base_url}', Key = '{key}'",
+        }
+    elif client in ("python", "sdk", "code"):
+        return {
+            "client": "Python OpenAI SDK",
+            "client_key": "python",
+            "format": "python",
+            "snippet": f"""from openai import OpenAI
+
+client = OpenAI(
+    base_url="{base_url}",
+    api_key="{key}",
+)
+
+response = client.chat.completions.create(
+    model="{primary_model}",
+    messages=[
+        {{"role": "user", "content": "Hello! How can Antigravity Bridge help me?"}}
+    ]
+)
+
+print(response.choices[0].message.content)
+""",
+        }
+    else:
+        # Default cURL
+        return {
+            "client": "cURL",
+            "client_key": "curl",
+            "format": "bash",
+            "snippet": f"""curl -X POST "{base_url}/chat/completions" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer {key}" \\
+  -d '{{
+    "model": "{primary_model}",
+    "messages": [{{"role": "user", "content": "Hello!"}}]
+  }}'
+""",
+        }
+
+
+LIVE_REQUEST_LOGS: Deque[Dict[str, Any]] = deque(maxlen=200)
+LIVE_LOGS_LOCK = threading.Lock()
+DASHBOARD_STATS_LOCK = threading.Lock()
+DASHBOARD_METRICS = {
+    "start_time": int(time.time()),
+    "total_requests": 0,
+    "success_requests": 0,
+    "failed_requests": 0,
+    "total_latency_ms": 0.0,
+    "total_prompt_tokens": 0,
+    "total_completion_tokens": 0,
+}
+
+
+def record_live_request(
+    endpoint: str,
+    model: str,
+    profile_used: Optional[str],
+    status_code: int,
+    elapsed_sec: float,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    error_message: Optional[str] = None,
+) -> None:
+    """Record request metadata into in-memory ring buffer for live dashboard monitor."""
+    entry = {
+        "id": f"req_{int(time.time()*1000)}_{uuid.uuid4().hex[:6]}",
+        "timestamp": time.strftime("%H:%M:%S", time.localtime()),
+        "iso_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "endpoint": endpoint,
+        "model": model,
+        "profile": profile_used or "default",
+        "status_code": status_code,
+        "elapsed_sec": round(elapsed_sec, 2),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "error": error_message,
+    }
+    with LIVE_LOGS_LOCK:
+        LIVE_REQUEST_LOGS.appendleft(entry)
+
+    with DASHBOARD_STATS_LOCK:
+        DASHBOARD_METRICS["total_requests"] += 1
+        if status_code < 400:
+            DASHBOARD_METRICS["success_requests"] += 1
+        else:
+            DASHBOARD_METRICS["failed_requests"] += 1
+        DASHBOARD_METRICS["total_latency_ms"] += elapsed_sec * 1000.0
+        DASHBOARD_METRICS["total_prompt_tokens"] += prompt_tokens
+        DASHBOARD_METRICS["total_completion_tokens"] += completion_tokens
+
+
+def get_dashboard_html(service_name: str = "Antigravity Bridge v2.0", host: str = "127.0.0.1", port: int = 8000) -> str:
+    """Generate self-contained modern Glassmorphism HTML/CSS/JS dashboard for Web Control Panel."""
+    return f"""<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{service_name} - Control Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {{
+      --bg: #060913;
+      --bg-panel: rgba(15, 23, 42, 0.7);
+      --bg-card: rgba(30, 41, 59, 0.6);
+      --bg-card-hover: rgba(51, 65, 85, 0.7);
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: rgba(99, 102, 241, 0.5);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --accent: #06b6d4;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #f43f5e;
+      --radius: 16px;
+      --radius-sm: 10px;
+    }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
+        radial-gradient(at 100% 0%, rgba(6, 182, 212, 0.15) 0px, transparent 50%),
+        radial-gradient(at 50% 100%, rgba(244, 63, 94, 0.1) 0px, transparent 50%);
+      background-attachment: fixed;
+      color: var(--text);
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      line-height: 1.5;
+    }}
+    .mono {{ font-family: 'JetBrains Mono', monospace; }}
+    .container {{ max-width: 1380px; margin: 0 auto; padding: 24px 20px; width: 100%; }}
+    
+    /* Header */
+    header {{
+      background: var(--bg-panel);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      padding: 16px 0;
+    }}
+    .header-inner {{ display: flex; justify-content: space-between; align-items: center; }}
+    .logo-group {{ display: flex; align-items: center; gap: 14px; }}
+    .logo-icon {{
+      width: 42px; height: 42px;
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      border-radius: var(--radius-sm);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+    }}
+    .logo-title {{ font-size: 20px; font-weight: 800; letter-spacing: -0.5px; background: linear-gradient(to right, #fff, #94a3b8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
+    .logo-badge {{
+      font-size: 11px; padding: 2px 8px; border-radius: 9999px;
+      background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3);
+      font-weight: 600; text-transform: uppercase;
+    }}
+    .header-actions {{ display: flex; align-items: center; gap: 10px; }}
+
+    /* Buttons */
+    .btn {{
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 16px; border-radius: var(--radius-sm);
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      border: 1px solid var(--border); background: var(--bg-card); color: var(--text);
+    }}
+    .btn:hover {{ background: var(--bg-card-hover); border-color: rgba(255, 255, 255, 0.2); transform: translateY(-1px); }}
+    .btn:active {{ transform: translateY(0); }}
+    .btn-primary {{ background: var(--primary); color: white; border-color: transparent; box-shadow: 0 4px 14px rgba(99, 102, 241, 0.3); }}
+    .btn-primary:hover {{ background: var(--primary-hover); }}
+    .btn-success {{ background: rgba(16, 185, 129, 0.15); color: #34d399; border-color: rgba(16, 185, 129, 0.3); }}
+    .btn-success:hover {{ background: rgba(16, 185, 129, 0.25); }}
+    .btn-danger {{ background: rgba(244, 63, 94, 0.15); color: #fb7185; border-color: rgba(244, 63, 94, 0.3); }}
+    .btn-danger:hover {{ background: rgba(244, 63, 94, 0.25); }}
+    .btn-sm {{ padding: 6px 10px; font-size: 12px; }}
+
+    /* Metrics Grid */
+    .metrics-grid {{
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px; margin: 24px 0;
+    }}
+    .metric-card {{
+      background: var(--bg-panel);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.3s;
+    }}
+    .metric-card:hover {{ border-color: rgba(255,255,255,0.15); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }}
+    .metric-title {{ font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px; margin-bottom: 6px; }}
+    .metric-value {{ font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }}
+    .metric-sub {{ font-size: 12px; color: var(--text-muted); margin-top: 4px; display: flex; align-items: center; gap: 6px; }}
+    .metric-indicator {{ width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
+    .pulse {{ animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }}
+    @keyframes pulse {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: .3; }} }}
+
+    /* Section Cards */
+    .section {{
+      background: var(--bg-panel);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 24px;
+    }}
+    .section-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }}
+    .section-title {{ font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 10px; }}
+
+    /* Search & Filter Toolbar */
+    .toolbar {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
+    .input-search {{
+      background: var(--bg-card); border: 1px solid var(--border);
+      color: var(--text); padding: 8px 14px; border-radius: var(--radius-sm);
+      font-size: 13px; outline: none; min-width: 240px;
+    }}
+    .input-search:focus {{ border-color: var(--primary); }}
+    .filter-chip {{
+      padding: 6px 12px; border-radius: 9999px; font-size: 12px; font-weight: 600;
+      background: var(--bg-card); border: 1px solid var(--border); cursor: pointer; color: var(--text-muted);
+    }}
+    .filter-chip.active {{ background: var(--primary); color: white; border-color: transparent; }}
+
+    /* Profiles Grid */
+    .profiles-grid {{
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+    }}
+    .profile-card {{
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      display: flex; flex-direction: column;
+      gap: 14px;
+      transition: all 0.2s;
+    }}
+    .profile-card:hover {{ background: var(--bg-card-hover); border-color: rgba(255,255,255,0.18); transform: translateY(-2px); }}
+    .profile-card-header {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }}
+    .profile-user {{ display: flex; align-items: center; gap: 12px; }}
+    .profile-avatar {{
+      width: 38px; height: 38px; border-radius: 50%;
+      background: linear-gradient(135deg, #4f46e5, #06b6d4);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 14px; text-transform: uppercase;
+    }}
+    .profile-info {{ display: flex; flex-direction: column; }}
+    .profile-name {{ font-weight: 700; font-size: 15px; }}
+    .profile-email {{ font-size: 12px; color: var(--text-muted); }}
+    
+    .status-badge {{
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 10px; border-radius: 9999px; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.3px;
+    }}
+    .status-ok {{ background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }}
+    .status-exhausted {{ background: rgba(244, 63, 94, 0.15); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.3); }}
+    .status-cooldown {{ background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }}
+    .status-disabled {{ background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }}
+
+    /* Quota Bar */
+    .quota-container {{ display: flex; flex-direction: column; gap: 6px; }}
+    .quota-header {{ display: flex; justify-content: space-between; font-size: 12px; }}
+    .progress-track {{
+      height: 6px; background: rgba(255, 255, 255, 0.08); border-radius: 9999px; overflow: hidden;
+    }}
+    .progress-fill {{
+      height: 100%; border-radius: 9999px; transition: width 0.4s ease;
+      background: linear-gradient(to right, var(--emerald), var(--cyan));
+    }}
+
+    .profile-actions {{ display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.05); }}
+
+    /* Config Hub Tabs */
+    .tab-list {{ display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px; overflow-x: auto; }}
+    .tab-btn {{
+      padding: 8px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600;
+      background: transparent; border: none; color: var(--text-muted); cursor: pointer; transition: all 0.2s;
+    }}
+    .tab-btn.active {{ background: var(--bg-card); color: var(--text); border: 1px solid var(--border); }}
+    .code-box {{
+      background: #040711; border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: 16px; font-size: 13px; color: #e2e8f0; position: relative; overflow-x: auto;
+    }}
+    .copy-overlay {{ position: absolute; top: 12px; right: 12px; }}
+
+    /* Live Logs Table */
+    .table-wrap {{ overflow-x: auto; }}
+    table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }}
+    th {{ padding: 12px 14px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--border); font-size: 12px; text-transform: uppercase; }}
+    td {{ padding: 12px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); vertical-align: middle; }}
+    tr:hover td {{ background: rgba(255, 255, 255, 0.02); }}
+
+    /* Modals */
+    .modal-backdrop {{
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: center; z-index: 100;
+      opacity: 0; pointer-events: none; transition: all 0.2s;
+    }}
+    .modal-backdrop.open {{ opacity: 1; pointer-events: auto; }}
+    .modal {{
+      background: #0f172a; border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 28px; max-width: 500px; width: 90%; transform: scale(0.95); transition: all 0.2s;
+    }}
+    .modal-backdrop.open .modal {{ transform: scale(1); }}
+    .modal-header {{ font-size: 18px; font-weight: 700; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }}
+    .modal-body {{ display: flex; flex-direction: column; gap: 14px; font-size: 14px; }}
+    .form-group {{ display: flex; flex-direction: column; gap: 6px; }}
+    .form-label {{ font-size: 12px; font-weight: 600; color: var(--text-muted); }}
+    .form-input {{
+      background: var(--bg); border: 1px solid var(--border);
+      color: var(--text); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 14px;
+    }}
+    .form-input:focus {{ border-color: var(--primary); outline: none; }}
+    .modal-footer {{ display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }}
+
+    /* Toast */
+    #toast {{
+      position: fixed; bottom: 24px; right: 24px; z-index: 200;
+      padding: 12px 20px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600;
+      background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(12px); border: 1px solid var(--border);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5); transform: translateY(100px); opacity: 0; transition: all 0.3s;
+    }}
+    #toast.show {{ transform: translateY(0); opacity: 1; }}
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="container header-inner">
+      <div class="logo-group">
+        <div class="logo-icon">🌌</div>
+        <div>
+          <span class="logo-title">Antigravity Bridge</span>
+          <span class="logo-badge">v2.0 Hub</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-primary" onclick="openIdeImportModal()">
+          📥 Import IDE
+        </button>
+        <button class="btn" onclick="openBackupModal()">
+          📦 Backup Pool
+        </button>
+        <button class="btn" onclick="fetchDashboardData()">
+          🔄 Refresh
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- Top Metrics Overview -->
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-title">Profiles Pool</div>
+        <div class="metric-value" id="stat-profiles-count">--</div>
+        <div class="metric-sub">
+          <span class="metric-indicator pulse" style="background: var(--emerald);"></span>
+          <span id="stat-profiles-ready">-- Ready & Active</span>
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">In-Flight Concurrency</div>
+        <div class="metric-value mono" id="stat-concurrency">0 / 0</div>
+        <div class="metric-sub">Active leases across pool</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">Pool Capacity</div>
+        <div class="metric-value" style="color: #38bdf8;" id="stat-capacity">--%</div>
+        <div class="metric-sub">Estimated quota availability</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">Total Requests Today</div>
+        <div class="metric-value mono" id="stat-requests">0</div>
+        <div class="metric-sub">
+          <span style="color: var(--emerald);" id="stat-success-rate">100%</span> Success Rate
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">Average Latency</div>
+        <div class="metric-value mono" id="stat-latency">-- ms</div>
+        <div class="metric-sub">agy CLI execution time</div>
+      </div>
+    </div>
+
+    <!-- Profiles Pool Manager -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">
+          <span>👤 Profile Pool & Quota Manager</span>
+          <span class="logo-badge" id="pool-badge">0 Loaded</span>
+        </div>
+        <div class="toolbar">
+          <input type="text" class="input-search" id="profile-search" placeholder="Search profile by name or email..." oninput="renderProfiles()">
+          <button class="filter-chip active" data-filter="all" onclick="setFilter('all', this)">All</button>
+          <button class="filter-chip" data-filter="ready" onclick="setFilter('ready', this)">Ready</button>
+          <button class="filter-chip" data-filter="cooldown" onclick="setFilter('cooldown', this)">In Cooldown</button>
+          <button class="filter-chip" data-filter="disabled" onclick="setFilter('disabled', this)">Disabled</button>
+          <button class="btn btn-sm" onclick="probeAllProfiles()">⚡ Probe All</button>
+          <button class="btn btn-sm" onclick="resetAllCooldowns()">🔄 Reset All</button>
+        </div>
+      </div>
+
+      <div class="profiles-grid" id="profiles-container">
+        <!-- Profiles rendered by JS -->
+      </div>
+    </div>
+
+    <!-- Client Config Generator Hub -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">
+          <span>🛠️ One-Click Client Setup Hub</span>
+        </div>
+        <div style="font-size: 13px; color: var(--text-muted);">
+          Endpoint: <span class="mono" style="color: #38bdf8;">http://{host}:{port}/v1</span>
+        </div>
+      </div>
+
+      <div class="tab-list">
+        <button class="tab-btn active" onclick="switchConfigTab('cursor', this)">Cursor</button>
+        <button class="tab-btn" onclick="switchConfigTab('cline', this)">Cline / Roo Code</button>
+        <button class="tab-btn" onclick="switchConfigTab('librechat', this)">LibreChat</button>
+        <button class="tab-btn" onclick="switchConfigTab('openwebui', this)">Open WebUI</button>
+        <button class="tab-btn" onclick="switchConfigTab('python', this)">Python SDK</button>
+        <button class="tab-btn" onclick="switchConfigTab('curl', this)">cURL</button>
+      </div>
+
+      <div class="code-box">
+        <button class="btn btn-sm copy-overlay" onclick="copyCurrentConfig()">📋 Copy Config</button>
+        <pre><code class="mono" id="config-code-display">// Loading client configuration...</code></pre>
+      </div>
+    </div>
+
+    <!-- Live Traffic Logs -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">
+          <span class="metric-indicator pulse" style="background: var(--emerald);"></span>
+          <span>Live Request Stream</span>
+        </div>
+        <div style="font-size: 12px; color: var(--text-muted);">Real-time SSE event feed</div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Endpoint</th>
+              <th>Model</th>
+              <th>Routed Profile</th>
+              <th>Status</th>
+              <th>Latency</th>
+              <th>Tokens</th>
+            </tr>
+          </thead>
+          <tbody id="logs-table-body">
+            <tr><td colspan="7" style="text-align: center; color: var(--text-muted);">No requests recorded yet. Incoming chat completions will stream here live.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- IDE Auto-Import Modal -->
+  <div class="modal-backdrop" id="modal-ide-import">
+    <div class="modal">
+      <div class="modal-header">
+        <span>📥 Import from Antigravity IDE</span>
+        <button style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer;" onclick="closeModal('modal-ide-import')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="color: var(--text-muted); font-size: 13px;">
+          Automatically scans Antigravity IDE's local SQLite database and extracts the currently active Google account session.
+        </p>
+        <div class="form-group">
+          <label class="form-label">Profile Name (Optional):</label>
+          <input type="text" class="form-input" id="ide-profile-name" placeholder="e.g. main_work or leave blank to auto-detect email">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-ide-import')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitIdeImport()">Scan & Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Proxy Settings Modal -->
+  <div class="modal-backdrop" id="modal-proxy">
+    <div class="modal">
+      <div class="modal-header">
+        <span>🌐 Configure Profile Outbound Proxy</span>
+        <button style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer;" onclick="closeModal('modal-proxy')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="color: var(--text-muted); font-size: 13px;">
+          Route this profile's agy CLI subprocess through a dedicated proxy to bypass IP rate limits.
+        </p>
+        <div class="form-group">
+          <label class="form-label">Profile:</label>
+          <input type="text" class="form-input" id="proxy-profile-target" readonly style="opacity: 0.7;">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Proxy URL (HTTP / SOCKS5):</label>
+          <input type="text" class="form-input" id="proxy-url-input" placeholder="socks5://127.0.0.1:1080 or http://proxy:8080">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-danger btn-sm" onclick="clearProfileProxy()">Clear Proxy</button>
+        <button class="btn" onclick="closeModal('modal-proxy')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveProfileProxy()">Save Proxy</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Backup & Restore Modal -->
+  <div class="modal-backdrop" id="modal-backup">
+    <div class="modal" style="max-width: 600px;">
+      <div class="modal-header">
+        <span>📦 Profile Pool Backup & Restore</span>
+        <button style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer;" onclick="closeModal('modal-backup')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div style="display: flex; gap: 10px;">
+          <button class="btn btn-primary" style="flex: 1;" onclick="downloadBackupJson()">📥 Download Backup JSON</button>
+        </div>
+        <hr style="border: 0; border-top: 1px solid var(--border); margin: 8px 0;">
+        <div class="form-group">
+          <label class="form-label">Restore from JSON Payload:</label>
+          <textarea class="form-input mono" id="backup-import-json" rows="6" placeholder="Paste exported JSON content here..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-backup')">Close</button>
+        <button class="btn btn-success" onclick="submitImportBackup()">Restore Profiles</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast">Copied to clipboard!</div>
+
+  <script>
+    let dashboardState = {{ profiles: {{}}, concurrency: {{}}, metrics: {{}}, logs: [] }};
+    let currentFilter = 'all';
+    let currentConfigTab = 'cursor';
+    let cachedConfigs = {{}};
+
+    async function fetchDashboardData() {{
+      try {{
+        const res = await fetch('/v1/dashboard/stats');
+        if (!res.ok) return;
+        dashboardState = await res.json();
+        renderMetrics();
+        renderProfiles();
+        renderLogs();
+      }} catch (err) {{
+        console.error('Failed to fetch dashboard stats', err);
+      }}
+    }}
+
+    function renderMetrics() {{
+      const profiles = dashboardState.profiles || {{}};
+      const keys = Object.keys(profiles);
+      const total = keys.length;
+      let readyCount = 0;
+      let totalCapacity = 0;
+
+      keys.forEach(k => {{
+        const p = profiles[k];
+        if (p.status === 'OK' && p.cooldown_seconds_remaining === 0) readyCount++;
+        totalCapacity += (p.estimated_quota_percent || 100);
+      }});
+
+      const avgCap = total > 0 ? Math.round(totalCapacity / total) : 0;
+      const metrics = dashboardState.metrics || {{}};
+
+      document.getElementById('stat-profiles-count').textContent = total;
+      document.getElementById('stat-profiles-ready').textContent = `${{readyCount}}/${{total}} Ready & Active`;
+      document.getElementById('pool-badge').textContent = `${{readyCount}}/${{total}} Available`;
+      
+      const inFlight = dashboardState.concurrency?.active_in_flight || 0;
+      const maxCap = dashboardState.concurrency?.max_pool_capacity || total;
+      document.getElementById('stat-concurrency').textContent = `${{inFlight}} / ${{maxCap}}`;
+      document.getElementById('stat-capacity').textContent = `${{avgCap}}%`;
+      
+      document.getElementById('stat-requests').textContent = metrics.total_requests || 0;
+      const successRate = metrics.total_requests > 0 ? Math.round((metrics.success_requests / metrics.total_requests) * 100) : 100;
+      document.getElementById('stat-success-rate').textContent = `${{successRate}}%`;
+
+      const avgLatency = metrics.total_requests > 0 ? Math.round(metrics.total_latency_ms / metrics.total_requests) : 0;
+      document.getElementById('stat-latency').textContent = `${{avgLatency}} ms`;
+    }}
+
+    function renderProfiles() {{
+      const container = document.getElementById('profiles-container');
+      const search = (document.getElementById('profile-search').value || '').toLowerCase();
+      const profiles = dashboardState.profiles || {{}};
+      const keys = Object.keys(profiles);
+
+      if (keys.length === 0) {{
+        container.innerHTML = '<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 40px 0;">No profiles configured. Click "Import IDE" to get started.</div>';
+        return;
+      }}
+
+      let html = '';
+      keys.forEach(k => {{
+        const p = profiles[k];
+        const email = p.email || 'Not Logged In';
+        const name = k;
+        
+        // Search filter
+        if (search && !name.toLowerCase().includes(search) && !email.toLowerCase().includes(search)) {{
+          return;
+        }}
+
+        // Status filter
+        const isCooldown = p.cooldown_seconds_remaining > 0;
+        const isDisabled = p.status === 'DISABLED';
+        if (currentFilter === 'ready' && (isCooldown || isDisabled)) return;
+        if (currentFilter === 'cooldown' && !isCooldown) return;
+        if (currentFilter === 'disabled' && !isDisabled) return;
+
+        let statusClass = 'status-ok';
+        let statusLabel = 'READY';
+        if (isDisabled) {{
+          statusClass = 'status-disabled';
+          statusLabel = 'DISABLED';
+        }} else if (p.status === 'EXHAUSTED' || isCooldown) {{
+          statusClass = 'status-exhausted';
+          statusLabel = p.cooldown_formatted ? `⏳ ${{p.cooldown_formatted}}` : 'EXHAUSTED';
+        }} else if (p.status === 'ERROR_COOLDOWN') {{
+          statusClass = 'status-cooldown';
+          statusLabel = 'COOLDOWN';
+        }}
+
+        const quotaPct = p.estimated_quota_percent !== undefined ? p.estimated_quota_percent : 100;
+        const initials = name.slice(0, 2);
+        const proxyBadge = p.proxy ? `<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(6,182,212,0.2);color:#38bdf8;">🌐 Proxy</span>` : '';
+
+        html += `
+          <div class="profile-card">
+            <div class="profile-card-header">
+              <div class="profile-user">
+                <div class="profile-avatar">${{initials}}</div>
+                <div class="profile-info">
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span class="profile-name">${{name}}</span>
+                    ${{proxyBadge}}
+                  </div>
+                  <span class="profile-email mono">${{email}}</span>
+                </div>
+              </div>
+              <span class="status-badge ${{statusClass}}">${{statusLabel}}</span>
+            </div>
+
+            <div class="quota-container">
+              <div class="quota-header">
+                <span style="color:var(--text-muted);">Est. Quota</span>
+                <span class="mono" style="font-weight:700;">${{quotaPct}}%</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill" style="width: ${{quotaPct}}%;"></div>
+              </div>
+            </div>
+
+            <div class="profile-actions">
+              <button class="btn btn-sm" onclick="probeProfile('${{name}}')">⚡ Probe</button>
+              <button class="btn btn-sm" onclick="resetProfile('${{name}}')">🔄 Reset</button>
+              <button class="btn btn-sm" onclick="toggleProfile('${{name}}', ${{isDisabled}})">${{isDisabled ? '▶️ Enable' : '⏸️ Disable'}}</button>
+              <button class="btn btn-sm" onclick="openProxyModal('${{name}}', '${{p.proxy || ''}}')">🌐 Proxy</button>
+            </div>
+          </div>
+        `;
+      }});
+
+      container.innerHTML = html || '<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 20px 0;">No profiles match the filter.</div>';
+    }}
+
+    function renderLogs() {{
+      const tbody = document.getElementById('logs-table-body');
+      const logs = dashboardState.logs || [];
+      if (logs.length === 0) return;
+
+      let html = '';
+      logs.slice(0, 30).forEach(log => {{
+        const statusColor = log.status_code < 400 ? 'var(--emerald)' : 'var(--danger)';
+        html += `
+          <tr>
+            <td class="mono" style="color:var(--text-muted);">${{log.timestamp}}</td>
+            <td><span class="mono" style="font-weight:600;">${{log.endpoint}}</span></td>
+            <td><span class="mono" style="color:#38bdf8;">${{log.model}}</span></td>
+            <td><span class="mono">${{log.profile}}</span></td>
+            <td><span class="mono" style="color:${{statusColor}}; font-weight:700;">${{log.status_code}}</span></td>
+            <td class="mono">${{log.elapsed_sec}}s</td>
+            <td class="mono" style="color:var(--text-muted);">${{log.total_tokens || 0}}</td>
+          </tr>
+        `;
+      }});
+      tbody.innerHTML = html;
+    }}
+
+    function setFilter(filter, el) {{
+      currentFilter = filter;
+      document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+      el.classList.add('active');
+      renderProfiles();
+    }}
+
+    async function switchConfigTab(tab, el) {{
+      currentConfigTab = tab;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      if (el) el.classList.add('active');
+      
+      const display = document.getElementById('config-code-display');
+      display.textContent = 'Loading config...';
+      
+      try {{
+        const res = await fetch(`/v1/config/clients?type=${{tab}}`);
+        const data = await res.json();
+        cachedConfigs[tab] = data.snippet || JSON.stringify(data.config || data, null, 2);
+        display.textContent = cachedConfigs[tab];
+      }} catch (err) {{
+        display.textContent = '// Failed to load configuration';
+      }}
+    }}
+
+    function copyCurrentConfig() {{
+      const code = document.getElementById('config-code-display').textContent;
+      navigator.clipboard.writeText(code);
+      showToast('Config copied to clipboard!');
+    }}
+
+    function showToast(msg) {{
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 3000);
+    }}
+
+    // Actions
+    async function probeProfile(name) {{
+      showToast(`Probing quota for ${{name}}...`);
+      try {{
+        const res = await fetch('/v1/profiles/test', {{ method: 'POST', body: JSON.stringify({{ profile: name }}) }});
+        const data = await res.json();
+        showToast(data.message || `Probe finished for ${{name}}`);
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast(`Probe failed: ${{err.message}}`);
+      }}
+    }}
+
+    async function resetProfile(name) {{
+      try {{
+        await fetch('/v1/profiles/reset', {{ method: 'POST', body: JSON.stringify({{ profile: name }}) }});
+        showToast(`Cooldown reset for ${{name}}`);
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast('Reset failed');
+      }}
+    }}
+
+    async function toggleProfile(name, currentlyDisabled) {{
+      const endpoint = currentlyDisabled ? '/v1/profiles/enable' : '/v1/profiles/disable';
+      try {{
+        await fetch(endpoint, {{ method: 'POST', body: JSON.stringify({{ profile: name }}) }});
+        showToast(`Profile ${{name}} ${{currentlyDisabled ? 'enabled' : 'disabled'}}`);
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast('Toggle failed');
+      }}
+    }}
+
+    async function probeAllProfiles() {{
+      showToast('Probing all profiles in pool...');
+      try {{
+        await fetch('/v1/profiles/test', {{ method: 'POST', body: JSON.stringify({{}}) }});
+        showToast('All profiles probed successfully');
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast('Probe failed');
+      }}
+    }}
+
+    async function resetAllCooldowns() {{
+      try {{
+        await fetch('/v1/profiles/reset', {{ method: 'POST', body: JSON.stringify({{}}) }});
+        showToast('Reset all cooldowns successfully');
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast('Reset failed');
+      }}
+    }}
+
+    // Modals
+    function openModal(id) {{ document.getElementById(id).classList.add('open'); }}
+    function closeModal(id) {{ document.getElementById(id).classList.remove('open'); }}
+
+    function openIdeImportModal() {{ openModal('modal-ide-import'); }}
+    async function submitIdeImport() {{
+      const name = document.getElementById('ide-profile-name').value.trim();
+      showToast('Scanning IDE credentials...');
+      closeModal('modal-ide-import');
+      try {{
+        const res = await fetch('/v1/profiles/import-ide', {{ method: 'POST', body: JSON.stringify({{ profile: name }}) }});
+        const data = await res.json();
+        showToast(data.message || 'IDE import completed!');
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast(`Import failed: ${{err.message}}`);
+      }}
+    }}
+
+    function openProxyModal(name, currentProxy) {{
+      document.getElementById('proxy-profile-target').value = name;
+      document.getElementById('proxy-url-input').value = currentProxy || '';
+      openModal('modal-proxy');
+    }}
+
+    async function saveProfileProxy() {{
+      const name = document.getElementById('proxy-profile-target').value;
+      const proxy = document.getElementById('proxy-url-input').value.trim();
+      closeModal('modal-proxy');
+      try {{
+        await fetch('/v1/profiles/proxy', {{ method: 'POST', body: JSON.stringify({{ profile: name, proxy: proxy }}) }});
+        showToast(`Proxy saved for ${{name}}`);
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast('Failed to save proxy');
+      }}
+    }}
+
+    async function clearProfileProxy() {{
+      const name = document.getElementById('proxy-profile-target').value;
+      closeModal('modal-proxy');
+      try {{
+        await fetch('/v1/profiles/proxy', {{ method: 'POST', body: JSON.stringify({{ profile: name, proxy: '' }}) }});
+        showToast(`Proxy cleared for ${{name}}`);
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast('Failed to clear proxy');
+      }}
+    }}
+
+    function openBackupModal() {{ openModal('modal-backup'); }}
+    function downloadBackupJson() {{
+      window.open('/v1/profiles/export', '_blank');
+    }}
+
+    async function submitImportBackup() {{
+      const raw = document.getElementById('backup-import-json').value.trim();
+      if (!raw) return showToast('Please paste valid JSON backup content');
+      try {{
+        const payload = JSON.parse(raw);
+        closeModal('modal-backup');
+        showToast('Restoring profiles...');
+        const res = await fetch('/v1/profiles/import', {{ method: 'POST', body: JSON.stringify(payload) }});
+        const data = await res.json();
+        showToast(`Restored ${{data.imported_count || 0}} profiles successfully!`);
+        fetchDashboardData();
+      }} catch (err) {{
+        showToast(`Import error: ${{err.message}}`);
+      }}
+    }}
+
+    // Init & Real-time Polling
+    fetchDashboardData();
+    switchConfigTab('cursor', null);
+    setInterval(fetchDashboardData, 3000);
+  </script>
+</body>
+</html>"""
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -2485,6 +3734,17 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
         return False
 
+    def _send_html_response(self, html_content: str, status_code: int = 200) -> None:
+        body = html_content.encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        if getattr(self.server, "enable_cors", False):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_json_response(self, data: Dict[str, Any], status_code: int = 200, extra_headers: Optional[Dict[str, str]] = None) -> None:
         body = json.dumps(data).encode("utf-8")
         self.send_response(status_code)
@@ -2512,7 +3772,22 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
-            path = self.path.split("?")[0].rstrip("/")
+            full_path = self.path
+            path = full_path.split("?")[0].rstrip("/")
+            query_str = full_path.split("?")[1] if "?" in full_path else ""
+            query_params = dict(urllib.parse.parse_qsl(query_str)) if query_str else {}
+
+            accept_header = self.headers.get("Accept", "").lower()
+            wants_html = "text/html" in accept_header or path in ("/dashboard", "/ui", "/admin")
+
+            # 1. Root / Dashboard Web UI
+            if path in ("", "/dashboard", "/ui", "/admin") and (wants_html or path in ("/dashboard", "/ui", "/admin")):
+                host_val = self.headers.get("Host", "127.0.0.1:8000")
+                h_name = host_val.split(":")[0]
+                h_port = int(host_val.split(":")[1]) if ":" in host_val and host_val.split(":")[1].isdigit() else 8000
+                html = get_dashboard_html(host=h_name, port=h_port)
+                self._send_html_response(html)
+                return
 
             if path in ("", "/health"):
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
@@ -2522,6 +3797,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 self._send_json_response({
                     "status": "ok",
                     "service": "antigravity-bridge",
+                    "version": "2.0",
                     "active_profile": active_p or "default",
                     "concurrency": {
                         "active_in_flight": pm.get_total_in_flight(),
@@ -2530,6 +3806,56 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     },
                     "profiles": pm.get_status_summary(),
                 })
+                return
+
+            # 2. Dashboard Real-time Stats API
+            if path in ("/v1/dashboard/stats", "/dashboard/stats"):
+                pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
+                total_profiles = len(pm._profiles)
+                summary = pm.get_status_summary()
+                for p_name, p_info in summary.items():
+                    p_info["email"] = get_profile_account_email(p_name)
+                    p_info["proxy"] = get_profile_proxy(p_name)
+                    cd = p_info.get("cooldown_seconds_remaining", 0)
+                    p_info["cooldown_formatted"] = format_cooldown_duration(cd) if cd > 0 else ""
+
+                with DASHBOARD_STATS_LOCK:
+                    metrics_copy = dict(DASHBOARD_METRICS)
+                with LIVE_LOGS_LOCK:
+                    logs_copy = list(LIVE_REQUEST_LOGS)[:50]
+
+                self._send_json_response({
+                    "status": "ok",
+                    "service": "antigravity-bridge",
+                    "version": "2.0",
+                    "concurrency": {
+                        "active_in_flight": pm.get_total_in_flight(),
+                        "max_pool_capacity": total_profiles * pm.concurrency_per_profile,
+                        "concurrency_per_profile": pm.concurrency_per_profile,
+                    },
+                    "metrics": metrics_copy,
+                    "profiles": summary,
+                    "logs": logs_copy,
+                })
+                return
+
+            # 3. Client Configs API
+            if path in ("/v1/config/clients", "/v1/config", "/config"):
+                c_type = query_params.get("type", "cursor")
+                host_val = self.headers.get("Host", "127.0.0.1:8000")
+                h_name = host_val.split(":")[0]
+                h_port = int(host_val.split(":")[1]) if ":" in host_val and host_val.split(":")[1].isdigit() else 8000
+                cfg = generate_client_config(c_type, host=h_name, port=h_port, api_key=getattr(self.server, "api_key", None))
+                self._send_json_response(cfg)
+                return
+
+            # 4. Profile Export Backup API
+            if path in ("/v1/profiles/export", "/profiles/export"):
+                if not self._authorized():
+                    self._send_json_response({"error": {"message": "Unauthorized API Key", "type": "invalid_request_error"}}, status_code=401)
+                    return
+                export_data = export_profiles_to_json(include_tokens=True)
+                self._send_json_response(export_data)
                 return
 
             if not self._authorized():
@@ -2583,18 +3909,27 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             )
 
     def do_POST(self) -> None:
+        req_t0 = time.time()
         try:
             path = self.path.split("?")[0].rstrip("/")
             is_anthropic = path in ("/v1/messages", "/messages")
             is_openai = path in ("/v1/chat/completions", "/chat/completions")
             is_image_gen = path in ("/v1/images/generations", "/images/generations")
             is_profiles_reset = path in ("/v1/profiles/reset", "/profiles/reset")
-            is_profiles_check = path in ("/v1/profiles/check", "/profiles/check")
+            is_profiles_check = path in ("/v1/profiles/check", "/profiles/check", "/v1/profiles/test", "/profiles/test")
             is_profiles_config = path in ("/v1/profiles/config", "/profiles/config", "/v1/config", "/config")
             is_profiles_disable = path in ("/v1/profiles/disable", "/profiles/disable")
             is_profiles_enable = path in ("/v1/profiles/enable", "/profiles/enable")
+            is_profiles_import_ide = path in ("/v1/profiles/import-ide", "/profiles/import-ide")
+            is_profiles_import = path in ("/v1/profiles/import", "/profiles/import")
+            is_profiles_proxy = path in ("/v1/profiles/proxy", "/profiles/proxy")
 
-            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check or is_profiles_config or is_profiles_disable or is_profiles_enable):
+            valid_post = (
+                is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check
+                or is_profiles_config or is_profiles_disable or is_profiles_enable or is_profiles_import_ide
+                or is_profiles_import or is_profiles_proxy
+            )
+            if not valid_post:
                 self._send_json_response({"error": "Not Found"}, status_code=404)
                 return
 
@@ -2634,7 +3969,28 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             else:
                 req_json = {}
 
-            # Handle Profile management endpoints
+            # V2 Profile Pool Management Handlers
+            if is_profiles_import_ide:
+                p_name = req_json.get("profile") or req_json.get("name")
+                ok, msg, info = import_profile_from_ide(p_name)
+                self._send_json_response({"success": ok, "message": msg, "data": info}, status_code=200 if ok else 400)
+                return
+
+            if is_profiles_import:
+                count, imported = import_profiles_from_json(req_json, overwrite=True)
+                self._send_json_response({"success": True, "imported_count": count, "imported_profiles": imported, "message": f"Imported {count} profile(s)"})
+                return
+
+            if is_profiles_proxy:
+                p_name = req_json.get("profile")
+                proxy_val = req_json.get("proxy")
+                if not p_name:
+                    self._send_json_response({"error": "Missing 'profile' in request body"}, status_code=400)
+                    return
+                ok = set_profile_proxy(p_name, proxy_val)
+                self._send_json_response({"success": ok, "profile": p_name, "proxy": proxy_val, "message": f"Proxy configured for {p_name}"})
+                return
+
             if is_profiles_config:
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
                 raw_p = req_json.get("profiles")
@@ -2691,7 +4047,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
                 target_p = req_json.get("profile")
                 if target_p:
-                    pm.enable(target_p)
+                    pm.mark_enabled(target_p)
                     self._send_json_response({
                         "status": "ok",
                         "message": f"Profile '{target_p}' is now ENABLED",
@@ -2704,7 +4060,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             if is_profiles_reset:
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
                 target_p = req_json.get("profile")
-                pm.reset_all(target_p)
+                pm.reset_cooldown(target_p)
                 self._send_json_response({
                     "status": "ok",
                     "message": f"Profile(s) reset: {target_p or 'all'}",
@@ -2718,9 +4074,11 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 custom_tpl = getattr(self.server, "custom_cmd", None) or cmd_tpl
                 check_model = req_json.get("model")
                 check_prompt = req_json.get("prompt")
+                target_p = req_json.get("profile")
 
+                probe_targets = [target_p] if target_p else pm._profiles
                 results: Dict[str, Any] = {}
-                for p in pm._profiles:
+                for p in probe_targets:
                     ok, msg, resp_text = probe_profile(p, cmd_template=custom_tpl, model_name=check_model, prompt=check_prompt)
                     if ok:
                         pm.mark_success(p)
@@ -2732,6 +4090,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 self._send_json_response({
                     "status": "ok",
                     "results": results,
+                    "message": f"Probed {len(results)} profile(s)",
                     "profiles": pm.get_status_summary(),
                 })
                 return
@@ -2973,8 +4332,10 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     profile_manager=profile_manager,
                 )
                 logger.info("Successfully executed CLI using profile: %s (model=%s)", used_profile or "default", model)
+                logger.info("Successfully executed CLI using profile: %s (model=%s)", used_profile or "default", model)
             except Exception as exc:
                 logger.error("All agy profile attempts failed: %s", exc)
+                record_live_request(path, model, None, 500, time.time() - req_t0, len(prompt_text) // 4, 0, str(exc)[:100])
                 if stream:
                     if heartbeat:
                         heartbeat.stop()
@@ -3027,6 +4388,16 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 extra_resp_headers["X-Antigravity-Profiles-Ready"] = str(ready_ct)
                 extra_resp_headers["X-Antigravity-Profiles-Total"] = str(len(summary))
                 extra_resp_headers["X-Antigravity-Profile-Quota-Percent"] = str(profile_manager.get_estimated_quota_percent(used_profile))
+
+            record_live_request(
+                endpoint=path,
+                model=model,
+                profile_used=used_profile,
+                status_code=200,
+                elapsed_sec=time.time() - req_t0,
+                prompt_tokens=len(prompt_text) // 4,
+                completion_tokens=len(final_text_content) // 4,
+            )
 
             # --- Handle Anthropic API format (/v1/messages) ---
             if is_anthropic:
@@ -3222,6 +4593,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 {"error": {"message": f"Internal Server Error: {exc}", "type": "api_error"}},
                 status_code=500,
             )
+        except Exception as exc:
+            logger.error("Unhandled Exception in do_POST: %s", exc)
+            self._send_json_response(
+                {"error": {"message": f"Internal Server Error: {exc}", "type": "api_error"}},
+                status_code=500,
+            )
 
 
 def get_profile_account_email(profile: Optional[str]) -> str:
@@ -3248,10 +4625,15 @@ def handle_profile_cli(argv: List[str]) -> int:
     """CLI subcommand handler for managing Antigravity login profiles."""
     if argv and argv[0] in ("-h", "--help", "help"):
         print("""
-Antigravity Bridge - Profile Manager CLI 👤
+Antigravity Bridge v2.0 - Profile Manager & Web Hub CLI 👤
 
 Usage:
+  python3 antigravity_bridge.py ui [port]                     Open Web Control Panel dashboard in browser
   python3 antigravity_bridge.py profile list                  List all profiles, logged-in emails, and quota status
+  python3 antigravity_bridge.py profile import-ide [name]     Auto-import active account from Antigravity IDE
+  python3 antigravity_bridge.py profile export [backup.json]  Export all profiles and settings into a JSON backup
+  python3 antigravity_bridge.py profile import <backup.json>  Restore profile pool from a JSON backup
+  python3 antigravity_bridge.py profile proxy <name> [url]    Configure or view dedicated HTTP/SOCKS5 proxy per profile
   python3 antigravity_bridge.py profile login <name>          Log in or add a new profile interactively with agy
   python3 antigravity_bridge.py profile remove <name>         Delete a profile directory
   python3 antigravity_bridge.py profile test [name]           Actively test/probe profile quota availability
@@ -3261,20 +4643,13 @@ Usage:
   python3 antigravity_bridge.py profile order <p1,p2,...>     Set explicit round-robin rotation order of profiles
   python3 antigravity_bridge.py profile reset [name]          Reset cooldown state for a profile or all profiles
   python3 antigravity_bridge.py profile copy <name> <host>    Copy profile credentials to remote server via SCP
+  python3 antigravity_bridge.py config [cursor|cline|yaml]    Generate copy-paste client configuration snippet
 
 Shortcuts:
+  python3 antigravity_bridge.py ui                            Open Web Dashboard in browser
   python3 antigravity_bridge.py profiles                      Direct shortcut to list all profiles
   python3 antigravity_bridge.py login <name>                  Direct shortcut to login/add a profile
-
-Examples:
-  python3 antigravity_bridge.py profile list
-  python3 antigravity_bridge.py profile order profile_1,profile_2,profile_3
-  python3 antigravity_bridge.py profile set profile_1,profile_2,profile_3
-  python3 antigravity_bridge.py profile disable profile_3
-  python3 antigravity_bridge.py profile enable profile_3
-  python3 antigravity_bridge.py profile login profile_new
-  python3 antigravity_bridge.py profile test --model gemini-3.7-flash
-  python3 antigravity_bridge.py profile copy profile_1 user@remote-vps
+  python3 antigravity_bridge.py config cursor                 Direct shortcut to generate Cursor config
 """)
         return 0
 
@@ -3287,9 +4662,9 @@ Examples:
         all_profiles = get_available_profiles()
         summary = pm.get_status_summary()
 
-        print("\n" + "=" * 108)
-        print(f"{'Profile Name':<16} {'Google Account Email':<30} {'Status':<11} {'In-Flight':<11} {'Cooldown':<10} {'Est. Quota':<12} {'Success'}")
-        print("=" * 108)
+        print("\n" + "=" * 118)
+        print(f"{'Profile Name':<16} {'Google Account Email':<30} {'Status':<11} {'In-Flight':<11} {'Cooldown':<10} {'Est. Quota':<12} {'Proxy'}")
+        print("=" * 118)
         for p in all_profiles:
             name = p or "default"
             email = get_profile_account_email(p)
@@ -3297,10 +4672,76 @@ Examples:
             status = info.get("status", "OK")
             in_flight = f"{info.get('in_flight', 0)}/{info.get('max_concurrency', 1)}"
             cooldown = f"{info.get('cooldown_seconds_remaining', 0)}s" if info.get("cooldown_seconds_remaining", 0) > 0 else "Ready"
-            succ = info.get("success_count", 0)
             q_pct = f"{info.get('estimated_quota_percent', 100)}%"
-            print(f"{name:<16} {email:<30} {status:<11} {in_flight:<11} {cooldown:<10} {q_pct:<12} {succ}")
-        print("=" * 108 + "\n")
+            proxy_str = get_profile_proxy(p) or "Direct"
+            print(f"{name:<16} {email:<30} {status:<11} {in_flight:<11} {cooldown:<10} {q_pct:<12} {proxy_str}")
+        print("=" * 118 + "\n")
+        return 0
+
+    elif sub in ("ui", "dashboard", "web"):
+        port = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 8000
+        url = f"http://127.0.0.1:{port}/"
+        print(f"[INFO] Opening Antigravity Bridge Web Dashboard at {url} ...")
+        webbrowser.open(url)
+        return 0
+
+    elif sub in ("import-ide", "import_ide", "ide"):
+        target_name = argv[1].strip() if len(argv) > 1 else None
+        ok, msg, info = import_profile_from_ide(target_name)
+        if ok:
+            print(f"[SUCCESS] {msg}")
+            print(f"          Profile Directory: {info.get('directory')}")
+        else:
+            print(f"[Error] {msg}")
+        return 0 if ok else 1
+
+    elif sub in ("export", "backup", "dump"):
+        out_file = argv[1].strip() if len(argv) > 1 else "antigravity_profiles_backup.json"
+        data = export_profiles_to_json(include_tokens=True)
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"[SUCCESS] Exported {data.get('total_profiles', 0)} profile(s) to '{out_file}'")
+        return 0
+
+    elif sub in ("import", "restore", "load"):
+        if len(argv) < 2:
+            print("[Error] Please specify input JSON file: python3 antigravity_bridge.py profile import <backup.json>")
+            return 1
+        in_file = argv[1].strip()
+        if not os.path.exists(in_file):
+            print(f"[Error] Backup file '{in_file}' not found.")
+            return 1
+        with open(in_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        count, imported = import_profiles_from_json(data, overwrite=True)
+        print(f"[SUCCESS] Restored {count} profile(s): {imported}")
+        return 0
+
+    elif sub in ("proxy",):
+        if len(argv) < 2:
+            print("[Error] Usage: python3 antigravity_bridge.py profile proxy <name> [proxy_url]")
+            return 1
+        name = argv[1].strip()
+        proxy_url = argv[2].strip() if len(argv) > 2 else None
+        if proxy_url:
+            set_profile_proxy(name, proxy_url)
+            print(f"[SUCCESS] Proxy set for profile '{name}': {proxy_url}")
+        else:
+            curr = get_profile_proxy(name)
+            if curr:
+                print(f"Profile '{name}' outbound proxy: {curr}")
+            else:
+                print(f"Profile '{name}' has no custom proxy configured (using system default).")
+        return 0
+
+    elif sub in ("config", "client", "snippet"):
+        c_type = argv[1].strip() if len(argv) > 1 else "cursor"
+        cfg = generate_client_config(c_type)
+        if "snippet" in cfg:
+            print(f"\n# --- {cfg.get('client')} Configuration ---")
+            print(cfg["snippet"])
+        else:
+            print(json.dumps(cfg, indent=2))
         return 0
 
     elif sub in ("set", "use", "config", "order", "rotate"):
@@ -3795,7 +5236,8 @@ def main():
     known_subs = {
         "profile", "profiles", "login", "auth", "diag", "doctor", "debug", "info",
         "test", "check", "probe", "reset", "unblock", "refresh", "reauth", "sync",
-        "list", "ls", "disable", "enable", "remove", "delete", "rm"
+        "list", "ls", "disable", "enable", "remove", "delete", "rm",
+        "ui", "dashboard", "web", "import-ide", "export", "import", "proxy", "config", "client"
     }
     if len(sys.argv) > 1 and sys.argv[1].lower() in known_subs:
         if sys.argv[1].lower() in ("profile", "profiles"):
