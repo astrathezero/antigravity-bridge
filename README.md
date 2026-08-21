@@ -136,6 +136,7 @@ Key settings in `.env`:
 ANTIGRAVITY_HOST=127.0.0.1
 ANTIGRAVITY_PORT=8000
 ANTIGRAVITY_PROFILE_CONCURRENCY=2
+# ANTIGRAVITY_DISABLED_PROFILES=reserve_profile
 # ANTIGRAVITY_BRIDGE_API_KEY=sk-antigravity
 ```
 
@@ -212,8 +213,8 @@ The CLI provides built-in subcommands to manage multiple Google profiles:
 | `python3 antigravity_bridge.py profile login <name>` | `login <name>` | Interactively authenticate and register a new Google profile |
 | `python3 antigravity_bridge.py profile test [name]` | - | Actively probe quota availability and model responsiveness |
 | `python3 antigravity_bridge.py profile set <p1,p2>` | `profile order` | Dynamically set profile rotation pool and priority order |
-| `python3 antigravity_bridge.py profile disable <name>` | - | Temporarily disable a profile from receiving requests |
-| `python3 antigravity_bridge.py profile enable <name>` | - | Re-enable a disabled profile |
+| `python3 antigravity_bridge.py profile disable <name>` | - | Persistently disable a profile from receiving requests (persists across restarts) |
+| `python3 antigravity_bridge.py profile enable <name>` | - | Re-enable a previously disabled profile |
 | `python3 antigravity_bridge.py profile reset [name]` | - | Reset cooldown timers and clear exhausted flags |
 | `python3 antigravity_bridge.py profile refresh [name]` | - | Force OAuth token refresh directly with Google |
 | `python3 antigravity_bridge.py profile sync <user@vps>` | - | Sync all profiles to a remote VPS over compressed SSH |

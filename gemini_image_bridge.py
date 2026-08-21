@@ -24,6 +24,10 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+    Playwright = Any  # type: ignore
+    BrowserContext = Any  # type: ignore
+    Page = Any  # type: ignore
+    PlaywrightTimeoutError = Exception  # type: ignore
 
 
 DEFAULT_PROFILE_DIR = os.path.expanduser("~/.config/gemini-image-bridge/browser_profile")

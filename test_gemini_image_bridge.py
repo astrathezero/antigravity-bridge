@@ -18,6 +18,7 @@ from gemini_image_bridge import (
     GeminiBrowserClient,
     GeminiAuthError,
     GeminiGenerationError,
+    PLAYWRIGHT_AVAILABLE,
 )
 
 
@@ -135,6 +136,7 @@ class TestGeminiImageBridgeServer(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 404)
 
 
+@unittest.skipUnless(PLAYWRIGHT_AVAILABLE, "Playwright is not installed")
 class TestAuthExportImport(unittest.TestCase):
     def test_import_cookie_string_parser(self):
         client = GeminiBrowserClient(profile_dir="/tmp/test_gemini_profile_cookies")

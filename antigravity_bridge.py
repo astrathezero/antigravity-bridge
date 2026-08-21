@@ -39,7 +39,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 def load_dotenv(paths: Optional[List[str]] = None) -> None:
@@ -872,6 +872,66 @@ def format_cooldown_duration(seconds: float) -> str:
     return " ".join(parts)
 
 
+def get_disabled_profiles() -> Set[str]:
+    """Get set of profiles configured to be permanently disabled."""
+    disabled: Set[str] = set()
+    env_val = os.environ.get("ANTIGRAVITY_DISABLED_PROFILES", "").strip()
+    if env_val:
+        disabled.update(p.strip() for p in env_val.split(",") if p.strip())
+
+    cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                raw = cfg.get("disabled_profiles")
+                if raw is None:
+                    raw = cfg.get("disabled")
+                if isinstance(raw, list):
+                    disabled.update(str(p).strip() for p in raw if p)
+                elif isinstance(raw, str):
+                    disabled.update(p.strip() for p in raw.split(",") if p.strip())
+        except Exception:
+            pass
+    return disabled
+
+
+def persist_disabled_profile(profile: str, disabled: bool = True) -> None:
+    """Persist or remove a profile from ~/.config/antigravity/bridge_config.json disabled_profiles list."""
+    if not profile:
+        return
+    cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+    try:
+        data: Dict[str, Any] = {}
+        if os.path.exists(cfg_file):
+            try:
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        dis_list = data.get("disabled_profiles")
+        if dis_list is None:
+            dis_list = data.get("disabled", [])
+        if not isinstance(dis_list, list):
+            dis_list = [str(dis_list)] if dis_list else []
+        dis_set = set(str(p).strip() for p in dis_list if p)
+
+        if disabled:
+            dis_set.add(profile.strip())
+        else:
+            dis_set.discard(profile.strip())
+
+        data["disabled_profiles"] = sorted(list(dis_set))
+        os.makedirs(os.path.dirname(cfg_file), exist_ok=True)
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as exc:
+        logger.warning("Failed to persist disabled profile '%s' to %s: %s", profile, cfg_file, exc)
+
+
 class ProfileManager:
     """Thread-safe manager for tracking profile quota states, cooldowns, and smart routing."""
 
@@ -895,20 +955,22 @@ class ProfileManager:
         self.load_cache()
 
     def set_profiles(self, profiles: List[Optional[str]]) -> None:
-        """Update active profile list while preserving state."""
+        """Update active profile list while preserving state and enforcing disabled state."""
         with self.lock:
             self._profiles = list(profiles)
+            disabled_set = get_disabled_profiles()
             for p in self._profiles:
                 key = p or "default"
                 if key not in self.in_flight:
                     self.in_flight[key] = 0
                 if key not in self.state:
+                    is_dis = key in disabled_set
                     self.state[key] = {
-                        "status": "OK",
-                        "exhausted_until": 0,
+                        "status": "DISABLED" if is_dis else "OK",
+                        "exhausted_until": int(time.time() + 315360000) if is_dis else 0,
                         "last_checked": 0,
                         "last_used": 0,
-                        "last_reason": "",
+                        "last_reason": "Configured as permanently disabled" if is_dis else "",
                         "consecutive_errors": 0,
                         "success_count": 0,
                         "window_requests": 0,
@@ -916,19 +978,21 @@ class ProfileManager:
                     }
 
     def load_cache(self) -> None:
-        """Load cached quota states from disk."""
+        """Load cached quota states from disk and enforce persistent disabled states."""
         with self.lock:
+            disabled_set = get_disabled_profiles()
             for p in self._profiles:
                 key = p or "default"
                 if key not in self.in_flight:
                     self.in_flight[key] = 0
                 if key not in self.state:
+                    is_dis = key in disabled_set
                     self.state[key] = {
-                        "status": "OK",
-                        "exhausted_until": 0,
+                        "status": "DISABLED" if is_dis else "OK",
+                        "exhausted_until": int(time.time() + 315360000) if is_dis else 0,
                         "last_checked": 0,
                         "last_used": 0,
-                        "last_reason": "",
+                        "last_reason": "Configured as permanently disabled" if is_dis else "",
                         "consecutive_errors": 0,
                         "success_count": 0,
                         "window_requests": 0,
@@ -957,6 +1021,17 @@ class ProfileManager:
                                 self.state[k].update(v)
                 except Exception as exc:
                     logger.warning("Failed to load quota cache from %s: %s", self.cache_file, exc)
+
+            # Enforce persistent disabled profiles from config / env
+            for dis_k in disabled_set:
+                if dis_k in self.state:
+                    self.state[dis_k]["status"] = "DISABLED"
+                    self.state[dis_k]["exhausted_until"] = max(
+                        self.state[dis_k].get("exhausted_until", 0),
+                        int(time.time() + 315360000),
+                    )
+                    if not self.state[dis_k].get("last_reason"):
+                        self.state[dis_k]["last_reason"] = "Configured as permanently disabled"
 
     def save_cache(self) -> None:
         """Persist quota states to disk atomically."""
@@ -1091,7 +1166,12 @@ class ProfileManager:
             self.state[key]["last_checked"] = int(now)
             self.save_cache()
 
-    def mark_disabled(self, profile: Optional[str], reason: str = "Manually disabled by user") -> None:
+    def mark_disabled(
+        self,
+        profile: Optional[str],
+        reason: str = "Manually disabled by user",
+        persist: bool = True,
+    ) -> None:
         """Manually disable a profile indefinitely until re-enabled."""
         key = profile or "default"
         with self.lock:
@@ -1111,10 +1191,14 @@ class ProfileManager:
             self.state[key]["exhausted_until"] = int(time.time() + 315360000)  # 10 years
             self.state[key]["last_reason"] = reason
             self.save_cache()
-        logger.info("Profile '%s' has been DISABLED manually.", key)
+        if persist and profile:
+            persist_disabled_profile(profile, disabled=True)
+        logger.info("Profile '%s' has been DISABLED manually (persisted).", key)
 
     def enable(self, profile: Optional[str]) -> None:
         """Re-enable a disabled profile or reset cooldown."""
+        if profile:
+            persist_disabled_profile(profile, disabled=False)
         self.reset_all(profile)
         logger.info("Profile '%s' has been ENABLED.", profile or "all")
 
@@ -1132,6 +1216,9 @@ class ProfileManager:
                     self.state[key]["window_start"] = int(now)
             else:
                 for k in self.state:
+                    # Do NOT reset manually disabled profiles during bulk reset
+                    if self.state[k].get("status") == "DISABLED":
+                        continue
                     self.state[k]["status"] = "OK"
                     self.state[k]["exhausted_until"] = 0
                     self.state[k]["consecutive_errors"] = 0
@@ -1337,8 +1424,9 @@ class ProfileManager:
                 else:
                     ready_list.append(pk)
 
+            enabled_count = max(1, total_count - len(disabled_list))
             ready_count = len(ready_list)
-            pool_pct = int((ready_count / float(total_count)) * 100) if total_count > 0 else 100
+            pool_pct = int((ready_count / float(enabled_count)) * 100) if enabled_count > 0 else 0
 
             lines = [
                 "",
@@ -1347,12 +1435,15 @@ class ProfileManager:
             ]
 
             if total_count > 1:
+                pool_parts = [f"🟢 **{ready_count}/{enabled_count}** Ready (**{pool_pct}%** Capacity)"]
+                if cooldown_list:
+                    pool_parts.append(f"🔴 **{len(cooldown_list)}** in Cooldown")
+                if disabled_list:
+                    pool_parts.append(f"⚪ **{len(disabled_list)}** Disabled")
+                lines.append(f"> 📊 **Quota Pool:** {' • '.join(pool_parts)}")
                 if cooldown_list:
                     cd_items = [f"`{p}` (⏳ {format_cooldown_duration(rem)})" for p, rem in sorted(cooldown_list, key=lambda x: x[1])]
-                    lines.append(f"> 📊 **Quota Pool:** 🟢 **{ready_count}/{total_count}** Ready (**{pool_pct}%** Capacity) • 🔴 **{len(cooldown_list)}** in Cooldown")
                     lines.append(f"> ⏳ **In Cooldown:** {', '.join(cd_items)}")
-                else:
-                    lines.append(f"> 📊 **Quota Pool:** 🟢 **{ready_count}/{total_count}** Profiles Ready (**100%** Capacity)")
             else:
                 status_desc = "🟢 Ready" if key in ready_list else "🔴 In Cooldown"
                 lines.append(f"> 📊 **Quota Status:** {status_desc} (~{quota_pct}%)")
@@ -2651,9 +2742,19 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
                     cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
                     try:
+                        cfg_data: Dict[str, Any] = {}
+                        if os.path.exists(cfg_file):
+                            try:
+                                with open(cfg_file, "r", encoding="utf-8") as f:
+                                    cfg_data = json.load(f)
+                            except Exception:
+                                cfg_data = {}
+                        if not isinstance(cfg_data, dict):
+                            cfg_data = {}
+                        cfg_data["profiles"] = new_profiles
                         os.makedirs(os.path.dirname(cfg_file), exist_ok=True)
                         with open(cfg_file, "w", encoding="utf-8") as f:
-                            json.dump({"profiles": new_profiles}, f, indent=2)
+                            json.dump(cfg_data, f, indent=2)
                     except Exception as exc:
                         logger.warning("Failed to save bridge_config.json: %s", exc)
 
@@ -3283,9 +3384,23 @@ Examples:
     os.makedirs(profiles_dir, exist_ok=True)
 
     if sub in ("list", "ls", "status"):
-        pm = GLOBAL_PROFILE_MANAGER
-        all_profiles = get_available_profiles()
-        summary = pm.get_status_summary()
+        live_data = None
+        port = 8000
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/profiles")
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                if resp.status == 200:
+                    live_data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            live_data = None
+
+        if live_data and isinstance(live_data.get("profiles"), dict):
+            summary = live_data["profiles"]
+            all_profiles = list(summary.keys())
+        else:
+            pm = GLOBAL_PROFILE_MANAGER
+            all_profiles = get_available_profiles()
+            summary = pm.get_status_summary()
 
         print("\n" + "=" * 108)
         print(f"{'Profile Name':<16} {'Google Account Email':<30} {'Status':<11} {'In-Flight':<11} {'Cooldown':<10} {'Est. Quota':<12} {'Success'}")
@@ -3330,9 +3445,19 @@ Examples:
         # 2. Update local bridge_config.json
         cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
         try:
+            cfg_data: Dict[str, Any] = {}
+            if os.path.exists(cfg_file):
+                try:
+                    with open(cfg_file, "r", encoding="utf-8") as f:
+                        cfg_data = json.load(f)
+                except Exception:
+                    cfg_data = {}
+            if not isinstance(cfg_data, dict):
+                cfg_data = {}
+            cfg_data["profiles"] = new_profiles
             os.makedirs(os.path.dirname(cfg_file), exist_ok=True)
             with open(cfg_file, "w", encoding="utf-8") as f:
-                json.dump({"profiles": new_profiles}, f, indent=2)
+                json.dump(cfg_data, f, indent=2)
         except Exception:
             pass
 
@@ -3550,9 +3675,28 @@ Examples:
             print("[Error] Please specify profile name: python3 antigravity_bridge.py profile disable <profile_name>")
             return 1
         name = argv[1].strip()
+        server_updated = False
+        port = 8000
+        try:
+            req_data = json.dumps({"profile": name}).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/profiles/disable",
+                data=req_data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                if resp.status == 200:
+                    server_updated = True
+        except Exception:
+            pass
+
         pm = GLOBAL_PROFILE_MANAGER
         pm.mark_disabled(name)
-        print(f"[SUCCESS] Profile '{name}' is now DISABLED (will be excluded from requests).")
+        if server_updated:
+            print(f"[SUCCESS] Profile '{name}' is now DISABLED on live server and saved persistently to config.")
+        else:
+            print(f"[SUCCESS] Profile '{name}' is now DISABLED (persisted to config, will remain disabled even after service restarts).")
         return 0
 
     elif sub in ("enable", "unpause", "resume"):
@@ -3560,9 +3704,28 @@ Examples:
             print("[Error] Please specify profile name: python3 antigravity_bridge.py profile enable <profile_name>")
             return 1
         name = argv[1].strip()
+        server_updated = False
+        port = 8000
+        try:
+            req_data = json.dumps({"profile": name}).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/profiles/enable",
+                data=req_data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                if resp.status == 200:
+                    server_updated = True
+        except Exception:
+            pass
+
         pm = GLOBAL_PROFILE_MANAGER
         pm.enable(name)
-        print(f"[SUCCESS] Profile '{name}' is now ENABLED (status reset to OK).")
+        if server_updated:
+            print(f"[SUCCESS] Profile '{name}' is now ENABLED on live server and saved persistently to config.")
+        else:
+            print(f"[SUCCESS] Profile '{name}' is now ENABLED (status reset to OK).")
         return 0
 
     elif sub in ("test", "check", "probe"):

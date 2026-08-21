@@ -644,6 +644,48 @@ class TestAntigravityBridge(unittest.TestCase):
                 os.remove(cache_file)
 
 
+    def test_persistent_disabled_profile(self):
+        """Test persistent profile disabling across cache reloads and bulk resets."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as cfg_tf:
+            cfg_file = cfg_tf.name
+
+        real_expanduser = os.path.expanduser
+        try:
+            with patch("os.path.expanduser", side_effect=lambda p: cfg_file if "bridge_config.json" in p else real_expanduser(p)):
+                # 1. Initially enable p1, p2, p3
+                antigravity_bridge.persist_disabled_profile("p2", disabled=True)
+                dis = antigravity_bridge.get_disabled_profiles()
+                self.assertIn("p2", dis)
+
+                # 2. ProfileManager should initialize p2 as DISABLED
+                pm = ProfileManager(profiles=["p1", "p2", "p3"], cache_file=cache_file)
+                self.assertEqual(pm.state["p2"]["status"], "DISABLED")
+                self.assertGreater(pm.state["p2"]["exhausted_until"], time.time() + 100000)
+
+                # 3. Ordered profiles should exclude p2
+                ordered = pm.get_ordered_profiles()
+                self.assertNotIn("p2", ordered)
+                self.assertIn("p1", ordered)
+                self.assertIn("p3", ordered)
+
+                # 4. Bulk reset should not clear DISABLED status of p2
+                pm.reset_all()
+                self.assertEqual(pm.state["p2"]["status"], "DISABLED")
+
+                # 5. Explicitly enable p2
+                pm.enable("p2")
+                self.assertEqual(pm.state["p2"]["status"], "OK")
+                dis_after = antigravity_bridge.get_disabled_profiles()
+                self.assertNotIn("p2", dis_after)
+        finally:
+            for f in (cache_file, cfg_file):
+                if os.path.exists(f):
+                    os.remove(f)
+
+
 if __name__ == "__main__":
     unittest.main()
 

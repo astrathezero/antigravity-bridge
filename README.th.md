@@ -136,6 +136,7 @@ nano .env
 ANTIGRAVITY_HOST=127.0.0.1
 ANTIGRAVITY_PORT=8000
 ANTIGRAVITY_PROFILE_CONCURRENCY=2
+# ANTIGRAVITY_DISABLED_PROFILES=reserve_profile
 # ANTIGRAVITY_BRIDGE_API_KEY=sk-antigravity
 ```
 
@@ -212,8 +213,8 @@ curl http://127.0.0.1:8000/health
 | `python3 antigravity_bridge.py profile login <ชื่อ>` | `login <ชื่อ>` | ล็อกอินและเพิ่มโปรไฟล์บัญชี Google ใหม่ |
 | `python3 antigravity_bridge.py profile test [ชื่อ]` | - | ส่งคำขอทดสอบความพร้อมของโควตาและการตอบสนองของโมเดล |
 | `python3 antigravity_bridge.py profile set <p1,p2>` | `profile order` | ปรับเปลี่ยนลำดับการสลับโปรไฟล์แบบ Live ทันที |
-| `python3 antigravity_bridge.py profile disable <ชื่อ>` | - | ปิดการใช้งานโปรไฟล์ชั่วคราวโดยไม่ต้องลบไฟล์ |
-| `python3 antigravity_bridge.py profile enable <ชื่อ>` | - | เปิดใช้งานโปรไฟล์ที่ปิดไว้กลับคืนมา |
+| `python3 antigravity_bridge.py profile disable <ชื่อ>` | - | ปิดการใช้งานโปรไฟล์แบบถาวร (คงสถานะปิดไว้แม้รีสตาร์ท Service จนกว่าจะเปิดใหม่) |
+| `python3 antigravity_bridge.py profile enable <ชื่อ>` | - | เปิดใช้งานโปรไฟล์ที่เคยปิดไว้กลับคืนมา |
 | `python3 antigravity_bridge.py profile reset [ชื่อ]` | - | รีเซ็ตสถานะ Cooldown และเคลียร์สถานะ Exhausted |
 | `python3 antigravity_bridge.py profile refresh [ชื่อ]` | - | บังคับรีเฟรช OAuth Token กับทาง Google โดยตรง |
 | `python3 antigravity_bridge.py profile sync <user@vps>` | - | คัดลอกโปรไฟล์ทั้งหมดไปยัง VPS ปลายทางผ่าน SSH |
