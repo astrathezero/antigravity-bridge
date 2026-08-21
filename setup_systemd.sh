@@ -34,7 +34,7 @@ After=network.target
 Type=simple
 User=${CURRENT_USER}
 WorkingDirectory=${SCRIPT_DIR}
-ExecStart=${PYTHON_BIN} ${SCRIPT_DIR}/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 1
+ExecStart=${PYTHON_BIN} ${SCRIPT_DIR}/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 2
 Restart=always
 RestartSec=5
 Environment=PATH=${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin

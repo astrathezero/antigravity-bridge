@@ -3806,11 +3806,14 @@ def main():
 
     configured_profiles = [p.strip() for p in args.profiles.split(",") if p.strip()] if args.profiles else get_available_profiles()
 
+    env_concurrency = os.environ.get("ANTIGRAVITY_PROFILE_CONCURRENCY")
+    effective_concurrency = int(env_concurrency) if env_concurrency else args.profile_concurrency
+
     profile_manager = ProfileManager(
         profiles=configured_profiles,
         cache_file=args.quota_cache,
         default_cooldown=args.cooldown_sec,
-        concurrency_per_profile=args.profile_concurrency,
+        concurrency_per_profile=effective_concurrency,
     )
 
     if args.check_profiles_on_start:
@@ -3832,12 +3835,12 @@ def main():
 
     auto_refresh_sec = 0.0 if (args.no_auto_refresh or os.environ.get("ANTIGRAVITY_NO_AUTO_REFRESH", "").lower() in ("1", "true", "yes")) else (args.auto_refresh_min * 60.0)
 
-    max_concurrent_capacity = len(configured_profiles) * max(1, args.profile_concurrency)
+    max_concurrent_capacity = len(configured_profiles) * max(1, effective_concurrency)
     logger.info("Starting Antigravity API Bridge Server...")
     logger.info("Detected CLI Binary: %s", cli_bin)
     logger.info("Command Template:   %s", effective_cmd)
     logger.info("Configured Profiles: %s", configured_profiles)
-    logger.info("Concurrency Pool:    %d total parallel capacity (%d request(s) per profile)", max_concurrent_capacity, args.profile_concurrency)
+    logger.info("Concurrency Pool:    %d total parallel capacity (%d request(s) per profile)", max_concurrent_capacity, effective_concurrency)
     logger.info("Quota Cache File:   %s", profile_manager.cache_file)
     logger.info("Profile Timeout:    %.1fs per profile attempt", args.profile_timeout)
     logger.info("Total Timeout:      %.1fs total fallback budget", args.total_timeout)

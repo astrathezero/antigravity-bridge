@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=attasit
 WorkingDirectory=/home/attasit/antigravity-bridge
-ExecStart=/usr/bin/python3 /home/attasit/antigravity-bridge/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 1 --profile-timeout 45 --total-timeout 120
+ExecStart=/usr/bin/python3 /home/attasit/antigravity-bridge/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 2
 Restart=always
 RestartSec=5
 Environment=PATH=/home/attasit/.local/bin:/usr/local/bin:/usr/bin:/bin
