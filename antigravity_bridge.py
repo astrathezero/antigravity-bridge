@@ -730,9 +730,12 @@ def format_messages_to_prompt(
 
 
 QUOTA_ERROR_PATTERNS = [
+    re.compile(r"individual\s+quota", re.I),
+    re.compile(r"upgrade\s+your\s+subscription", re.I),
+    re.compile(r"resets?\s+in\s+", re.I),
+    re.compile(r"quota\s*(reached|exceeded|exhausted|limit|capacity)", re.I),
     re.compile(r"resource_exhausted", re.I),
     re.compile(r"resourceexhausted", re.I),
-    re.compile(r"quota\s*exceeded", re.I),
     re.compile(r"rate\s*limit", re.I),
     re.compile(r"ratelimit", re.I),
     re.compile(r"too\s*many\s*requests", re.I),
@@ -746,6 +749,9 @@ QUOTA_ERROR_PATTERNS = [
     re.compile(r"overloaded", re.I),
     re.compile(r"\b503\b.*unavailable", re.I),
     re.compile(r"temporarily\s+unavailable", re.I),
+    re.compile(r"usage\s+limit", re.I),
+    re.compile(r"per-minute\s+quota", re.I),
+    re.compile(r"daily\s+quota", re.I),
 ]
 
 
@@ -753,6 +759,13 @@ def is_quota_or_rate_limit_error(error_msg: str) -> bool:
     """Check if an error string matches known quota or rate limit patterns."""
     if not error_msg:
         return False
+    lower = error_msg.lower()
+    if "resets in" in lower or "individual quota" in lower or "upgrade your subscription" in lower:
+        return True
+    if "quota reached" in lower or "quota exceeded" in lower or "quota limit" in lower:
+        return True
+    if "rate limit" in lower or "resource_exhausted" in lower or "resourceexhausted" in lower:
+        return True
     for pat in QUOTA_ERROR_PATTERNS:
         if pat.search(error_msg):
             return True
@@ -799,11 +812,17 @@ def get_available_profiles() -> List[Optional[str]]:
 
 
 def parse_quota_reset_seconds(error_message: str) -> Optional[float]:
-    """Extract exact cooldown duration in seconds from Google error message (e.g. 'Resets in 74h7m25s.')."""
+    """Extract exact cooldown duration in seconds from error message (e.g. 'Resets in 74h7m25s.', 'Resets in 19h 37m', 'Retry after 60s')."""
     if not error_message:
         return None
-    match = re.search(r"Resets in\s+(?:(\d+)d\s*)?(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+(?:\.\d+)?)s)?", error_message, re.IGNORECASE)
-    if match:
+
+    # 1. Standard Google Gemini format: "Resets in 74h7m25s", "Resets in 88h27m35s", "Resets in 1d 2h 3m 4s"
+    match = re.search(
+        r"Resets?\s+in\s+(?:(\d+)\s*(?:d|days?)\s*)?(?:(\d+)\s*(?:h|hours?|hrs?)\s*)?(?:(\d+)\s*(?:m|minutes?|mins?)\s*)?(?:(\d+(?:\.\d+)?)\s*(?:s|seconds?|secs?)?)?",
+        error_message,
+        re.IGNORECASE,
+    )
+    if match and any(match.groups()):
         d_str, h_str, m_str, s_str = match.groups()
         total_sec = 0.0
         if d_str:
@@ -816,6 +835,19 @@ def parse_quota_reset_seconds(error_message: str) -> Optional[float]:
             total_sec += float(s_str)
         if total_sec > 0:
             return total_sec
+
+    # 2. Retry-After / Retry in N seconds
+    retry_match = re.search(r"(?:retry[-_\s]*after|try\s+again\s+in|wait)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(s|sec|seconds|m|min|minutes|h|hours)?", error_message, re.IGNORECASE)
+    if retry_match:
+        val_str, unit_str = retry_match.groups()
+        val = float(val_str)
+        unit = (unit_str or "s").lower()
+        if unit.startswith("h"):
+            return val * 3600
+        elif unit.startswith("m"):
+            return val * 60
+        return val
+
     return None
 
 
@@ -1020,11 +1052,10 @@ class ProfileManager:
             self.state[key]["last_checked"] = int(now)
             self.state[key]["last_reason"] = reason
 
-            # If 2 or more consecutive errors, place into temporary cooldown
-            if err_count >= 2:
-                duration = min(self.default_cooldown, 180.0)
-                self.state[key]["status"] = "ERROR_COOLDOWN"
-                self.state[key]["exhausted_until"] = int(now + duration)
+            # Apply short temporary backoff (30s on 1st error, exponential up to max_cooldown) so healthy profiles get prioritized
+            duration = min(30.0 * (2 ** (err_count - 1)), self.max_cooldown)
+            self.state[key]["status"] = "ERROR_COOLDOWN"
+            self.state[key]["exhausted_until"] = int(now + duration)
             self.save_cache()
 
     def mark_success(self, profile: Optional[str]) -> None:
@@ -1152,18 +1183,17 @@ class ProfileManager:
                 ready = ready[idx:] + ready[:idx]
                 self.current_idx = (idx + 1) % len(ready)
 
-            # Fast Path: If healthy ready/recovering profiles exist, return them exclusively
-            if ready or recovering:
-                return ready + recovering
-
-            # If unauthenticated candidates exist (e.g. unprobed or test mocks), try them before exhausted
-            if unauthenticated:
-                return unauthenticated
-
-            # Last resort fallback: try earliest-recovering exhausted profiles only when all accounts are down
+            # Exhausted profiles sorted by earliest cooldown expiration
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
-            return exhausted_profiles if exhausted_profiles else [None]
+
+            # Complete prioritized fallback chain across ALL configured profiles:
+            # 1. Ready & healthy profiles (rotated round-robin)
+            # 2. Recovering profiles (cooldown expired / temporary error backoff)
+            # 3. Unauthenticated / untested profiles
+            # 4. Exhausted profiles (last resort fallback, earliest reset first)
+            all_ordered = ready + recovering + unauthenticated + exhausted_profiles
+            return all_ordered if all_ordered else [None]
 
     def acquire_profile(self, candidates: Optional[List[Optional[str]]] = None) -> Optional[str]:
         """Atomically select and acquire an idle/available candidate profile with free in-flight lease."""

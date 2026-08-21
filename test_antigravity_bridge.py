@@ -81,8 +81,21 @@ class TestAntigravityBridge(unittest.TestCase):
         self.assertTrue(is_quota_or_rate_limit_error("out of credits"))
         self.assertTrue(is_quota_or_rate_limit_error("model overloaded"))
         self.assertTrue(is_quota_or_rate_limit_error("503 Service Unavailable"))
+        self.assertTrue(is_quota_or_rate_limit_error("Error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 88h27m35s."))
+        self.assertTrue(is_quota_or_rate_limit_error("Please upgrade your subscription to increase your limits."))
+        self.assertTrue(is_quota_or_rate_limit_error("Daily quota reached for model"))
         self.assertFalse(is_quota_or_rate_limit_error("SyntaxError: invalid syntax"))
         self.assertFalse(is_quota_or_rate_limit_error("FileNotFoundError: file not found"))
+
+    def test_parse_quota_reset_seconds(self):
+        """Test extracting reset and cooldown durations accurately from CLI errors."""
+        from antigravity_bridge import parse_quota_reset_seconds
+        self.assertEqual(parse_quota_reset_seconds("Resets in 88h27m35s."), 88 * 3600 + 27 * 60 + 35)
+        self.assertEqual(parse_quota_reset_seconds("Resets in 19h37m31s."), 19 * 3600 + 37 * 60 + 31)
+        self.assertEqual(parse_quota_reset_seconds("Resets in 2d 3h 4m 5s"), 2 * 86400 + 3 * 3600 + 4 * 60 + 5)
+        self.assertEqual(parse_quota_reset_seconds("Resets in 45s"), 45.0)
+        self.assertEqual(parse_quota_reset_seconds("Retry after 120s"), 120.0)
+        self.assertIsNone(parse_quota_reset_seconds("General error without reset time"))
 
     def test_profile_manager_lifecycle_and_cache(self):
         """Test ProfileManager cooldown tracking and cache persistence."""
@@ -156,9 +169,10 @@ class TestAntigravityBridge(unittest.TestCase):
             pm.mark_exhausted("profile_alpha", "429 Quota Exceeded")
             pm.mark_exhausted("profile_beta", "ResourceExhausted")
 
-            # Fast path: only healthy profiles returned when available
+            # Healthy profiles prioritized first, exhausted profiles placed last for complete fallback
             ordered = pm.get_ordered_profiles()
-            self.assertEqual(ordered, ["profile_gamma"])
+            self.assertEqual(ordered[0], "profile_gamma")
+            self.assertEqual(len(ordered), 3)
 
             # When all are exhausted, fallback returns all sorted by earliest cooldown
             pm.mark_exhausted("profile_gamma", "ResourceExhausted")
@@ -199,6 +213,39 @@ class TestAntigravityBridge(unittest.TestCase):
                 self.assertEqual(output2, "Output from profile_gamma")
                 self.assertEqual(used_profile2, "profile_gamma")
                 self.assertEqual(attempts, ["profile_gamma"])
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
+    def test_deep_fallback_across_all_profiles(self):
+        """Test that execute_cli_with_fallback cascades through all profiles until finding a working one."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+        try:
+            profile_list = [f"p_{i}" for i in range(1, 11)]  # 10 profiles
+            pm = ProfileManager(profiles=profile_list, cache_file=cache_file)
+            attempts = []
+
+            def mock_execute(cmd, prompt, timeout=60.0, profile=None, **kwargs):
+                attempts.append(profile)
+                if profile == "p_10":
+                    return "Success from p_10"
+                raise RuntimeError(f"Error: Individual quota reached on {profile}. Resets in 88h.")
+
+            with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_execute):
+                output, used_p = execute_cli_with_fallback('echo "{prompt}"', "prompt", profile_manager=pm)
+                self.assertEqual(output, "Success from p_10")
+                self.assertEqual(used_p, "p_10")
+                self.assertEqual(len(attempts), 10)
+                self.assertEqual(attempts, profile_list)
+
+                # Next call should go straight to p_10 because p_1 to p_9 are in cooldown
+                attempts.clear()
+                output2, used_p2 = execute_cli_with_fallback('echo "{prompt}"', "prompt", profile_manager=pm)
+                self.assertEqual(output2, "Success from p_10")
+                self.assertEqual(used_p2, "p_10")
+                self.assertEqual(attempts, ["p_10"])
         finally:
             if os.path.exists(cache_file):
                 os.remove(cache_file)
