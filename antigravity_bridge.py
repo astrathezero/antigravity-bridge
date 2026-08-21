@@ -78,8 +78,11 @@ logger = logging.getLogger("antigravity_bridge")
 
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
 
-DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "")
-DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "")
+DEFAULT_PROFILE_TIMEOUT = 180.0      # Default execution timeout per profile attempt in seconds
+DEFAULT_TOTAL_TIMEOUT = 480.0       # Total execution timeout across all profile fallback attempts in seconds
+
+DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "https://aiapirouter.mrserm.com/v1")
+DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "sk-36a01df06cfa9e5f-5mbqa9-11db659b")
 DEFAULT_QUOTA_CACHE_FILE = os.path.expanduser("~/.config/antigravity/quota_cache.json")
 DEFAULT_QUOTA_WINDOW_SECONDS = 10800.0  # 3-hour sliding window for Google Gemini quota
 DEFAULT_FLASH_QUOTA_CAPACITY = 50       # Baseline 50 requests capacity per 3h window for Flash
@@ -498,12 +501,150 @@ def parse_tool_calls_from_response(
     return output_text, None
 
 
+def compact_tool_output(content: Any, max_chars: int = 2000) -> Any:
+    """Intelligently compact a tool output string or structured content to avoid context bloat."""
+    if isinstance(content, str):
+        if len(content) <= max_chars:
+            return content
+        head_len = int(max_chars * 0.6)
+        tail_len = max_chars - head_len - 80
+        orig_len = len(content)
+        head_part = content[:head_len]
+        tail_part = content[-tail_len:] if tail_len > 0 else ""
+        return f"{head_part}\n\n... [Tool output truncated: original {orig_len} chars -> compacted to {max_chars} chars] ...\n\n{tail_part}"
+    elif isinstance(content, list):
+        new_list = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                txt = item.get("text", "")
+                if len(txt) > max_chars:
+                    item_copy = dict(item)
+                    item_copy["text"] = compact_tool_output(txt, max_chars=max_chars)
+                    new_list.append(item_copy)
+                else:
+                    new_list.append(item)
+            else:
+                new_list.append(item)
+        return new_list
+    return content
+
+
+def compact_messages(
+    messages: List[Dict[str, Any]],
+    max_total_chars: int = 100000,
+    recent_keep_count: int = 6,
+) -> List[Dict[str, Any]]:
+    """Intelligently compact conversation messages to prevent context bloat and CLI argument overflow.
+
+    Strategy:
+    1. Always preserve all 'system' messages intact (instructions, memory, tool definitions).
+    2. Preserve kickoff user goal (first non-system message) with soft tool compaction.
+    3. Preserve recent N messages (default: 6) so the immediate conversation flow is intact.
+    4. Aggressively compact older middle messages (especially large tool results and repetitive outputs).
+    5. If total length still exceeds budget, prune oldest intermediate conversation turns.
+    """
+    if not messages:
+        return []
+
+    system_msgs: List[Dict[str, Any]] = []
+    non_system_msgs: List[Dict[str, Any]] = []
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "system":
+            system_msgs.append(msg)
+        else:
+            non_system_msgs.append(msg)
+
+    if not non_system_msgs:
+        return system_msgs
+
+    # Single or few messages: apply soft tool compaction (8000 chars per tool result)
+    if len(non_system_msgs) <= recent_keep_count:
+        compacted_non_sys: List[Dict[str, Any]] = []
+        for m in non_system_msgs:
+            m_copy = dict(m)
+            role = m_copy.get("role")
+            if role == "tool" or m_copy.get("tool_call_id"):
+                m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=8000)
+            elif isinstance(m_copy.get("content"), list):
+                m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=8000)
+            compacted_non_sys.append(m_copy)
+        return system_msgs + compacted_non_sys
+
+    # We have older middle messages: non_system_msgs[0] is kickoff, non_system_msgs[-recent_keep_count:] is recent
+    first_msg = dict(non_system_msgs[0])
+    if first_msg.get("role") == "tool":
+        first_msg["content"] = compact_tool_output(first_msg.get("content", ""), max_chars=4000)
+    elif isinstance(first_msg.get("content"), list):
+        first_msg["content"] = compact_tool_output(first_msg.get("content"), max_chars=4000)
+
+    middle_msgs = non_system_msgs[1:-recent_keep_count]
+    recent_msgs = non_system_msgs[-recent_keep_count:]
+
+    # Compact middle messages aggressively
+    compacted_middle: List[Dict[str, Any]] = []
+    for m in middle_msgs:
+        m_copy = dict(m)
+        role = m_copy.get("role")
+        if role == "tool" or m_copy.get("tool_call_id"):
+            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=1200)
+        elif isinstance(m_copy.get("content"), str):
+            c_str = m_copy["content"]
+            if len(c_str) > 3000:
+                m_copy["content"] = compact_tool_output(c_str, max_chars=2000)
+        elif isinstance(m_copy.get("content"), list):
+            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=1200)
+        compacted_middle.append(m_copy)
+
+    # Compact recent messages softly
+    compacted_recent: List[Dict[str, Any]] = []
+    for m in recent_msgs:
+        m_copy = dict(m)
+        role = m_copy.get("role")
+        if role == "tool" or m_copy.get("tool_call_id"):
+            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=8000)
+        elif isinstance(m_copy.get("content"), list):
+            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=8000)
+        compacted_recent.append(m_copy)
+
+    # Check total estimated length
+    def estimate_chars(msg_list: List[Dict[str, Any]]) -> int:
+        total = 0
+        for m in msg_list:
+            c = m.get("content")
+            if isinstance(c, str):
+                total += len(c)
+            elif isinstance(c, list):
+                for item in c:
+                    if isinstance(item, dict) and "text" in item:
+                        total += len(str(item["text"]))
+            elif c is not None:
+                total += len(str(c))
+        return total
+
+    assembled = system_msgs + [first_msg] + compacted_middle + compacted_recent
+    total_len = estimate_chars(assembled)
+
+    # If still exceeding max_total_chars, prune oldest middle messages progressively
+    while total_len > max_total_chars and len(compacted_middle) > 1:
+        compacted_middle = compacted_middle[2:]
+        assembled = system_msgs + [first_msg] + [
+            {"role": "user", "content": "[... older conversation turns omitted to stay within context limits ...]"}
+        ] + compacted_middle + compacted_recent
+        total_len = estimate_chars(assembled)
+
+    return assembled
+
+
 def format_messages_to_prompt(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[Any] = None,
+    max_prompt_chars: int = 100000,
 ) -> str:
-    """Format OpenAI/Anthropic messages list into a prompt string for CLI tools."""
+    """Format OpenAI/Anthropic messages list into a prompt string for CLI tools with auto-compaction."""
     parts: List[str] = []
 
     # Prepend tool descriptions and instructions if tools are provided
@@ -515,28 +656,61 @@ def format_messages_to_prompt(
     if not messages:
         return "\n\n".join(parts)
 
-    if len(messages) == 1 and isinstance(messages[0], dict) and messages[0].get("role") == "user" and not tools:
-        content = messages[0].get("content") or ""
+    compacted_messages = compact_messages(messages, max_total_chars=max_prompt_chars)
+
+    if len(compacted_messages) == 1 and isinstance(compacted_messages[0], dict) and compacted_messages[0].get("role") == "user" and not tools:
+        content = compacted_messages[0].get("content") or ""
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            return "\n".join(
-                c.get("text", "")
-                for c in content
-                if isinstance(c, dict) and c.get("type") == "text"
-            )
+            text_items = []
+            for c in content:
+                if isinstance(c, dict):
+                    if c.get("type") == "text":
+                        text_items.append(c.get("text", ""))
+                    elif c.get("type") == "tool_result":
+                        res_content = c.get("content", "")
+                        if isinstance(res_content, list):
+                            res_content = "\n".join(
+                                rc.get("text", "") for rc in res_content if isinstance(rc, dict) and rc.get("type") == "text"
+                            )
+                        text_items.append(f"[Tool '{c.get('tool_use_id', '')}' Result]:\n{res_content}")
+            return "\n".join(text_items)
 
-    for msg in messages:
+    for msg in compacted_messages:
         if not isinstance(msg, dict):
             continue
         role = msg.get("role", "user")
         content = msg.get("content") or ""
+        msg_tool_calls = msg.get("tool_calls")
+
         if isinstance(content, list):
-            content = "\n".join(
-                c.get("text", "")
-                for c in content
-                if isinstance(c, dict) and c.get("type") == "text"
-            )
+            text_parts = []
+            tool_call_parts = []
+            for c in content:
+                if not isinstance(c, dict):
+                    continue
+                c_type = c.get("type")
+                if c_type == "text":
+                    text_parts.append(c.get("text", ""))
+                elif c_type == "tool_use":
+                    tool_call_parts.append({
+                        "name": c.get("name"),
+                        "arguments": c.get("input", {}),
+                        "id": c.get("id"),
+                    })
+                elif c_type == "tool_result":
+                    res_content = c.get("content", "")
+                    if isinstance(res_content, list):
+                        res_content = "\n".join(
+                            rc.get("text", "") for rc in res_content if isinstance(rc, dict) and rc.get("type") == "text"
+                        )
+                    text_parts.append(f"[Tool '{c.get('tool_use_id', '')}' Result]:\n{res_content}")
+                elif c_type == "image":
+                    text_parts.append("[Image attached]")
+            content = "\n".join(text_parts)
+            if tool_call_parts and not msg_tool_calls:
+                msg_tool_calls = tool_call_parts
         elif not isinstance(content, str):
             content = str(content)
 
@@ -545,8 +719,7 @@ def format_messages_to_prompt(
         elif role == "user":
             parts.append(f"[User]\n{content}")
         elif role == "assistant":
-            tool_calls = msg.get("tool_calls")
-            tc_text = f"\nTool Calls: {json.dumps(tool_calls)}" if tool_calls else ""
+            tc_text = f"\nTool Calls: {json.dumps(msg_tool_calls, ensure_ascii=False)}" if msg_tool_calls else ""
             parts.append(f"[Assistant]\n{content}{tc_text}")
         elif role == "tool":
             parts.append(f"[Tool Result]\n{content}")
@@ -1579,20 +1752,31 @@ def probe_profile(
 
 
 def sanitize_prompt_for_cli(prompt_text: str, max_bytes: int = 115000) -> str:
-    """Ensure prompt string fits within OS single CLI argument limits (115KB)."""
+    """Ensure prompt string fits within OS single CLI argument limits (115KB) with clean boundary-aware truncation."""
     encoded = prompt_text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return prompt_text
 
-    logger.warning("Prompt size (%d bytes) exceeds CLI arg limit (%d bytes). Truncating context...", len(encoded), max_bytes)
+    logger.warning("Prompt size (%d bytes) exceeds limit (%d bytes). Applying boundary-aware truncation...", len(encoded), max_bytes)
 
     head_size = max_bytes // 3
-    tail_size = (max_bytes * 2) // 3 - 100
+    tail_size = (max_bytes * 2) // 3 - 200
 
     head_str = encoded[:head_size].decode("utf-8", errors="ignore")
     tail_str = encoded[-tail_size:].decode("utf-8", errors="ignore")
 
-    return f"{head_str}\n\n...[Middle context truncated for CLI argument limits]...\n\n{tail_str}"
+    # Clean up cutoffs at section boundaries / newlines
+    if "\n\n[" in head_str:
+        head_str = head_str.rsplit("\n\n[", 1)[0]
+    elif "\n" in head_str:
+        head_str = head_str.rsplit("\n", 1)[0]
+
+    if "\n\n[" in tail_str:
+        tail_str = "[" + tail_str.split("\n\n[", 1)[1]
+    elif "\n" in tail_str:
+        tail_str = tail_str.split("\n", 1)[1]
+
+    return f"{head_str}\n\n... [Middle context truncated to fit within CLI buffer limits] ...\n\n{tail_str}"
 
 
 def resolve_model_flags(model_name: Optional[str]) -> List[str]:
@@ -1628,7 +1812,8 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
     if "gemini-3.7-flash" in model_lower:
         flags.extend(["--model", "gemini-3.7-flash"])
         if not effort:
-            effort = "high"
+            effort = "medium"
+
     elif "gemini-3.6-flash" in model_lower:
         flags.extend(["--model", "gemini-3.6-flash"])
     elif "gemini-3.5-flash" in model_lower:
@@ -1681,8 +1866,9 @@ def parse_cmd_template(
             sanitized_prompt = sanitize_prompt_for_cli(prompt_text)
             argv.append(sanitized_prompt)
             return argv, ""
-        # Stdin path: pass full prompt text via stdin without truncating
-        return argv, prompt_text
+        # Stdin path: pass prompt text with safety cap (max 250KB) to avoid memory/subprocess stalls
+        safe_stdin_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=250000)
+        return argv, safe_stdin_prompt
 
 
 MAC_KEYCHAIN_LOCK = threading.Lock()
@@ -1812,7 +1998,7 @@ def detect_local_proxy() -> Optional[str]:
 def execute_cli_command(
     cmd_template: str,
     prompt_text: str,
-    timeout: float = 180.0,
+    timeout: float = DEFAULT_PROFILE_TIMEOUT,
     profile: Optional[str] = None,
     model_name: Optional[str] = None,
 ) -> str:
@@ -1820,7 +2006,7 @@ def execute_cli_command(
     argv, stdin_input = parse_cmd_template(cmd_template, prompt_text, model_name=model_name)
 
     log_str = " ".join(argv)[:120] if argv else cmd_template[:120]
-    logger.info("Executing CLI command (profile=%s): %s", profile or "default", log_str)
+    logger.info("Executing CLI command (profile=%s, timeout=%.1fs): %s", profile or "default", timeout, log_str)
 
     sandbox_dir = get_profile_sandbox_dir(profile)
 
@@ -1889,8 +2075,12 @@ def execute_cli_command(
         stdout_data, stderr_data = proc.communicate(input=stdin_input, timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        stdout_data, stderr_data = proc.communicate()
-        raise RuntimeError(f"CLI Execution Timeout (profile={profile or 'default'})")
+        try:
+            stdout_data, stderr_data = proc.communicate(timeout=2.0)
+        except Exception:
+            pass
+        logger.error("CLI execution timed out after %.1fs for profile '%s'", timeout, profile or "default")
+        raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
 
     if proc.returncode != 0:
         err_msg = stderr_data.strip() or stdout_data.strip() or f"Exit code {proc.returncode}"
@@ -1909,12 +2099,13 @@ def execute_cli_command(
 def execute_cli_with_fallback(
     cmd_template: str,
     prompt_text: str,
-    timeout: float = 180.0,
+    timeout: float = DEFAULT_PROFILE_TIMEOUT,
+    total_timeout: float = DEFAULT_TOTAL_TIMEOUT,
     profiles: Optional[List[Optional[str]]] = None,
     model_name: Optional[str] = None,
     profile_manager: Optional[ProfileManager] = None,
 ) -> Tuple[str, Optional[str]]:
-    """Execute CLI command trying profiles dynamically in parallel-safe worker pool until one succeeds."""
+    """Execute CLI command trying profiles dynamically in parallel-safe worker pool until one succeeds or total timeout budget is reached."""
     mgr = profile_manager or GLOBAL_PROFILE_MANAGER
     if profiles is not None:
         mgr.set_profiles(profiles)
@@ -1922,8 +2113,20 @@ def execute_cli_with_fallback(
     candidate_profiles = mgr.get_ordered_profiles()
     errors: List[str] = []
     tried_profiles: set = set()
+    start_time = time.time()
 
     for _ in range(len(candidate_profiles)):
+        elapsed = time.time() - start_time
+        remaining_budget = total_timeout - elapsed
+        if remaining_budget <= 0:
+            logger.warning(
+                "Total fallback timeout budget (%.1fs) reached after trying %d profile(s)",
+                total_timeout,
+                len(tried_profiles),
+            )
+            errors.append(f"Total fallback timeout budget ({total_timeout:.0f}s) exceeded")
+            break
+
         available_candidates = [p for p in candidate_profiles if p not in tried_profiles]
         if not available_candidates:
             break
@@ -1938,14 +2141,32 @@ def execute_cli_with_fallback(
         is_cooldown = mgr.is_in_cooldown(profile)
         in_flight_count = mgr.get_in_flight(profile)
 
+        attempt_timeout = max(1.0, min(timeout, remaining_budget))
+
         if is_cooldown:
-            logger.info("Attempting fallback profile in cooldown: %s (model=%s, in_flight=%d)", profile_key, model_name or "default", in_flight_count)
+            logger.info(
+                "Attempting fallback profile in cooldown: %s (model=%s, in_flight=%d, timeout=%.1fs)",
+                profile_key,
+                model_name or "default",
+                in_flight_count,
+                attempt_timeout,
+            )
         else:
-            logger.info("Attempting CLI execution with profile: %s (model=%s, in_flight=%d)", profile_key, model_name or "default", in_flight_count)
+            logger.info(
+                "Attempting CLI execution with profile: %s (model=%s, in_flight=%d, timeout=%.1fs)",
+                profile_key,
+                model_name or "default",
+                in_flight_count,
+                attempt_timeout,
+            )
 
         try:
             output = execute_cli_command(
-                cmd_template, prompt_text, timeout=timeout, profile=profile, model_name=model_name
+                cmd_template,
+                prompt_text,
+                timeout=attempt_timeout,
+                profile=profile,
+                model_name=model_name,
             )
             mgr.mark_success(profile)
             return output, profile
@@ -2080,7 +2301,8 @@ def generate_image_with_agy(
         output_text, used_profile = execute_cli_with_fallback(
             cmd_template,
             agy_prompt,
-            timeout=180.0,
+            timeout=60.0,
+            total_timeout=120.0,
             profiles=profiles,
             model_name="gemini-3.7-flash-low",
         )
@@ -2709,8 +2931,16 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 heartbeat = SSEHeartbeat(self.wfile, interval=3.0)
 
             try:
+                prof_timeout = getattr(self.server, "profile_timeout", DEFAULT_PROFILE_TIMEOUT)
+                total_timeout = getattr(self.server, "total_timeout", DEFAULT_TOTAL_TIMEOUT)
                 output_text, used_profile = execute_cli_with_fallback(
-                    custom_tpl, prompt_text, profiles=configured_profiles, model_name=model, profile_manager=profile_manager
+                    custom_tpl,
+                    prompt_text,
+                    timeout=prof_timeout,
+                    total_timeout=total_timeout,
+                    profiles=configured_profiles,
+                    model_name=model,
+                    profile_manager=profile_manager,
                 )
                 logger.info("Successfully executed CLI using profile: %s (model=%s)", used_profile or "default", model)
             except Exception as exc:
@@ -3552,7 +3782,8 @@ def main():
     parser.add_argument("--cmd", default=None, help="Custom CLI command template (e.g. 'agy -p \"{prompt}\"')")
     parser.add_argument("--profiles", default=None, help="Comma-separated list of profile names to try for fallback")
     parser.add_argument("--cooldown-sec", type=float, default=300.0, help="Base cooldown seconds for exhausted profiles (default: 300)")
-    parser.add_argument("--profile-timeout", type=float, default=60.0, help="Execution timeout per profile attempt in seconds (default: 60)")
+    parser.add_argument("--profile-timeout", type=float, default=DEFAULT_PROFILE_TIMEOUT, help=f"Execution timeout per profile attempt in seconds (default: {int(DEFAULT_PROFILE_TIMEOUT)})")
+    parser.add_argument("--total-timeout", type=float, default=DEFAULT_TOTAL_TIMEOUT, help=f"Total execution timeout across all profile fallback attempts in seconds (default: {int(DEFAULT_TOTAL_TIMEOUT)})")
     parser.add_argument("--quota-cache", default=DEFAULT_QUOTA_CACHE_FILE, help=f"Path to quota cache JSON file (default: {DEFAULT_QUOTA_CACHE_FILE})")
     parser.add_argument("--check-profiles-on-start", action="store_true", help="Probe profile availability actively on startup")
     parser.add_argument("--api-key", default=os.environ.get("ANTIGRAVITY_BRIDGE_API_KEY"), help="API Key for authentication")
@@ -3608,6 +3839,8 @@ def main():
     logger.info("Configured Profiles: %s", configured_profiles)
     logger.info("Concurrency Pool:    %d total parallel capacity (%d request(s) per profile)", max_concurrent_capacity, args.profile_concurrency)
     logger.info("Quota Cache File:   %s", profile_manager.cache_file)
+    logger.info("Profile Timeout:    %.1fs per profile attempt", args.profile_timeout)
+    logger.info("Total Timeout:      %.1fs total fallback budget", args.total_timeout)
     logger.info("Profile Status Foot: %s", "ENABLED" if show_profile_status else "DISABLED")
     logger.info("Token Auto-Refresh:  %s", f"ENABLED (every {int(args.auto_refresh_min)} min)" if auto_refresh_sec > 0 else "DISABLED")
     logger.info("Image Generation:   ENABLED (model: gemini-3.1-flash-image / 9router)")
@@ -3622,6 +3855,8 @@ def main():
     server.enable_cors = args.enable_cors
     server.image_router_url = args.image_router_url
     server.image_router_key = args.image_router_key
+    server.profile_timeout = args.profile_timeout
+    server.total_timeout = args.total_timeout
 
     if auto_refresh_sec > 0:
         start_token_refresh_daemon(server, interval_seconds=auto_refresh_sec)

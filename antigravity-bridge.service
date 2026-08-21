@@ -4,12 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-User=your-username
-WorkingDirectory=/home/your-username/antigravity-bridge
-ExecStart=/usr/bin/python3 /home/your-username/antigravity-bridge/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 1
+User=attasit
+WorkingDirectory=/home/attasit/antigravity-bridge
+ExecStart=/usr/bin/python3 /home/attasit/antigravity-bridge/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 1 --profile-timeout 45 --total-timeout 120
 Restart=always
 RestartSec=5
-Environment=PATH=/home/your-username/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/home/attasit/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
 
 # Security Hardening
 NoNewPrivileges=true

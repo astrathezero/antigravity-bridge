@@ -22,6 +22,9 @@ detect_cli_command = antigravity_bridge.detect_cli_command
 execute_cli_command = antigravity_bridge.execute_cli_command
 execute_cli_with_fallback = antigravity_bridge.execute_cli_with_fallback
 format_messages_to_prompt = antigravity_bridge.format_messages_to_prompt
+compact_tool_output = antigravity_bridge.compact_tool_output
+compact_messages = antigravity_bridge.compact_messages
+sanitize_prompt_for_cli = antigravity_bridge.sanitize_prompt_for_cli
 get_available_profiles = antigravity_bridge.get_available_profiles
 normalize_tools = antigravity_bridge.normalize_tools
 format_tools_to_system_prompt = antigravity_bridge.format_tools_to_system_prompt
@@ -528,8 +531,74 @@ class TestAntigravityBridge(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_context_compaction_and_tool_truncation(self):
+        """Test that compact_messages preserves system instructions and compacts middle tool outputs."""
+        huge_tool_output = "X" * 20000
+        messages = [
+            {"role": "system", "content": "You are a specialized AI."},
+            {"role": "user", "content": "Initial user goal: research topic"},
+            {"role": "assistant", "content": "Running tool..."},
+            {"role": "tool", "content": huge_tool_output},
+            {"role": "assistant", "content": "Intermediate answer"},
+            {"role": "user", "content": "Continue research"},
+            {"role": "assistant", "content": "Running another tool..."},
+            {"role": "tool", "content": huge_tool_output},
+            {"role": "assistant", "content": "Final analysis step"},
+            {"role": "user", "content": "Latest user message"},
+        ]
+
+        compacted = compact_messages(messages, max_total_chars=10000, recent_keep_count=3)
+        self.assertEqual(compacted[0]["role"], "system")
+        self.assertEqual(compacted[0]["content"], "You are a specialized AI.")
+        self.assertEqual(compacted[1]["role"], "user")
+        self.assertIn("Initial user goal", compacted[1]["content"])
+
+        # Check that middle tool output was compacted
+        middle_tool_msg = next(m for m in compacted if m.get("role") == "tool")
+        self.assertLess(len(middle_tool_msg["content"]), 2500)
+        self.assertIn("Tool output truncated", middle_tool_msg["content"])
+
+        # Check format_messages_to_prompt produces compacted string
+        prompt = format_messages_to_prompt(messages, max_prompt_chars=10000)
+        self.assertIn("[System Instructions]\nYou are a specialized AI.", prompt)
+        self.assertIn("[User]\nLatest user message", prompt)
+        self.assertLess(len(prompt), 15000)
+
+    def test_boundary_aware_cli_sanitization(self):
+        """Test that sanitize_prompt_for_cli cleanly truncates large prompts at section boundaries."""
+        large_prompt = "[System Instructions]\nKeep safe.\n\n" + ("\n\n[User]\nTurn data...\n\n[Assistant]\nResponse..." * 2000)
+        sanitized = sanitize_prompt_for_cli(large_prompt, max_bytes=10000)
+        self.assertLessEqual(len(sanitized.encode("utf-8")), 10000)
+        self.assertIn("[System Instructions]", sanitized)
+        self.assertIn("Middle context truncated", sanitized)
+
+    def test_total_timeout_budget_fallback(self):
+        """Test that execute_cli_with_fallback terminates when total timeout budget is exceeded."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            cache_file = tf.name
+        try:
+            pm = ProfileManager(profiles=["p1", "p2", "p3", "p4", "p5"], cache_file=cache_file)
+            attempts = []
+
+            def mock_hanging_cli(cmd, prompt, timeout=45.0, profile=None, **kwargs):
+                attempts.append(profile)
+                time.sleep(0.05)
+                raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile})")
+
+            with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_hanging_cli):
+                # Set total_timeout to a very small budget (0.08s) so only 1-2 profiles can be attempted before budget expires
+                with self.assertRaises(RuntimeError) as ctx:
+                    execute_cli_with_fallback('echo "{prompt}"', "test", timeout=0.05, total_timeout=0.08, profile_manager=pm)
+                self.assertIn("Total fallback timeout budget", str(ctx.exception))
+                self.assertLess(len(attempts), 5)
+        finally:
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
