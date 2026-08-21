@@ -52,6 +52,7 @@
   - [6. API จัดการสถานะโปรไฟล์แบบเรียลไทม์ (`/v1/profiles/*`)](#6-api-จัดการสถานะโปรไฟล์แบบเรียลไทม์-v1profiles)
 - [⚙️ การตั้งค่าและตัวแปรสภาพแวดล้อม (Environment Variables)](#️-การตั้งค่าและตัวแปรสภาพแวดล้อม-environment-variables)
 - [🤖 การเชื่อมต่อกับ Hermes Agent (`config.yaml`)](#-การเชื่อมต่อกับ-hermes-agent-configyaml)
+- [🦞 การเชื่อมต่อกับ OpenClaw (`openclaw.json`)](#-การเชื่อมต่อกับ-openclaw-openclawjson)
 - [💻 ตัวอย่างการเขียนโค้ดเรียกใช้งาน (Client SDKs)](#-ตัวอย่างการเขียนโค้ดเรียกใช้งาน-client-sdks)
 - [🚀 การติดตั้งเพื่อใช้งานจริงในระดับ Production](#-การติดตั้งเพื่อใช้งานจริงในระดับ-production)
 - [🔧 การแก้ไขปัญหาที่พบบ่อย (Troubleshooting & FAQ)](#-การแก้ไขปัญหาที่พบบ่อย-troubleshooting--faq)
@@ -322,7 +323,10 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: app
 
 ## 🤖 การเชื่อมต่อกับ Hermes Agent (`config.yaml`)
 
-ตั้งค่าไฟล์ `~/.hermes/config.yaml` เพื่อให้ Hermes Agent เรียกใช้งานผ่าน Bridge:
+**Hermes Agent** สามารถเชื่อมต่อกับ Antigravity Bridge เพื่อใช้เป็น Custom OpenAI-Compatible Provider ที่รองรับทั้ง Real-time Streaming และ Tool/Function Calling เต็มรูปแบบ
+
+### 1. แก้ไขไฟล์คอนฟิก `config.yaml`
+เพิ่มบล็อก `agy-cli` ภายใต้ `custom_providers` ในไฟล์คอนฟิกของ Hermes (`~/.hermes/config.yaml` หรือ `~/.hermes/profiles/<ชื่อโปรไฟล์>/config.yaml`):
 
 ```yaml
 model:
@@ -332,7 +336,7 @@ model:
 custom_providers:
   agy-cli:
     api: http://127.0.0.1:8000/v1
-    api_key: sk-antigravity
+    api_key: sk-antigravity  # ตรงกับ ANTIGRAVITY_BRIDGE_API_KEY หรือใส่ข้อความใดๆ ก็ได้หากไม่ได้ตั้งรหัส
     name: Antigravity Multi-Profile Bridge
     models:
       gemini-3.7-flash-high:
@@ -352,6 +356,122 @@ custom_providers:
       gpt-oss-120b-medium:
         context_length: 128000
 ```
+
+### 2. ตรวจสอบและสลับโมเดลผ่าน Hermes CLI
+```bash
+# 1. ตรวจสอบรายชื่อโมเดลที่เชื่อมต่อได้:
+hermes models
+
+# 2. สลับโมเดลเริ่มต้น:
+hermes model set agy-cli/gemini-3.7-flash-high
+
+# 3. เริ่มต้นเปิดแชทโดยเรียกผ่าน Antigravity Bridge:
+hermes chat -m agy-cli/gemini-3.7-flash-high
+```
+
+---
+
+## 🦞 การเชื่อมต่อกับ OpenClaw (`openclaw.json`)
+
+**OpenClaw** (Autonomous Agent Gateway & Multi-Channel Runtime) สามารถเชื่อมต่อกับ Antigravity Bridge ผ่านโครงสร้าง Custom OpenAI-Compatible Provider:
+
+### 1. แก้ไขไฟล์ `openclaw.json` (JSON5)
+แก้ไขไฟล์คอนฟิก (`~/.openclaw/openclaw.json` หรือพาธที่ระบุใน `OPENCLAW_CONFIG_PATH`):
+
+```json5
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "antigravity": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "apiKey": "sk-antigravity", // รหัส API Key ที่ตั้งใน .env ของ Bridge
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gemini-3.7-flash-high",
+            "name": "Gemini 3.7 Flash (High Reasoning)",
+            "contextWindow": 1000000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "gemini-3.7-flash-medium",
+            "name": "Gemini 3.7 Flash (Medium Reasoning)",
+            "contextWindow": 1000000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "gemini-3.7-flash",
+            "name": "Gemini 3.7 Flash",
+            "contextWindow": 1000000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "gemini-3.1-pro-high",
+            "name": "Gemini 3.1 Pro (High Reasoning)",
+            "contextWindow": 2000000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "claude-sonnet-4.6-thinking",
+            "name": "Claude Sonnet 4.6 (Extended Thinking)",
+            "contextWindow": 200000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "claude-opus-4.6-thinking",
+            "name": "Claude Opus 4.6 (Extended Thinking)",
+            "contextWindow": 200000,
+            "maxTokens": 64000
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "antigravity/gemini-3.7-flash-high"
+      },
+      "models": {
+        "antigravity/gemini-3.7-flash-high": {
+          "alias": "gemini-flash"
+        },
+        "antigravity/claude-sonnet-4.6-thinking": {
+          "alias": "claude-sonnet"
+        }
+      }
+    }
+  }
+}
+```
+
+### 2. ตั้งค่าผ่านคำสั่ง OpenClaw CLI
+สามารถใช้ CLI ของ OpenClaw ในการตั้งค่าได้โดยตรง:
+
+```bash
+# 1. กำหนด Endpoint และ API Key ของ Custom Provider
+openclaw config set models.providers.antigravity.baseUrl "http://127.0.0.1:8000/v1"
+openclaw config set models.providers.antigravity.apiKey "sk-antigravity"
+openclaw config set models.providers.antigravity.api "openai-completions"
+
+# 2. ตั้งค่าโมเดลหลักที่ต้องการใช้งาน
+openclaw models set antigravity/gemini-3.7-flash-high
+
+# 3. ตรวจสอบความถูกต้องของคอนฟิกและเช็คโมเดล
+openclaw config validate
+openclaw models list
+```
+
+### 3. สำหรับการรัน OpenClaw บน Docker (`openclaw-in-docker`)
+หากรัน OpenClaw อยู่ใน Docker Container ให้ชี้ Base URL ไปยัง IP ของ Host เครื่องหลัก:
+
+* **Linux Docker Host**: ชี้ไปที่ `http://172.17.0.1:8000/v1` หรือ `http://host.docker.internal:8000/v1` (โดยเพิ่ม `extra_hosts: ["host.docker.internal:host-gateway"]` ใน `docker-compose.yml`)
+* ในไฟล์ `.env` ของ OpenClaw Docker:
+  ```ini
+  OPENAI_BASE_URL=http://172.17.0.1:8000/v1
+  OPENAI_API_KEY=sk-antigravity
+  ```
 
 ---
 

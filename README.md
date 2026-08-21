@@ -52,6 +52,7 @@
   - [6. Profile Control APIs (`/v1/profiles/*`)](#6-profile-control-apis-v1profiles)
 - [⚙️ Configuration & Environment Variables](#️-configuration--environment-variables)
 - [🤖 Hermes Agent Integration (`config.yaml`)](#-hermes-agent-integration-configyaml)
+- [🦞 OpenClaw Integration (`openclaw.json`)](#-openclaw-integration-openclawjson)
 - [💻 Client SDK Examples](#-client-sdk-examples)
 - [🚀 Production Deployment (Systemd / PM2 / Nginx)](#-production-deployment-systemd--pm2--nginx)
 - [🔧 Troubleshooting & FAQ](#-troubleshooting--faq)
@@ -322,7 +323,10 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: app
 
 ## 🤖 Hermes Agent Integration (`config.yaml`)
 
-Connect **Hermes Agent** directly to Antigravity Bridge:
+**Hermes Agent** can use Antigravity Bridge as a high-performance custom OpenAI-compatible provider with full streaming and tool-calling capabilities.
+
+### 1. Configure `config.yaml`
+Add `agy-cli` under `custom_providers` in your Hermes configuration file (`~/.hermes/config.yaml` or `~/.hermes/profiles/<profile>/config.yaml`):
 
 ```yaml
 model:
@@ -332,7 +336,7 @@ model:
 custom_providers:
   agy-cli:
     api: http://127.0.0.1:8000/v1
-    api_key: sk-antigravity
+    api_key: sk-antigravity  # Match ANTIGRAVITY_BRIDGE_API_KEY (or any string if unset)
     name: Antigravity Multi-Profile Bridge
     models:
       gemini-3.7-flash-high:
@@ -352,6 +356,122 @@ custom_providers:
       gpt-oss-120b-medium:
         context_length: 128000
 ```
+
+### 2. Verify & Switch Models via Hermes CLI
+```bash
+# 1. View loaded custom models:
+hermes models
+
+# 2. Set default active model:
+hermes model set agy-cli/gemini-3.7-flash-high
+
+# 3. Start a chat session using Antigravity Bridge:
+hermes chat -m agy-cli/gemini-3.7-flash-high
+```
+
+---
+
+## 🦞 OpenClaw Integration (`openclaw.json`)
+
+**OpenClaw** (an autonomous agent gateway and multi-channel runtime) can connect directly to Antigravity Bridge as a custom OpenAI-compatible provider.
+
+### 1. Configure `openclaw.json` (JSON5)
+Edit your OpenClaw configuration file (`~/.openclaw/openclaw.json` or path in `OPENCLAW_CONFIG_PATH`):
+
+```json5
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "antigravity": {
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "apiKey": "sk-antigravity", // Match ANTIGRAVITY_BRIDGE_API_KEY
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gemini-3.7-flash-high",
+            "name": "Gemini 3.7 Flash (High Reasoning)",
+            "contextWindow": 1000000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "gemini-3.7-flash-medium",
+            "name": "Gemini 3.7 Flash (Medium Reasoning)",
+            "contextWindow": 1000000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "gemini-3.7-flash",
+            "name": "Gemini 3.7 Flash",
+            "contextWindow": 1000000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "gemini-3.1-pro-high",
+            "name": "Gemini 3.1 Pro (High Reasoning)",
+            "contextWindow": 2000000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "claude-sonnet-4.6-thinking",
+            "name": "Claude Sonnet 4.6 (Extended Thinking)",
+            "contextWindow": 200000,
+            "maxTokens": 64000
+          },
+          {
+            "id": "claude-opus-4.6-thinking",
+            "name": "Claude Opus 4.6 (Extended Thinking)",
+            "contextWindow": 200000,
+            "maxTokens": 64000
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "antigravity/gemini-3.7-flash-high"
+      },
+      "models": {
+        "antigravity/gemini-3.7-flash-high": {
+          "alias": "gemini-flash"
+        },
+        "antigravity/claude-sonnet-4.6-thinking": {
+          "alias": "claude-sonnet"
+        }
+      }
+    }
+  }
+}
+```
+
+### 2. Configure via OpenClaw CLI
+You can also configure the provider and models using the OpenClaw CLI:
+
+```bash
+# 1. Register custom provider base URL and API key
+openclaw config set models.providers.antigravity.baseUrl "http://127.0.0.1:8000/v1"
+openclaw config set models.providers.antigravity.apiKey "sk-antigravity"
+openclaw config set models.providers.antigravity.api "openai-completions"
+
+# 2. Set default primary model
+openclaw models set antigravity/gemini-3.7-flash-high
+
+# 3. Validate configuration & list recognized models
+openclaw config validate
+openclaw models list
+```
+
+### 3. OpenClaw in Docker Setup (`openclaw-in-docker`)
+If running OpenClaw in Docker, configure the bridge endpoint to route to the host machine:
+
+* **Linux Docker Host**: Use `http://172.17.0.1:8000/v1` or `http://host.docker.internal:8000/v1` (with `extra_hosts: ["host.docker.internal:host-gateway"]` in `docker-compose.yml`).
+* In `.env` for Docker:
+  ```ini
+  OPENAI_BASE_URL=http://172.17.0.1:8000/v1
+  OPENAI_API_KEY=sk-antigravity
+  ```
 
 ---
 
