@@ -100,11 +100,15 @@ Antigravity Bridge acts as a unified HTTP gateway between your applications (Her
 - 🔄 **Dual Format Compatibility**: 100% drop-in compatible with both **OpenAI** (`/v1/chat/completions`) and **Anthropic** (`/v1/messages`) standards.
 - 🛠️ **Native Tool & Function Calling**: Seamless extraction and translation for OpenAI `tools`/`functions` and Anthropic `tools`.
 - 🌊 **Real-Time SSE Streaming & Heartbeats**: Fast Server-Sent Events (`text/event-stream`) streaming with periodic heartbeat comments to prevent upstream proxy timeouts during deep reasoning queries.
-- 🔀 **Zero-Downtime Smart Fallback**:
+- 🔀 **Zero-Downtime Smart Fallback & Fast-Fail**:
   - Automatically rotates across multiple accounts in `~/.config/antigravity/profiles/`.
   - Instantly detects `429 Too Many Requests`, `RESOURCE_EXHAUSTED`, and quota errors.
   - Automatically parses cooldown reset durations (e.g. `Resets in 74h 7m 25s`) and falls back immediately to the next healthy profile without failing the user request.
-- 🛡️ **Adaptive Context Compaction**: Automatically sanitizes prompts and compacts oversized conversation histories from heavy analytical agents to prevent buffer overflows and CLI crashes.
+  - **Cooldown Skip & Fast-Fail**: Automatically skips profiles in cooldown without making redundant API calls or hanging; fast-fails immediately if the entire pool is exhausted.
+- 🚀 **Large Prompt Support & Adaptive Compaction**:
+  - Direct CLI argument delivery supporting massive prompts up to **350KB (~85,000 words)** natively without hitting OS `ARG_MAX` buffer limits.
+  - Clean boundary-aware middle truncation for ultra-long context sessions (>350KB) to keep model reasoning responsive.
+- 🔒 **Persistent Profile State**: Disabled profiles via `profile disable <name>` are saved to configuration (`~/.config/antigravity/bridge_config.json`) and persist across service restarts.
 - 🔄 **Automatic OAuth Refresh Daemon**: Background thread refreshes Google access tokens every 55 minutes to prevent session expiration.
 - 🌐 **SOCKS5 / Cloudflare WARP Proxy Auto-Detection**: Auto-detects local WARP proxies (ports `40000`, `10808`, `7890`, etc.) for uninterrupted outbound connectivity.
 - 🎨 **Image Generation Integration**: Generates images via Google Imagen 3 (`imagen-3.0-generate-002`) and Gemini Image routers (`/v1/images/generations`).
@@ -577,7 +581,7 @@ server {
 
 ## 🧪 Running Unit Tests
 
-Run the complete test suite covering API formats, streaming handlers, profile ordering algorithms, fallback routing, and CLI subcommand handlers:
+Run the complete test suite covering API formats, streaming handlers, profile ordering algorithms, fallback routing, cooldown fast-fail, large prompt passing, and CLI subcommand handlers (**25/25 tests**):
 
 ```bash
 python3 -m unittest test_antigravity_bridge.py -v

@@ -100,11 +100,15 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
 - 🔄 **รองรับ 2 มาตรฐาน API (Dual Format)**: เข้ากันได้ 100% ทั้ง **OpenAI API** (`/v1/chat/completions`) และ **Anthropic API** (`/v1/messages`)
 - 🛠️ **รองรับ Tool Calling & Function Calling**: แปลงคำจำกัดความเครื่องมือของ OpenAI และ Anthropic เข้าสู่ระบบ Prompt ของ CLI พร้อมดึงผลลัพธ์กลับมาเป็น Tool Call JSON แม่นยำ
 - 🌊 **Real-Time SSE Streaming & Heartbeat**: ส่งข้อมูลแบบสตรีมมิ่งผ่าน Server-Sent Events พร้อมระบบส่งสัญญาณ Heartbeat เป็นระยะเพื่อป้องกัน Gateway/Reverse Proxy ตัดการเชื่อมต่อขณะโมเดลใช้เหตุผลลึก (Deep Reasoning)
-- 🔀 **Zero-Downtime Smart Fallback**:
+- 🔀 **Zero-Downtime Smart Fallback & Fast-Fail**:
   - สลับหมุนเวียนโปรไฟล์ใน `~/.config/antigravity/profiles/` อัตโนมัติ
   - ตรวจจับข้อผิดพลาด `429 Too Many Requests` และ `RESOURCE_EXHAUSTED` ทันที
   - อ่านระยะเวลาฟื้นฟูโควตาจากข้อความระบบ (เช่น `Resets in 74h 7m 25s`) เพื่อตั้ง Cooldown แม่นยำ และสลับไปใช้โปรไฟล์ถัดไปทันทีโดยที่ Client ไม่หลุด
-- 🛡️ **Adaptive Context Compaction**: มีระบบบีบอัดประวัติการสนทนาและตัด Markdown อย่างชาญฉลาดเมื่อ Payload มีขนาดยาวเกิน เพื่อป้องกันปัญหา Memory Overflow หรือ CLI ค้าง
+  - **Cooldown Skip & Fast-Fail**: ข้ามโปรไฟล์ที่กำลังติด Cooldown ทันทีโดยไม่เสียเวลายิงซ้ำ และแจ้ง Error ชัดเจนทันทีหากทุกโปรไฟล์ใน Pool ติด Limit ทั้งหมด
+- 🚀 **รองรับ Prompt ขนาดใหญ่ (Large Prompt) & Adaptive Compaction**:
+  - ส่งข้อความ Prompt ขนาดใหญ่เข้าสู่ CLI Argument ได้สูงถึง **350KB (~85,000 คำ)** โดยตรง ไม่ติดข้อจำกัด `ARG_MAX` ของระบบปฏิบัติการ
+  - มีระบบบีบอัดประวัติและตัดข้อความตรงกลางอย่างชาญฉลาดเมื่อบริบทการสนทนายาวเกิน 350KB เพื่อให้การประมวลผลยังคงรวดเร็ว
+- 🔒 **บันทึกสถานะโปรไฟล์ถาวร (Persistent Profile State)**: คำสั่ง `profile disable <name>` จะบันทึกลงไฟล์การตั้งค่า (`~/.config/antigravity/bridge_config.json`) และคงสถานะปิดไว้แม้จะ Restart เซิร์ฟเวอร์
 - 🔄 **ระบบรีเฟรช Token อัตโนมัติในเบื้องหลัง**: Background Daemon ทำงานทุก 55 นาทีเพื่อต่ออายุ Google OAuth Access Token ป้องกัน Session หมดอายุ
 - 🌐 **ตรวจจับ SOCKS5 / Cloudflare WARP Proxy อัตโนมัติ**: ตรวจหาพอร์ต Local Proxy (เช่น `40000`, `10808`, `7890`) อัตโนมัติเพื่อเชื่อมต่ออินเทอร์เน็ตได้ราบรื่น
 - 🎨 **สร้างรูปภาพผ่าน Google Imagen 3**: รองรับเอนด์พอยต์ `/v1/images/generations` และแปลงคำสั่งสร้างภาพในแชท
@@ -577,7 +581,7 @@ server {
 
 ## 🧪 การรันชุดทดสอบ (Unit Tests)
 
-รันชุดทดสอบครอบคลุมทุก Endpoint, ระบบสตรีมมิ่ง, การตัดข้อความ, อัลกอริทึมการกระจายงาน และคำสั่ง CLI:
+รันชุดทดสอบครอบคลุมทุก Endpoint, ระบบสตรีมมิ่ง, การตัดข้อความ, อัลกอริทึมการกระจายงาน, การข้าม Cooldown, รองรับ Large Prompt และคำสั่ง CLI (**ผ่านครบ 25/25 tests**):
 
 ```bash
 python3 -m unittest test_antigravity_bridge.py -v
