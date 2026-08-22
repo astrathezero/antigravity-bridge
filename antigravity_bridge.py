@@ -77,7 +77,7 @@ load_dotenv()
 logger = logging.getLogger("antigravity_bridge")
 
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
-MAX_CLI_ARG_BYTES = 65536          # 64KB safe CLI argument limit to prevent OS ARG_MAX overflows
+MAX_CLI_ARG_BYTES = 350000        # 350KB safe CLI argument limit (macOS ARG_MAX=1MB, Linux ARG_MAX=2MB)
 
 DEFAULT_PROFILE_TIMEOUT = 180.0      # Default execution timeout per profile attempt in seconds
 DEFAULT_TOTAL_TIMEOUT = 480.0       # Total execution timeout across all profile fallback attempts in seconds
@@ -1920,12 +1920,12 @@ def probe_profile(
 
 
 def sanitize_prompt_for_cli(prompt_text: str, max_bytes: Optional[int] = None) -> str:
-    """Ensure prompt string fits within fast, responsive CLI execution limits (default 45KB) with clean boundary-aware truncation."""
+    """Ensure prompt string fits within fast, responsive CLI execution limits (default 350KB) with clean boundary-aware truncation."""
     if max_bytes is None:
         try:
-            max_bytes = int(os.environ.get("ANTIGRAVITY_MAX_PROMPT_BYTES", "45000"))
+            max_bytes = int(os.environ.get("ANTIGRAVITY_MAX_PROMPT_BYTES", str(MAX_CLI_ARG_BYTES)))
         except Exception:
-            max_bytes = 45000
+            max_bytes = MAX_CLI_ARG_BYTES
 
     encoded = prompt_text.encode("utf-8")
     if len(encoded) <= max_bytes:
@@ -2016,10 +2016,7 @@ def parse_cmd_template(
     prompt_text: str,
     model_name: Optional[str] = None,
 ) -> Tuple[List[str], str]:
-    """Parse command template into list of arguments for subprocess (shell=False).
-    For large prompts or commands supporting stdin, routes the prompt via stdin
-    rather than oversized command line arguments to avoid OS ARG_MAX limits.
-    """
+    """Parse command template into list of arguments for subprocess (shell=False)."""
     model_flags = resolve_model_flags(model_name)
     prompt_bytes_len = len(prompt_text.encode("utf-8"))
 
@@ -2034,37 +2031,27 @@ def parse_cmd_template(
         if model_flags:
             parts = [parts[0]] + model_flags + parts[1:]
 
-        is_agy = parts and ("agy" in parts[0] or "antigravity" in parts[0])
-        if prompt_bytes_len > MAX_CLI_ARG_BYTES and is_agy:
-            # Replace placeholder with '-' so agy reads the full untruncated prompt from stdin
-            argv = ["-" if p == placeholder else p for p in parts]
-            return argv, prompt_text
-        elif prompt_bytes_len > MAX_CLI_ARG_BYTES:
-            # Non-agy command: fallback sanitize for OS safety
-            sanitized_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=MAX_CLI_ARG_BYTES)
-            argv = [sanitized_prompt if p == placeholder else p for p in parts]
-            return argv, ""
+        if prompt_bytes_len > MAX_CLI_ARG_BYTES:
+            final_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=MAX_CLI_ARG_BYTES)
         else:
-            argv = [prompt_text if p == placeholder else p for p in parts]
-            return argv, ""
+            final_prompt = prompt_text
+
+        argv = [final_prompt if p == placeholder else p for p in parts]
+        return argv, ""
     else:
         argv = shlex.split(cmd_template)
         if model_flags:
             argv = [argv[0]] + model_flags + argv[1:]
-        is_agy = argv and ("agy" in argv[0] or "antigravity" in argv[0])
-        if argv and argv[-1] in ("-p", "--print", "--prompt"):
-            if prompt_bytes_len > MAX_CLI_ARG_BYTES and is_agy:
-                argv.append("-")
-                return argv, prompt_text
-            elif prompt_bytes_len > MAX_CLI_ARG_BYTES:
-                sanitized_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=MAX_CLI_ARG_BYTES)
-                argv.append(sanitized_prompt)
-                return argv, ""
-            else:
-                argv.append(prompt_text)
-                return argv, ""
 
-        # Default Stdin path: pass full prompt text via stdin without hard truncation
+        if argv and argv[-1] in ("-p", "--print", "--prompt"):
+            if prompt_bytes_len > MAX_CLI_ARG_BYTES:
+                final_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=MAX_CLI_ARG_BYTES)
+            else:
+                final_prompt = prompt_text
+            argv.append(final_prompt)
+            return argv, ""
+
+        # Default Stdin path: pass full prompt text via stdin for non-print CLI commands
         return argv, prompt_text
 
 
