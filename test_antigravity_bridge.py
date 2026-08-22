@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sys
+import subprocess
 import threading
 import time
 import unittest
@@ -684,6 +685,36 @@ class TestAntigravityBridge(unittest.TestCase):
             for f in (cache_file, cfg_file):
                 if os.path.exists(f):
                     os.remove(f)
+
+    def test_parse_cmd_template_large_prompt_agy(self):
+        """Test that parse_cmd_template routes prompts > 64KB via stdin with '-' argument for agy."""
+        large_prompt = "A" * 70000
+        argv, stdin_input = antigravity_bridge.parse_cmd_template('agy -p "{prompt}"', large_prompt)
+        self.assertEqual(argv, ["agy", "-p", "-"])
+        self.assertEqual(stdin_input, large_prompt)
+
+    def test_parse_cmd_template_small_prompt_agy(self):
+        """Test that parse_cmd_template keeps small prompts in argv directly."""
+        small_prompt = "Hello AI"
+        argv, stdin_input = antigravity_bridge.parse_cmd_template('agy -p "{prompt}"', small_prompt)
+        self.assertEqual(argv, ["agy", "-p", "Hello AI"])
+        self.assertEqual(stdin_input, "")
+
+    def test_execute_cli_command_large_prompt_temp_streaming(self):
+        """Test that execute_cli_command streams large stdin inputs via temp file without error."""
+        large_prompt = "Sample line of prompt\n" * 4000  # ~88KB
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = ("CLI execution succeeded with full context", "")
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            result = antigravity_bridge.execute_cli_command('agy -p "{prompt}"', large_prompt)
+            self.assertEqual(result, "CLI execution succeeded with full context")
+            # Verify Popen received argv with '-' and a real file handle as stdin
+            mock_popen.assert_called_once()
+            call_args, call_kwargs = mock_popen.call_args
+            self.assertEqual(call_args[0], ["agy", "-p", "-"])
+            self.assertNotEqual(call_kwargs["stdin"], subprocess.PIPE)  # Should be file handle
 
 
 if __name__ == "__main__":

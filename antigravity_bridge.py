@@ -77,6 +77,7 @@ load_dotenv()
 logger = logging.getLogger("antigravity_bridge")
 
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
+MAX_CLI_ARG_BYTES = 65536          # 64KB safe CLI argument limit to prevent OS ARG_MAX overflows
 
 DEFAULT_PROFILE_TIMEOUT = 180.0      # Default execution timeout per profile attempt in seconds
 DEFAULT_TOTAL_TIMEOUT = 480.0       # Total execution timeout across all profile fallback attempts in seconds
@@ -2015,11 +2016,14 @@ def parse_cmd_template(
     prompt_text: str,
     model_name: Optional[str] = None,
 ) -> Tuple[List[str], str]:
-    """Parse command template into list of arguments for subprocess (shell=False)."""
+    """Parse command template into list of arguments for subprocess (shell=False).
+    For large prompts or commands supporting stdin, routes the prompt via stdin
+    rather than oversized command line arguments to avoid OS ARG_MAX limits.
+    """
     model_flags = resolve_model_flags(model_name)
+    prompt_bytes_len = len(prompt_text.encode("utf-8"))
 
     if "{prompt}" in cmd_template:
-        sanitized_prompt = sanitize_prompt_for_cli(prompt_text)
         placeholder = "__PROMPT_PLACEHOLDER__"
         temp = (
             cmd_template.replace('"{prompt}"', placeholder)
@@ -2029,19 +2033,39 @@ def parse_cmd_template(
         parts = shlex.split(temp)
         if model_flags:
             parts = [parts[0]] + model_flags + parts[1:]
-        argv = [sanitized_prompt if p == placeholder else p for p in parts]
-        return argv, ""
+
+        is_agy = parts and ("agy" in parts[0] or "antigravity" in parts[0])
+        if prompt_bytes_len > MAX_CLI_ARG_BYTES and is_agy:
+            # Replace placeholder with '-' so agy reads the full untruncated prompt from stdin
+            argv = ["-" if p == placeholder else p for p in parts]
+            return argv, prompt_text
+        elif prompt_bytes_len > MAX_CLI_ARG_BYTES:
+            # Non-agy command: fallback sanitize for OS safety
+            sanitized_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=MAX_CLI_ARG_BYTES)
+            argv = [sanitized_prompt if p == placeholder else p for p in parts]
+            return argv, ""
+        else:
+            argv = [prompt_text if p == placeholder else p for p in parts]
+            return argv, ""
     else:
         argv = shlex.split(cmd_template)
         if model_flags:
             argv = [argv[0]] + model_flags + argv[1:]
-        if argv and argv[-1] in ("-p", "--print"):
-            sanitized_prompt = sanitize_prompt_for_cli(prompt_text)
-            argv.append(sanitized_prompt)
-            return argv, ""
-        # Stdin path: pass prompt text with safety cap (max 80KB) to avoid memory/subprocess stalls
-        safe_stdin_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=80000)
-        return argv, safe_stdin_prompt
+        is_agy = argv and ("agy" in argv[0] or "antigravity" in argv[0])
+        if argv and argv[-1] in ("-p", "--print", "--prompt"):
+            if prompt_bytes_len > MAX_CLI_ARG_BYTES and is_agy:
+                argv.append("-")
+                return argv, prompt_text
+            elif prompt_bytes_len > MAX_CLI_ARG_BYTES:
+                sanitized_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=MAX_CLI_ARG_BYTES)
+                argv.append(sanitized_prompt)
+                return argv, ""
+            else:
+                argv.append(prompt_text)
+                return argv, ""
+
+        # Default Stdin path: pass full prompt text via stdin without hard truncation
+        return argv, prompt_text
 
 
 MAC_KEYCHAIN_LOCK = threading.Lock()
@@ -2232,28 +2256,61 @@ def execute_cli_command(
         else:
             logger.warning("[PROFILE SWAP] Profile directory not found for '%s' (checked %s)", profile, profile_dir)
 
-    proc = subprocess.Popen(
-        argv,
-        cwd=sandbox_dir,
-        shell=False,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
+    temp_prompt_file: Optional[str] = None
+    stdin_file_handle = None
     try:
-        stdout_data, stderr_data = proc.communicate(input=stdin_input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+        if stdin_input:
+            stdin_bytes = stdin_input.encode("utf-8")
+            if len(stdin_bytes) > MAX_CLI_ARG_BYTES:
+                temp_prompt_file = os.path.join(
+                    sandbox_dir,
+                    f".prompt_{os.getpid()}_{threading.get_ident()}_{int(time.time()*1000)}.tmp",
+                )
+                with open(temp_prompt_file, "w", encoding="utf-8") as f:
+                    f.write(stdin_input)
+                stdin_file_handle = open(temp_prompt_file, "r", encoding="utf-8")
+                proc_stdin = stdin_file_handle
+                comm_input = None
+            else:
+                proc_stdin = subprocess.PIPE
+                comm_input = stdin_input
+        else:
+            proc_stdin = subprocess.PIPE
+            comm_input = None
+
+        proc = subprocess.Popen(
+            argv,
+            cwd=sandbox_dir,
+            shell=False,
+            stdin=proc_stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
         try:
-            stdout_data, stderr_data = proc.communicate(timeout=2.0)
-        except Exception:
-            pass
-        logger.error("CLI execution timed out after %.1fs for profile '%s'", timeout, profile or "default")
-        raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
+            stdout_data, stderr_data = proc.communicate(input=comm_input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                stdout_data, stderr_data = proc.communicate(timeout=2.0)
+            except Exception:
+                pass
+            logger.error("CLI execution timed out after %.1fs for profile '%s'", timeout, profile or "default")
+            raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
+    finally:
+        if stdin_file_handle:
+            try:
+                stdin_file_handle.close()
+            except Exception:
+                pass
+        if temp_prompt_file and os.path.exists(temp_prompt_file):
+            try:
+                os.remove(temp_prompt_file)
+            except Exception:
+                pass
 
     if proc.returncode != 0:
         err_msg = stderr_data.strip() or stdout_data.strip() or f"Exit code {proc.returncode}"
