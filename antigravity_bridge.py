@@ -501,13 +501,13 @@ def parse_tool_calls_from_response(
     return output_text, None
 
 
-def compact_tool_output(content: Any, max_chars: int = 2000) -> Any:
+def compact_tool_output(content: Any, max_chars: int = 1500) -> Any:
     """Intelligently compact a tool output string or structured content to avoid context bloat."""
     if isinstance(content, str):
         if len(content) <= max_chars:
             return content
-        head_len = int(max_chars * 0.6)
-        tail_len = max_chars - head_len - 80
+        head_len = int(max_chars * 0.55)
+        tail_len = max(0, max_chars - head_len - 80)
         orig_len = len(content)
         head_part = content[:head_len]
         tail_part = content[-tail_len:] if tail_len > 0 else ""
@@ -531,85 +531,28 @@ def compact_tool_output(content: Any, max_chars: int = 2000) -> Any:
 
 def compact_messages(
     messages: List[Dict[str, Any]],
-    max_total_chars: int = 100000,
-    recent_keep_count: int = 6,
+    max_total_chars: Optional[int] = None,
+    recent_keep_count: int = 4,
 ) -> List[Dict[str, Any]]:
-    """Intelligently compact conversation messages to prevent context bloat and CLI argument overflow.
+    """Intelligently compact conversation messages to prevent context bloat, token exhaustion, and CLI timeouts.
 
-    Strategy:
-    1. Always preserve all 'system' messages intact (instructions, memory, tool definitions).
-    2. Preserve kickoff user goal (first non-system message) with soft tool compaction.
-    3. Preserve recent N messages (default: 6) so the immediate conversation flow is intact.
-    4. Aggressively compact older middle messages (especially large tool results and repetitive outputs).
-    5. If total length still exceeds budget, prune oldest intermediate conversation turns.
+    Multi-Tier Strategy:
+    1. System Messages: Preserved intact (up to 12K chars each).
+    2. Kickoff Goal: Preserve the original user goal up to 3,000 chars.
+    3. Recent Messages: Preserve last N messages (default: 4) with soft tool compaction (2,500 chars).
+    4. Older Middle Messages: Aggressively compact tool results (800 chars) and text (1,200 chars).
+    5. Progressive Slicing: If total chars exceed budget, progressively prune oldest intermediate turns.
+    6. Safety Cap: Proportionally scale down largest remaining turns if still exceeding budget.
     """
     if not messages:
         return []
 
-    system_msgs: List[Dict[str, Any]] = []
-    non_system_msgs: List[Dict[str, Any]] = []
+    if max_total_chars is None:
+        try:
+            max_total_chars = int(os.environ.get("ANTIGRAVITY_MAX_PROMPT_CHARS", "40000"))
+        except Exception:
+            max_total_chars = 40000
 
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") == "system":
-            system_msgs.append(msg)
-        else:
-            non_system_msgs.append(msg)
-
-    if not non_system_msgs:
-        return system_msgs
-
-    # Single or few messages: apply soft tool compaction (8000 chars per tool result)
-    if len(non_system_msgs) <= recent_keep_count:
-        compacted_non_sys: List[Dict[str, Any]] = []
-        for m in non_system_msgs:
-            m_copy = dict(m)
-            role = m_copy.get("role")
-            if role == "tool" or m_copy.get("tool_call_id"):
-                m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=8000)
-            elif isinstance(m_copy.get("content"), list):
-                m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=8000)
-            compacted_non_sys.append(m_copy)
-        return system_msgs + compacted_non_sys
-
-    # We have older middle messages: non_system_msgs[0] is kickoff, non_system_msgs[-recent_keep_count:] is recent
-    first_msg = dict(non_system_msgs[0])
-    if first_msg.get("role") == "tool":
-        first_msg["content"] = compact_tool_output(first_msg.get("content", ""), max_chars=4000)
-    elif isinstance(first_msg.get("content"), list):
-        first_msg["content"] = compact_tool_output(first_msg.get("content"), max_chars=4000)
-
-    middle_msgs = non_system_msgs[1:-recent_keep_count]
-    recent_msgs = non_system_msgs[-recent_keep_count:]
-
-    # Compact middle messages aggressively
-    compacted_middle: List[Dict[str, Any]] = []
-    for m in middle_msgs:
-        m_copy = dict(m)
-        role = m_copy.get("role")
-        if role == "tool" or m_copy.get("tool_call_id"):
-            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=1200)
-        elif isinstance(m_copy.get("content"), str):
-            c_str = m_copy["content"]
-            if len(c_str) > 3000:
-                m_copy["content"] = compact_tool_output(c_str, max_chars=2000)
-        elif isinstance(m_copy.get("content"), list):
-            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=1200)
-        compacted_middle.append(m_copy)
-
-    # Compact recent messages softly
-    compacted_recent: List[Dict[str, Any]] = []
-    for m in recent_msgs:
-        m_copy = dict(m)
-        role = m_copy.get("role")
-        if role == "tool" or m_copy.get("tool_call_id"):
-            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=8000)
-        elif isinstance(m_copy.get("content"), list):
-            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=8000)
-        compacted_recent.append(m_copy)
-
-    # Check total estimated length
     def estimate_chars(msg_list: List[Dict[str, Any]]) -> int:
         total = 0
         for m in msg_list:
@@ -624,16 +567,113 @@ def compact_messages(
                 total += len(str(c))
         return total
 
+    system_msgs: List[Dict[str, Any]] = []
+    non_system_msgs: List[Dict[str, Any]] = []
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "system":
+            sys_copy = dict(msg)
+            c_sys = sys_copy.get("content", "")
+            if isinstance(c_sys, str) and len(c_sys) > 12000:
+                sys_copy["content"] = compact_tool_output(c_sys, max_chars=12000)
+            system_msgs.append(sys_copy)
+        else:
+            non_system_msgs.append(msg)
+
+    if not non_system_msgs:
+        return system_msgs
+
+    # Single or few messages: apply individual message compaction
+    if len(non_system_msgs) <= recent_keep_count:
+        compacted_non_sys: List[Dict[str, Any]] = []
+        for m in non_system_msgs:
+            m_copy = dict(m)
+            role = m_copy.get("role")
+            if role == "tool" or m_copy.get("tool_call_id"):
+                m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=2500)
+            elif isinstance(m_copy.get("content"), list):
+                m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=2500)
+            elif isinstance(m_copy.get("content"), str) and len(m_copy["content"]) > 4000:
+                m_copy["content"] = compact_tool_output(m_copy["content"], max_chars=3500)
+            compacted_non_sys.append(m_copy)
+
+        assembled = system_msgs + compacted_non_sys
+        if estimate_chars(assembled) <= max_total_chars:
+            return assembled
+
+        # If still exceeding, scale down largest content
+        for m in compacted_non_sys:
+            c = m.get("content", "")
+            if isinstance(c, str) and len(c) > 2000:
+                m["content"] = compact_tool_output(c, max_chars=1800)
+        return system_msgs + compacted_non_sys
+
+    # We have older middle messages: non_system_msgs[0] is kickoff, non_system_msgs[-recent_keep_count:] is recent
+    first_msg = dict(non_system_msgs[0])
+    if first_msg.get("role") == "tool":
+        first_msg["content"] = compact_tool_output(first_msg.get("content", ""), max_chars=1500)
+    elif isinstance(first_msg.get("content"), list):
+        first_msg["content"] = compact_tool_output(first_msg.get("content"), max_chars=1500)
+    elif isinstance(first_msg.get("content"), str) and len(first_msg["content"]) > 3000:
+        first_msg["content"] = compact_tool_output(first_msg["content"], max_chars=2500)
+
+    middle_msgs = non_system_msgs[1:-recent_keep_count]
+    recent_msgs = non_system_msgs[-recent_keep_count:]
+
+    # Compact middle messages aggressively (800 chars for tool, 1200 chars for text)
+    compacted_middle: List[Dict[str, Any]] = []
+    for m in middle_msgs:
+        m_copy = dict(m)
+        role = m_copy.get("role")
+        if role == "tool" or m_copy.get("tool_call_id"):
+            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=800)
+        elif isinstance(m_copy.get("content"), str):
+            c_str = m_copy["content"]
+            if len(c_str) > 1500:
+                m_copy["content"] = compact_tool_output(c_str, max_chars=1200)
+        elif isinstance(m_copy.get("content"), list):
+            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=800)
+        compacted_middle.append(m_copy)
+
+    # Compact recent messages softly (2500 chars for tool, 3500 chars for text)
+    compacted_recent: List[Dict[str, Any]] = []
+    for m in recent_msgs:
+        m_copy = dict(m)
+        role = m_copy.get("role")
+        if role == "tool" or m_copy.get("tool_call_id"):
+            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=2500)
+        elif isinstance(m_copy.get("content"), list):
+            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=2500)
+        elif isinstance(m_copy.get("content"), str) and len(m_copy["content"]) > 4000:
+            m_copy["content"] = compact_tool_output(m_copy["content"], max_chars=3500)
+        compacted_recent.append(m_copy)
+
     assembled = system_msgs + [first_msg] + compacted_middle + compacted_recent
     total_len = estimate_chars(assembled)
 
     # If still exceeding max_total_chars, prune oldest middle messages progressively
-    while total_len > max_total_chars and len(compacted_middle) > 1:
-        compacted_middle = compacted_middle[2:]
+    pruned_count = 0
+    while total_len > max_total_chars and len(compacted_middle) > 0:
+        step_prune = min(2, len(compacted_middle))
+        compacted_middle = compacted_middle[step_prune:]
+        pruned_count += step_prune
         assembled = system_msgs + [first_msg] + [
-            {"role": "user", "content": "[... older conversation turns omitted to stay within context limits ...]"}
+            {"role": "user", "content": f"[... {pruned_count} older conversation turns compacted to optimize reasoning latency ...]"}
         ] + compacted_middle + compacted_recent
         total_len = estimate_chars(assembled)
+
+    # Final safety pass: if still exceeding max_total_chars, scale down recent messages
+    if total_len > max_total_chars:
+        for m in compacted_recent:
+            c = m.get("content", "")
+            if isinstance(c, str) and len(c) > 1500:
+                m["content"] = compact_tool_output(c, max_chars=1200)
+        assembled = system_msgs + [first_msg] + (
+            [{"role": "user", "content": f"[... {pruned_count} older conversation turns compacted to optimize reasoning latency ...]"}]
+            if pruned_count > 0 else []
+        ) + compacted_middle + compacted_recent
 
     return assembled
 
@@ -642,9 +682,15 @@ def format_messages_to_prompt(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[Any] = None,
-    max_prompt_chars: int = 100000,
+    max_prompt_chars: Optional[int] = None,
 ) -> str:
     """Format OpenAI/Anthropic messages list into a prompt string for CLI tools with auto-compaction."""
+    if max_prompt_chars is None:
+        try:
+            max_prompt_chars = int(os.environ.get("ANTIGRAVITY_MAX_PROMPT_CHARS", "40000"))
+        except Exception:
+            max_prompt_chars = 40000
+
     parts: List[str] = []
 
     # Prepend tool descriptions and instructions if tools are provided
@@ -1872,16 +1918,22 @@ def probe_profile(
         return False, str(exc), ""
 
 
-def sanitize_prompt_for_cli(prompt_text: str, max_bytes: int = 115000) -> str:
-    """Ensure prompt string fits within OS single CLI argument limits (115KB) with clean boundary-aware truncation."""
+def sanitize_prompt_for_cli(prompt_text: str, max_bytes: Optional[int] = None) -> str:
+    """Ensure prompt string fits within fast, responsive CLI execution limits (default 45KB) with clean boundary-aware truncation."""
+    if max_bytes is None:
+        try:
+            max_bytes = int(os.environ.get("ANTIGRAVITY_MAX_PROMPT_BYTES", "45000"))
+        except Exception:
+            max_bytes = 45000
+
     encoded = prompt_text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return prompt_text
 
     logger.warning("Prompt size (%d bytes) exceeds limit (%d bytes). Applying boundary-aware truncation...", len(encoded), max_bytes)
 
-    head_size = max_bytes // 3
-    tail_size = (max_bytes * 2) // 3 - 200
+    head_size = int(max_bytes * 0.35)
+    tail_size = max(0, max_bytes - head_size - 200)
 
     head_str = encoded[:head_size].decode("utf-8", errors="ignore")
     tail_str = encoded[-tail_size:].decode("utf-8", errors="ignore")
@@ -1897,7 +1949,7 @@ def sanitize_prompt_for_cli(prompt_text: str, max_bytes: int = 115000) -> str:
     elif "\n" in tail_str:
         tail_str = tail_str.split("\n", 1)[1]
 
-    return f"{head_str}\n\n... [Middle context truncated to fit within CLI buffer limits] ...\n\n{tail_str}"
+    return f"{head_str}\n\n... [Middle context truncated: prompt sliced to {max_bytes} bytes for fast model reasoning] ...\n\n{tail_str}"
 
 
 def resolve_model_flags(model_name: Optional[str]) -> List[str]:
@@ -1987,8 +2039,8 @@ def parse_cmd_template(
             sanitized_prompt = sanitize_prompt_for_cli(prompt_text)
             argv.append(sanitized_prompt)
             return argv, ""
-        # Stdin path: pass prompt text with safety cap (max 250KB) to avoid memory/subprocess stalls
-        safe_stdin_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=250000)
+        # Stdin path: pass prompt text with safety cap (max 80KB) to avoid memory/subprocess stalls
+        safe_stdin_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=80000)
         return argv, safe_stdin_prompt
 
 
