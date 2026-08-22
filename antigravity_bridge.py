@@ -2317,13 +2317,16 @@ def execute_cli_with_fallback(
         attempt_timeout = max(1.0, min(timeout, remaining_budget))
 
         if is_cooldown:
-            logger.info(
-                "Attempting fallback profile in cooldown: %s (model=%s, in_flight=%d, timeout=%.1fs)",
+            logger.warning(
+                "Skipping fallback profile in cooldown: %s (model=%s, in_flight=%d, timeout=%.1fs)",
                 profile_key,
                 model_name or "default",
                 in_flight_count,
                 attempt_timeout,
             )
+            errors.append(f"Profile '{profile_key}' is in cooldown (exhausted). Skipping.")
+            mgr.release_profile(profile)
+            continue
         else:
             logger.info(
                 "Attempting CLI execution with profile: %s (model=%s, in_flight=%d, timeout=%.1fs)",
