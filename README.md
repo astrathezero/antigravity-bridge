@@ -108,6 +108,10 @@ Antigravity Bridge acts as a unified HTTP gateway between your applications (Her
 - 🚀 **Large Prompt Support & Adaptive Compaction**:
   - Direct CLI argument delivery supporting massive prompts up to **350KB (~85,000 words)** natively without hitting OS `ARG_MAX` buffer limits.
   - Clean boundary-aware middle truncation for ultra-long context sessions (>350KB) to keep model reasoning responsive.
+- ⏱️ **Dynamic Execution Timeout & Large Prompt Auto-Scaling**:
+  - Request custom execution timeouts up to **2 hours** (e.g. 20–30 minutes for massive reasoning prompts) via HTTP headers (`X-Profile-Timeout: 30m`, `X-Execution-Timeout: 20m`, `X-Timeout: 1800`, `Prefer: wait=1800`), JSON payload (`"profile_timeout": "30m"`), or query parameters (`?timeout=30m`).
+  - Auto-scales profile timeout for prompts larger than 15KB (up to 30 minutes) if no explicit timeout is provided.
+  - Informs clients of active budgets via response headers `X-Antigravity-Profile-Timeout` and `X-Antigravity-Total-Timeout`.
 - 🔒 **Persistent Profile State**: Disabled profiles via `profile disable <name>` are saved to configuration (`~/.config/antigravity/bridge_config.json`) and persist across service restarts.
 - 🔄 **Automatic OAuth Refresh Daemon**: Background thread refreshes Google access tokens every 55 minutes to prevent session expiration.
 - 🌐 **SOCKS5 / Cloudflare WARP Proxy Auto-Detection**: Auto-detects local WARP proxies (ports `40000`, `10808`, `7890`, etc.) for uninterrupted outbound connectivity.

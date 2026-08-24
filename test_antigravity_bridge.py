@@ -711,6 +711,101 @@ class TestAntigravityBridge(unittest.TestCase):
         self.assertIn("[System]", argv[2])
 
 
+    def test_parse_timeout_value(self):
+        """Test parse_timeout_value across numeric, string units, clock, and ms formats."""
+        self.assertEqual(antigravity_bridge.parse_timeout_value(1800), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value(1800.5), 1800.5)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("1800"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("1800s"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("20m"), 1200.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("30m"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("30 min"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("30 mins"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("30 minutes"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("0.5h"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("1h"), 3600.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("20:00"), 1200.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("30:00"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("1800000ms"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value(1800000), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("wait=1800"), 1800.0)
+        self.assertIsNone(antigravity_bridge.parse_timeout_value(None))
+        self.assertIsNone(antigravity_bridge.parse_timeout_value(""))
+        self.assertIsNone(antigravity_bridge.parse_timeout_value(-10))
+
+    def test_extract_request_timeouts_headers(self):
+        """Test extraction of custom profile and total timeouts from HTTP request headers."""
+        handler = MagicMock()
+        handler.server = MagicMock()
+        handler.server.profile_timeout = 180.0
+        handler.server.total_timeout = 480.0
+        handler.path = "/v1/chat/completions"
+
+        # 1. Profile header (30m)
+        handler.headers = {"X-Profile-Timeout": "30m"}
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {})
+        self.assertEqual(prof, 1800.0)
+        self.assertEqual(total, 4500.0)
+
+        # 2. Execution header (20m) & Total timeout header (60m)
+        handler.headers = {"X-Execution-Timeout": "20m", "X-Total-Timeout": "60m"}
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {})
+        self.assertEqual(prof, 1200.0)
+        self.assertEqual(total, 3600.0)
+
+        # 3. Prefer wait header (15m)
+        handler.headers = {"Prefer": "wait=900"}
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {})
+        self.assertEqual(prof, 900.0)
+
+    def test_extract_request_timeouts_query_and_body(self):
+        """Test extraction of custom timeouts from URL query parameters and JSON body."""
+        handler = MagicMock()
+        handler.server = MagicMock()
+        handler.server.profile_timeout = 180.0
+        handler.server.total_timeout = 480.0
+        handler.headers = {}
+
+        # 1. URL Query Parameter (?timeout=25m)
+        handler.path = "/v1/chat/completions?timeout=25m"
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {})
+        self.assertEqual(prof, 1500.0)
+
+        # 2. JSON Body top-level
+        handler.path = "/v1/chat/completions"
+        req_json = {"profile_timeout": "30m"}
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, req_json)
+        self.assertEqual(prof, 1800.0)
+
+        # 3. JSON Body inside extra_body
+        req_json = {"extra_body": {"profile_timeout": 1200}}
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, req_json)
+        self.assertEqual(prof, 1200.0)
+
+    def test_extract_request_timeouts_auto_scaling_large_prompt(self):
+        """Test that large prompts automatically scale up profile timeout if none explicitly requested."""
+        handler = MagicMock()
+        handler.server = MagicMock()
+        handler.server.profile_timeout = 180.0
+        handler.server.total_timeout = 480.0
+        handler.headers = {}
+        handler.path = "/v1/chat/completions"
+
+        # Small prompt (<= 15k chars)
+        prof_small, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=5000)
+        self.assertEqual(prof_small, 180.0)
+
+        # Large prompt (55k chars)
+        prof_large, total_large = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=55000)
+        self.assertGreater(prof_large, 180.0)
+        self.assertEqual(prof_large, 180.0 + (40000 / 10000.0) * 45.0)  # 180 + 180 = 360.0s (6 min)
+        self.assertGreaterEqual(total_large, prof_large * 2.5)
+
+        # Massive prompt (500k chars) -> capped at 1800s (30 min)
+        prof_massive, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=500000)
+        self.assertEqual(prof_massive, 1800.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

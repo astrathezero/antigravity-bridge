@@ -108,6 +108,10 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
 - 🚀 **รองรับ Prompt ขนาดใหญ่ (Large Prompt) & Adaptive Compaction**:
   - ส่งข้อความ Prompt ขนาดใหญ่เข้าสู่ CLI Argument ได้สูงถึง **350KB (~85,000 คำ)** โดยตรง ไม่ติดข้อจำกัด `ARG_MAX` ของระบบปฏิบัติการ
   - มีระบบบีบอัดประวัติและตัดข้อความตรงกลางอย่างชาญฉลาดเมื่อบริบทการสนทนายาวเกิน 350KB เพื่อให้การประมวลผลยังคงรวดเร็ว
+- ⏱️ **ระบบ Dynamic Timeout ตามคำขอ & ปรับขนาดเวลาอัตโนมัติ**:
+  - รองรับการขอ Execution Timeout ได้สูงถึง **2 ชั่วโมง** (เช่น 20–30 นาทีสำหรับงาน Prompt ขนาดใหญ่ที่ต้องคิดลึก) ผ่าน HTTP Headers (`X-Profile-Timeout: 30m`, `X-Execution-Timeout: 20m`, `X-Timeout: 1800`, `Prefer: wait=1800`), JSON Request Body (`"profile_timeout": "30m"`) หรือ Query Parameter (`?timeout=30m`)
+  - คำนวณขยายเวลา Timeout ต่อโปรไฟล์ให้อัตโนมัติเมื่อตรวจพบ Prompt ขนาดยาว (>15KB) สูงสุด 30 นาที หากไม่มีการระบุเจาะจง
+  - ส่งค่า Timeout ที่ใช้วินิจฉัยจริงกลับทาง Response Header `X-Antigravity-Profile-Timeout` และ `X-Antigravity-Total-Timeout`
 - 🔒 **บันทึกสถานะโปรไฟล์ถาวร (Persistent Profile State)**: คำสั่ง `profile disable <name>` จะบันทึกลงไฟล์การตั้งค่า (`~/.config/antigravity/bridge_config.json`) และคงสถานะปิดไว้แม้จะ Restart เซิร์ฟเวอร์
 - 🔄 **ระบบรีเฟรช Token อัตโนมัติในเบื้องหลัง**: Background Daemon ทำงานทุก 55 นาทีเพื่อต่ออายุ Google OAuth Access Token ป้องกัน Session หมดอายุ
 - 🌐 **ตรวจจับ SOCKS5 / Cloudflare WARP Proxy อัตโนมัติ**: ตรวจหาพอร์ต Local Proxy (เช่น `40000`, `10808`, `7890`) อัตโนมัติเพื่อเชื่อมต่ออินเทอร์เน็ตได้ราบรื่น
