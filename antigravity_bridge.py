@@ -181,8 +181,10 @@ def parse_timeout_value(val: Any) -> Optional[float]:
         s = val.strip().lower()
         if not s:
             return None
-        # Handle RFC 7240 Prefer header format (e.g. wait=1800)
-        s = re.sub(r"^wait\s*=\s*", "", s)
+        # Strip comment/wrapper symbols first: <!-- ... --> or [ ... ]
+        s = re.sub(r"^(?:<!--|\[|\{|\(|#|\s|<)+|(?:-->|\]|\}|\)|\s|>)+$", "", s).strip()
+        # Strip prefix keywords: timeout=, wait=, profile_timeout:, etc.
+        s = re.sub(r"^(?:antigravity[:_])?(?:wait|timeout|profile_timeout|execution_timeout|request_timeout)\s*[=:]\s*", "", s).strip()
         try:
             f_val = float(s)
             if f_val > 86400.0:  # Likely in milliseconds
@@ -218,6 +220,90 @@ def parse_timeout_value(val: Any) -> Optional[float]:
                     return (num * 3600.0) if num > 0 else None
             except ValueError:
                 pass
+    return None
+
+
+def extract_model_and_timeout(model_name: Optional[str]) -> Tuple[Optional[str], Optional[float]]:
+    """Extract clean model name and any embedded timeout specification.
+
+    Supports formats:
+    - 'gemini-3.7-flash:timeout=30m' -> ('gemini-3.7-flash', 1800.0)
+    - 'gemini-3.7-flash:30m' -> ('gemini-3.7-flash', 1800.0)
+    - 'gemini-3.7-flash?timeout=1800' -> ('gemini-3.7-flash', 1800.0)
+    - 'gemini-3.7-flash#timeout=20m' -> ('gemini-3.7-flash', 1200.0)
+    - 'gemini-3.7-flash/timeout=25m' -> ('gemini-3.7-flash', 1500.0)
+    - 'gemini-3.7-flash' -> ('gemini-3.7-flash', None)
+    """
+    if not model_name:
+        return model_name, None
+
+    raw = str(model_name).strip()
+    timeout_val = None
+    clean_model = raw
+
+    # 1. Query parameter style: model?timeout=30m or model?profile_timeout=1800
+    if "?" in raw:
+        base, qs_part = raw.split("?", 1)
+        clean_model = base.strip()
+        try:
+            qs = urllib.parse.parse_qs(qs_part)
+            for k in ("timeout", "profile_timeout", "execution_timeout", "request_timeout", "timeout_seconds"):
+                if k in qs and qs[k]:
+                    timeout_val = parse_timeout_value(qs[k][0])
+                    if timeout_val is not None:
+                        break
+        except Exception:
+            pass
+
+    # 2. Fragment style: model#timeout=30m
+    elif "#" in raw:
+        base, frag = raw.split("#", 1)
+        clean_model = base.strip()
+        timeout_val = parse_timeout_value(frag)
+
+    # 3. Slash style: model/timeout=30m or model/profile_timeout=30m
+    elif "/timeout=" in raw.lower() or "/profile_timeout=" in raw.lower():
+        parts = re.split(r"/(?:timeout|profile_timeout)=", raw, flags=re.IGNORECASE, maxsplit=1)
+        if len(parts) == 2:
+            clean_model = parts[0].strip()
+            timeout_val = parse_timeout_value(parts[1].strip())
+
+    # 4. Colon style: model:timeout=30m or model:30m or model:1800s
+    elif ":" in raw:
+        parts = raw.rsplit(":", 1)
+        candidate = parts[1].strip()
+        parsed = parse_timeout_value(candidate)
+        if parsed is not None:
+            clean_model = parts[0].strip()
+            timeout_val = parsed
+
+    return clean_model, timeout_val
+
+
+def extract_timeout_from_prompt_text(prompt_text: str) -> Optional[float]:
+    """Extract explicit timeout directive from prompt text or system instructions if present.
+
+    Supports directives:
+    - [antigravity:timeout=30m] or [antigravity_timeout=1800]
+    - [timeout: 30m] or [profile_timeout=30m]
+    - <!-- timeout: 30m --> or <!-- profile_timeout: 1800s -->
+    """
+    if not prompt_text:
+        return None
+
+    # Check first 4000 and last 2000 chars of prompt for speed
+    search_sample = prompt_text[:4000] + "\n" + prompt_text[-2000:] if len(prompt_text) > 6000 else prompt_text
+
+    patterns = [
+        r"\[(?:antigravity[:_])?(?:profile_)?timeout\s*[:=]\s*([0-9a-zA-Z.:\s]+)\]",
+        r"<!--\s*(?:antigravity[:_])?(?:profile_)?timeout\s*[:=]\s*([0-9a-zA-Z.:\s]+)\s*-->",
+    ]
+    for pat in patterns:
+        m = re.search(pat, search_sample, re.IGNORECASE)
+        if m:
+            val = parse_timeout_value(m.group(1).strip())
+            if val is not None and val > 0:
+                return val
     return None
 
 
@@ -2014,7 +2100,8 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
     if not model_name:
         return flags
 
-    model_clean = model_name.strip()
+    clean_m, _ = extract_model_and_timeout(model_name)
+    model_clean = (clean_m or model_name).strip()
     model_lower = model_clean.lower()
 
     if model_lower in SUPPORTED_MODELS:
@@ -2752,7 +2839,13 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key")
         self.end_headers()
 
-    def _extract_request_timeouts(self, req_json: Dict[str, Any], prompt_len: int = 0) -> Tuple[float, float]:
+    def _extract_request_timeouts(
+        self,
+        req_json: Dict[str, Any],
+        prompt_len: int = 0,
+        raw_prompt_text: str = "",
+        model_timeout: Optional[float] = None,
+    ) -> Tuple[float, float]:
         """Extract and calculate effective profile timeout and total timeout budget for this request."""
         server_prof_timeout = getattr(self.server, "profile_timeout", DEFAULT_PROFILE_TIMEOUT)
         server_total_timeout = getattr(self.server, "total_timeout", DEFAULT_TOTAL_TIMEOUT)
@@ -2760,11 +2853,14 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
         # 1. Profile Execution Timeout (per attempt)
         req_prof_timeout = None
 
-        # Check HTTP Headers
+        # Check HTTP Headers (priority 1)
         for h_key in (
             "X-Profile-Timeout", "X-Execution-Timeout", "X-Timeout",
             "X-Request-Timeout", "Timeout", "Request-Timeout",
             "X-Agy-Timeout", "X-Antigravity-Timeout",
+            "OpenAI-Timeout", "X-Server-Timeout", "X-Gateway-Timeout",
+            "X-Client-Timeout", "X-Model-Timeout", "X-Timeout-Seconds",
+            "Timeout-Seconds", "Max-Execution-Time",
         ):
             h_val = self.headers.get(h_key)
             if h_val:
@@ -2780,12 +2876,16 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 if parsed is not None and parsed > 0:
                     req_prof_timeout = parsed
 
-        # Check URL Query Parameters
+        # Check URL Query Parameters (priority 2)
         if req_prof_timeout is None and hasattr(self, "path") and self.path:
             try:
                 parsed_url = urllib.parse.urlparse(self.path)
                 qs = urllib.parse.parse_qs(parsed_url.query)
-                for q_key in ("profile_timeout", "execution_timeout", "timeout", "request_timeout", "timeout_seconds"):
+                for q_key in (
+                    "profile_timeout", "execution_timeout", "timeout", "request_timeout",
+                    "timeout_seconds", "timeout_sec", "max_execution_time", "max_timeout",
+                    "http_timeout", "read_timeout", "client_timeout",
+                ):
                     if q_key in qs and qs[q_key]:
                         parsed = parse_timeout_value(qs[q_key][0])
                         if parsed is not None and parsed > 0:
@@ -2794,11 +2894,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        # Check Request Body
+        # Check Request Body (priority 3)
         if req_prof_timeout is None and isinstance(req_json, dict):
             for b_key in (
                 "profile_timeout", "execution_timeout", "timeout", "request_timeout",
-                "timeout_seconds", "timeout_sec", "max_execution_time",
+                "timeout_seconds", "timeout_sec", "max_execution_time", "max_timeout",
+                "http_timeout", "read_timeout", "client_timeout", "timeout_ms",
             ):
                 b_val = req_json.get(b_key)
                 if b_val is not None:
@@ -2806,7 +2907,11 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     if parsed is not None and parsed > 0:
                         req_prof_timeout = parsed
                         break
-                for container_key in ("extra_body", "options", "metadata", "params", "request_options", "config", "settings"):
+                for container_key in (
+                    "extra_body", "options", "metadata", "params", "request_options",
+                    "config", "settings", "custom_body", "custom_params", "model_kwargs",
+                    "kwargs", "payload", "properties", "generation_config", "system_config",
+                ):
                     container = req_json.get(container_key)
                     if isinstance(container, dict):
                         b_val = container.get(b_key)
@@ -2820,11 +2925,24 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 if req_prof_timeout is not None:
                     break
 
+        # Check Model Embedded Timeout (priority 4)
+        if req_prof_timeout is None and model_timeout is not None and model_timeout > 0:
+            req_prof_timeout = model_timeout
+
+        # Check In-Prompt Directives (priority 5)
+        if req_prof_timeout is None and raw_prompt_text:
+            in_prompt = extract_timeout_from_prompt_text(raw_prompt_text)
+            if in_prompt is not None and in_prompt > 0:
+                req_prof_timeout = in_prompt
+
         # 2. Total Fallback Timeout Budget (across all fallback attempts)
         req_total_timeout = None
 
         # Check HTTP Headers for Total Timeout
-        for h_key in ("X-Total-Timeout", "X-Fallback-Timeout", "X-Total-Fallback-Timeout"):
+        for h_key in (
+            "X-Total-Timeout", "X-Fallback-Timeout", "X-Total-Fallback-Timeout",
+            "X-Max-Total-Timeout", "Total-Timeout",
+        ):
             h_val = self.headers.get(h_key)
             if h_val:
                 parsed = parse_timeout_value(h_val)
@@ -2837,7 +2955,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             try:
                 parsed_url = urllib.parse.urlparse(self.path)
                 qs = urllib.parse.parse_qs(parsed_url.query)
-                for q_key in ("total_timeout", "fallback_timeout", "total_fallback_timeout"):
+                for q_key in ("total_timeout", "fallback_timeout", "total_fallback_timeout", "max_total_timeout"):
                     if q_key in qs and qs[q_key]:
                         parsed = parse_timeout_value(qs[q_key][0])
                         if parsed is not None and parsed > 0:
@@ -2848,14 +2966,18 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
         # Check Request Body for Total Timeout
         if req_total_timeout is None and isinstance(req_json, dict):
-            for b_key in ("total_timeout", "fallback_timeout", "total_fallback_timeout"):
+            for b_key in ("total_timeout", "fallback_timeout", "total_fallback_timeout", "max_total_timeout"):
                 b_val = req_json.get(b_key)
                 if b_val is not None:
                     parsed = parse_timeout_value(b_val)
                     if parsed is not None and parsed > 0:
                         req_total_timeout = parsed
                         break
-                for container_key in ("extra_body", "options", "metadata", "params", "request_options", "config", "settings"):
+                for container_key in (
+                    "extra_body", "options", "metadata", "params", "request_options",
+                    "config", "settings", "custom_body", "custom_params", "model_kwargs",
+                    "kwargs", "payload", "properties", "generation_config", "system_config",
+                ):
                     container = req_json.get(container_key)
                     if isinstance(container, dict):
                         b_val = container.get(b_key)
@@ -2873,9 +2995,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
         if req_prof_timeout is not None:
             effective_prof_timeout = max(1.0, min(req_prof_timeout, 7200.0))  # Up to 2 hours if requested
         else:
-            if prompt_len > 15000:
-                scaled = server_prof_timeout + ((prompt_len - 15000) / 10000.0) * 45.0
-                effective_prof_timeout = max(server_prof_timeout, min(scaled, 1800.0))  # Auto-scales up to 30 min (1800s)
+            if prompt_len > 10000:
+                scaled = server_prof_timeout + ((prompt_len - 10000) / 10000.0) * 75.0
+                effective_prof_timeout = max(server_prof_timeout, min(scaled, 3600.0))  # Auto-scales up to 60 min (3600s)
             else:
                 effective_prof_timeout = server_prof_timeout
 
@@ -2884,7 +3006,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
         else:
             effective_total_timeout = max(server_total_timeout, effective_prof_timeout * 2.5)
 
-        effective_total_timeout = max(1.0, min(effective_total_timeout, 14400.0))  # Up to 4 hours
+        effective_total_timeout = max(1.0, min(effective_total_timeout, 18000.0))  # Up to 5 hours
 
         return effective_prof_timeout, effective_total_timeout
 
@@ -3139,12 +3261,18 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         status_code=400,
                     )
                     return
-                model_name = req_json.get("model") or "gemini-3.1-flash-image"
-                img_timeout, _ = self._extract_request_timeouts(req_json, prompt_len=len(prompt))
+                raw_img_model = req_json.get("model") or "gemini-3.1-flash-image"
+                model_name, img_model_timeout = extract_model_and_timeout(raw_img_model)
+                img_timeout, _ = self._extract_request_timeouts(
+                    req_json,
+                    prompt_len=len(prompt),
+                    raw_prompt_text=prompt,
+                    model_timeout=img_model_timeout,
+                )
                 try:
                     markdown_img, b64_raw = generate_image_via_router(
                         prompt=prompt,
-                        model_name=model_name,
+                        model_name=model_name or "gemini-3.1-flash-image",
                         router_url=router_url,
                         router_key=router_key,
                         timeout=int(img_timeout),
@@ -3191,7 +3319,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 if sys_str.strip():
                     messages = [{"role": "system", "content": sys_str.strip()}] + messages
 
-            model = req_json.get("model") or "antigravity"
+            raw_model = req_json.get("model") or "antigravity"
+            clean_model, model_timeout = extract_model_and_timeout(raw_model)
+            model = clean_model or "antigravity"
             stream = req_json.get("stream", False)
 
             # Handle Image Generation Models via standard /v1/chat/completions or /v1/messages
@@ -3209,7 +3339,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 if not prompt_text:
                     prompt_text = format_messages_to_prompt(messages)
 
-                img_timeout, _ = self._extract_request_timeouts(req_json, prompt_len=len(prompt_text))
+                img_timeout, _ = self._extract_request_timeouts(
+                    req_json,
+                    prompt_len=len(prompt_text),
+                    raw_prompt_text=prompt_text,
+                    model_timeout=model_timeout,
+                )
                 try:
                     markdown_img, b64_raw = generate_image_via_router(
                         prompt=prompt_text,
@@ -3341,7 +3476,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             configured_profiles = getattr(self.server, "profiles", None)
             profile_manager = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
 
-            prof_timeout, total_timeout = self._extract_request_timeouts(req_json, prompt_len=len(prompt_text))
+            prof_timeout, total_timeout = self._extract_request_timeouts(
+                req_json,
+                prompt_len=len(prompt_text),
+                raw_prompt_text=prompt_text,
+                model_timeout=model_timeout,
+            )
             logger.info(
                 "Processing request (model=%s, prompt_len=%d, profile_timeout=%.1fs, total_timeout=%.1fs)",
                 model,

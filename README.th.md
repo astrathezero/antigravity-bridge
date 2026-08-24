@@ -109,8 +109,13 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
   - ส่งข้อความ Prompt ขนาดใหญ่เข้าสู่ CLI Argument ได้สูงถึง **350KB (~85,000 คำ)** โดยตรง ไม่ติดข้อจำกัด `ARG_MAX` ของระบบปฏิบัติการ
   - มีระบบบีบอัดประวัติและตัดข้อความตรงกลางอย่างชาญฉลาดเมื่อบริบทการสนทนายาวเกิน 350KB เพื่อให้การประมวลผลยังคงรวดเร็ว
 - ⏱️ **ระบบ Dynamic Timeout ตามคำขอ & ปรับขนาดเวลาอัตโนมัติ**:
-  - รองรับการขอ Execution Timeout ได้สูงถึง **2 ชั่วโมง** (เช่น 20–30 นาทีสำหรับงาน Prompt ขนาดใหญ่ที่ต้องคิดลึก) ผ่าน HTTP Headers (`X-Profile-Timeout: 30m`, `X-Execution-Timeout: 20m`, `X-Timeout: 1800`, `Prefer: wait=1800`), JSON Request Body (`"profile_timeout": "30m"`) หรือ Query Parameter (`?timeout=30m`)
-  - คำนวณขยายเวลา Timeout ต่อโปรไฟล์ให้อัตโนมัติเมื่อตรวจพบ Prompt ขนาดยาว (>15KB) สูงสุด 30 นาที หากไม่มีการระบุเจาะจง
+  - รองรับการขอ Execution Timeout ได้สูงถึง **2 ชั่วโมง** (เช่น 20–30 นาทีสำหรับงาน Prompt ขนาดใหญ่ที่ต้องคิดลึก) ผ่านหลายช่องทาง:
+    - **HTTP Headers**: `X-Profile-Timeout: 30m`, `X-Execution-Timeout: 20m`, `OpenAI-Timeout: 1800`, `X-Timeout: 1800`, `Prefer: wait=1800`
+    - **JSON Request Body**: `"profile_timeout": "30m"`, `"timeout": 1800`, `"extra_body": {"profile_timeout": "30m"}`
+    - **URL Query Parameters**: `?timeout=30m`, `?profile_timeout=20m`
+    - **Model Name Suffix**: `model: "gemini-3.7-flash-high:timeout=30m"` หรือ `model: "gemini-3.7-flash:30m"` หรือ `model: "gemini-3.7-flash?timeout=1800"`
+    - **In-Prompt Directives**: `[antigravity:timeout=30m]` หรือ `<!-- timeout: 30m -->`
+  - คำนวณขยายเวลา Timeout ต่อโปรไฟล์ให้อัตโนมัติเมื่อตรวจพบ Prompt ขนาดยาว (>10KB) สูงสุด 60 นาที หากไม่มีการระบุเจาะจง
   - ส่งค่า Timeout ที่ใช้วินิจฉัยจริงกลับทาง Response Header `X-Antigravity-Profile-Timeout` และ `X-Antigravity-Total-Timeout`
 - 🔒 **บันทึกสถานะโปรไฟล์ถาวร (Persistent Profile State)**: คำสั่ง `profile disable <name>` จะบันทึกลงไฟล์การตั้งค่า (`~/.config/antigravity/bridge_config.json`) และคงสถานะปิดไว้แม้จะ Restart เซิร์ฟเวอร์
 - 🔄 **ระบบรีเฟรช Token อัตโนมัติในเบื้องหลัง**: Background Daemon ทำงานทุก 55 นาทีเพื่อต่ออายุ Google OAuth Access Token ป้องกัน Session หมดอายุ
@@ -519,6 +524,40 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
+### Python (กำหนด Timeout ยาวพิเศษ: 20–30 นาทีสำหรับ Prompt ขนาดใหญ่)
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8000/v1",
+    api_key="sk-antigravity",
+    timeout=1800.0,  # 30 minutes client timeout
+    default_headers={"X-Profile-Timeout": "30m"}
+)
+
+response = client.chat.completions.create(
+    model="gemini-3.7-flash-high",
+    messages=[{"role": "user", "content": "ช่วยวิเคราะห์สถาปัตยกรรมและ Refactor โปรเจกต์ขนาด 100k tokens นี้อย่างละเอียด..."}],
+    extra_body={"profile_timeout": "30m"}
+)
+print(response.choices[0].message.content)
+```
+
+---
+
+## ⏱️ ตัวเลือกการระบุ Timeout และการจัดการ Prompt ขนาดใหญ่
+
+เมื่อประมวลผลงานที่มี Prompt ขนาดยาวมาก (เช่น การวิเคราะห์โค้ดหลายไฟล์พร้อมกัน หรืองานคิดวิเคราะห์เชิงลึก) คุณสามารถส่งคำขอเพิ่มเวลา Execution Timeout ได้สูงสุดถึง **2 ชั่วโมง** ผ่านช่องทางต่างๆ ดังนี้:
+
+| ช่องทางการส่ง (Method) | ตัวอย่าง (Example) |
+| :--- | :--- |
+| **HTTP Header** | `X-Profile-Timeout: 30m` หรือ `OpenAI-Timeout: 1800` หรือ `X-Execution-Timeout: 20m` |
+| **JSON Request Body** | `{"model": "gemini-3.7-flash-high", "profile_timeout": "30m", ...}` |
+| **ผ่าน `extra_body` ใน SDK** | `client.chat.completions.create(..., extra_body={"profile_timeout": "30m"})` |
+| **URL Query Parameter** | `POST http://127.0.0.1:8000/v1/chat/completions?timeout=30m` |
+| **ต่อท้ายชื่อ Model** | `model: "gemini-3.7-flash-high:timeout=30m"` หรือ `model: "gemini-3.7-flash-high:30m"` |
+| **ใส่ Directive ใน Prompt** | ใส่ `[antigravity:timeout=30m]` ไว้บรรทัดแรกของ Prompt หรือ System Message |
+
 ---
 
 ## 🚀 การติดตั้งเพื่อใช้งานจริงในระดับ Production
@@ -550,9 +589,10 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
-        # ปิด Buffering เพื่อให้สตรีมมิ่งแบบเรียลไทม์ได้ลื่นไหล
+        # ปิด Buffering และเพิ่ม Timeout สำหรับงานวิเคราะห์ยาวนาน
         proxy_buffering off;
-        proxy_read_timeout 600s;
+        proxy_read_timeout 1800s;
+        proxy_send_timeout 1800s;
     }
 }
 ```

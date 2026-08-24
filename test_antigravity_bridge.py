@@ -729,9 +729,54 @@ class TestAntigravityBridge(unittest.TestCase):
         self.assertEqual(antigravity_bridge.parse_timeout_value("1800000ms"), 1800.0)
         self.assertEqual(antigravity_bridge.parse_timeout_value(1800000), 1800.0)
         self.assertEqual(antigravity_bridge.parse_timeout_value("wait=1800"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("timeout=30m"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("profile_timeout: 20m"), 1200.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("<!-- timeout: 30m -->"), 1800.0)
+        self.assertEqual(antigravity_bridge.parse_timeout_value("[timeout: 20m]"), 1200.0)
         self.assertIsNone(antigravity_bridge.parse_timeout_value(None))
         self.assertIsNone(antigravity_bridge.parse_timeout_value(""))
         self.assertIsNone(antigravity_bridge.parse_timeout_value(-10))
+
+    def test_extract_model_and_timeout(self):
+        """Test extraction of clean model name and embedded timeout modifier from model strings."""
+        m, t = antigravity_bridge.extract_model_and_timeout("gemini-3.7-flash:timeout=30m")
+        self.assertEqual(m, "gemini-3.7-flash")
+        self.assertEqual(t, 1800.0)
+
+        m, t = antigravity_bridge.extract_model_and_timeout("gemini-3.7-flash:30m")
+        self.assertEqual(m, "gemini-3.7-flash")
+        self.assertEqual(t, 1800.0)
+
+        m, t = antigravity_bridge.extract_model_and_timeout("gemini-3.7-flash-high:20m")
+        self.assertEqual(m, "gemini-3.7-flash-high")
+        self.assertEqual(t, 1200.0)
+
+        m, t = antigravity_bridge.extract_model_and_timeout("gemini-3.7-flash?timeout=1800")
+        self.assertEqual(m, "gemini-3.7-flash")
+        self.assertEqual(t, 1800.0)
+
+        m, t = antigravity_bridge.extract_model_and_timeout("gemini-3.7-flash#timeout=25m")
+        self.assertEqual(m, "gemini-3.7-flash")
+        self.assertEqual(t, 1500.0)
+
+        m, t = antigravity_bridge.extract_model_and_timeout("openrouter/google/gemini-3.7-flash:timeout=30m")
+        self.assertEqual(m, "openrouter/google/gemini-3.7-flash")
+        self.assertEqual(t, 1800.0)
+
+        m, t = antigravity_bridge.extract_model_and_timeout("gemini-3.7-flash")
+        self.assertEqual(m, "gemini-3.7-flash")
+        self.assertIsNone(t)
+
+    def test_extract_timeout_from_prompt_text(self):
+        """Test extraction of timeout directive tags embedded inside prompts or system instructions."""
+        p1 = "Please write a comprehensive analysis.\n[antigravity:timeout=30m]\nFocus on high-detail output."
+        self.assertEqual(antigravity_bridge.extract_timeout_from_prompt_text(p1), 1800.0)
+
+        p2 = "<!-- timeout: 20m -->\nExecute full refactoring."
+        self.assertEqual(antigravity_bridge.extract_timeout_from_prompt_text(p2), 1200.0)
+
+        p3 = "Normal prompt with no directives."
+        self.assertIsNone(antigravity_bridge.extract_timeout_from_prompt_text(p3))
 
     def test_extract_request_timeouts_headers(self):
         """Test extraction of custom profile and total timeouts from HTTP request headers."""
@@ -758,6 +803,11 @@ class TestAntigravityBridge(unittest.TestCase):
         prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {})
         self.assertEqual(prof, 900.0)
 
+        # 4. OpenAI / Client timeout header (25m)
+        handler.headers = {"OpenAI-Timeout": "25m"}
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {})
+        self.assertEqual(prof, 1500.0)
+
     def test_extract_request_timeouts_query_and_body(self):
         """Test extraction of custom timeouts from URL query parameters and JSON body."""
         handler = MagicMock()
@@ -782,6 +832,32 @@ class TestAntigravityBridge(unittest.TestCase):
         prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, req_json)
         self.assertEqual(prof, 1200.0)
 
+        # 4. JSON Body inside model_kwargs
+        req_json = {"model_kwargs": {"timeout": "20m"}}
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, req_json)
+        self.assertEqual(prof, 1200.0)
+
+    def test_extract_request_timeouts_model_and_prompt_directives(self):
+        """Test timeout extraction from model embedded modifier and prompt directive tags."""
+        handler = MagicMock()
+        handler.server = MagicMock()
+        handler.server.profile_timeout = 180.0
+        handler.server.total_timeout = 480.0
+        handler.headers = {}
+        handler.path = "/v1/chat/completions"
+
+        # 1. Model embedded timeout (30m)
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(
+            handler, {}, model_timeout=1800.0
+        )
+        self.assertEqual(prof, 1800.0)
+
+        # 2. Prompt directive tag ([antigravity:timeout=20m])
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(
+            handler, {}, raw_prompt_text="[antigravity:timeout=20m]\nExecute big task"
+        )
+        self.assertEqual(prof, 1200.0)
+
     def test_extract_request_timeouts_auto_scaling_large_prompt(self):
         """Test that large prompts automatically scale up profile timeout if none explicitly requested."""
         handler = MagicMock()
@@ -791,19 +867,22 @@ class TestAntigravityBridge(unittest.TestCase):
         handler.headers = {}
         handler.path = "/v1/chat/completions"
 
-        # Small prompt (<= 15k chars)
+        # Small prompt (<= 10k chars) -> baseline 180.0s
         prof_small, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=5000)
         self.assertEqual(prof_small, 180.0)
 
-        # Large prompt (55k chars)
+        # Large prompt (55k chars) -> 180 + (45000 / 10000) * 75 = 180 + 337.5 = 517.5s (~8.6 min)
         prof_large, total_large = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=55000)
-        self.assertGreater(prof_large, 180.0)
-        self.assertEqual(prof_large, 180.0 + (40000 / 10000.0) * 45.0)  # 180 + 180 = 360.0s (6 min)
+        self.assertEqual(prof_large, 180.0 + (45000 / 10000.0) * 75.0)
         self.assertGreaterEqual(total_large, prof_large * 2.5)
 
-        # Massive prompt (500k chars) -> capped at 1800s (30 min)
-        prof_massive, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=500000)
-        self.assertEqual(prof_massive, 1800.0)
+        # Massive prompt (100k chars) -> 180 + 9 * 75 = 855.0s (~14.25 min)
+        prof_100k, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=100000)
+        self.assertEqual(prof_100k, 855.0)
+
+        # Huge prompt (600k chars) -> capped at 3600s (60 min)
+        prof_huge, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=600000)
+        self.assertEqual(prof_huge, 3600.0)
 
 
 if __name__ == "__main__":

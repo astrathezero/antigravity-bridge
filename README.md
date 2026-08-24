@@ -109,8 +109,13 @@ Antigravity Bridge acts as a unified HTTP gateway between your applications (Her
   - Direct CLI argument delivery supporting massive prompts up to **350KB (~85,000 words)** natively without hitting OS `ARG_MAX` buffer limits.
   - Clean boundary-aware middle truncation for ultra-long context sessions (>350KB) to keep model reasoning responsive.
 - ⏱️ **Dynamic Execution Timeout & Large Prompt Auto-Scaling**:
-  - Request custom execution timeouts up to **2 hours** (e.g. 20–30 minutes for massive reasoning prompts) via HTTP headers (`X-Profile-Timeout: 30m`, `X-Execution-Timeout: 20m`, `X-Timeout: 1800`, `Prefer: wait=1800`), JSON payload (`"profile_timeout": "30m"`), or query parameters (`?timeout=30m`).
-  - Auto-scales profile timeout for prompts larger than 15KB (up to 30 minutes) if no explicit timeout is provided.
+  - Request custom execution timeouts up to **2 hours** (e.g. 20–30 minutes for massive reasoning prompts) via:
+    - **HTTP Headers**: `X-Profile-Timeout: 30m`, `X-Execution-Timeout: 20m`, `OpenAI-Timeout: 1800`, `X-Timeout: 1800`, `Prefer: wait=1800`
+    - **JSON Request Body**: `"profile_timeout": "30m"`, `"timeout": 1800`, `"extra_body": {"profile_timeout": "30m"}`
+    - **URL Query Parameters**: `?timeout=30m`, `?profile_timeout=20m`
+    - **Model Name Suffix**: `model: "gemini-3.7-flash-high:timeout=30m"` or `model: "gemini-3.7-flash:30m"` or `model: "gemini-3.7-flash?timeout=1800"`
+    - **In-Prompt Directives**: `[antigravity:timeout=30m]` or `<!-- timeout: 30m -->`
+  - Auto-scales profile timeout for prompts larger than 10KB (up to 60 minutes) if no explicit timeout is provided.
   - Informs clients of active budgets via response headers `X-Antigravity-Profile-Timeout` and `X-Antigravity-Total-Timeout`.
 - 🔒 **Persistent Profile State**: Disabled profiles via `profile disable <name>` are saved to configuration (`~/.config/antigravity/bridge_config.json`) and persist across service restarts.
 - 🔄 **Automatic OAuth Refresh Daemon**: Background thread refreshes Google access tokens every 55 minutes to prevent session expiration.
@@ -519,6 +524,40 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
+### Python (Custom Long Timeout: 20–30 Minutes for Massive Prompts)
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8000/v1",
+    api_key="sk-antigravity",
+    timeout=1800.0,  # 30 minutes client timeout
+    default_headers={"X-Profile-Timeout": "30m"}
+)
+
+response = client.chat.completions.create(
+    model="gemini-3.7-flash-high",
+    messages=[{"role": "user", "content": "Analyze and refactor this massive 100k-token repository codebase..."}],
+    extra_body={"profile_timeout": "30m"}
+)
+print(response.choices[0].message.content)
+```
+
+---
+
+## ⏱️ Custom Timeout Options & Large Prompt Handling
+
+When processing very large prompts (e.g. multi-file codebase analysis or deep reasoning queries), you can request custom execution timeouts up to **2 hours** using any of the following methods:
+
+| Method | Example |
+| :--- | :--- |
+| **HTTP Header** | `X-Profile-Timeout: 30m` or `OpenAI-Timeout: 1800` or `X-Execution-Timeout: 20m` |
+| **JSON Request Body** | `{"model": "gemini-3.7-flash-high", "profile_timeout": "30m", ...}` |
+| **Inside `extra_body`** | `client.chat.completions.create(..., extra_body={"profile_timeout": "30m"})` |
+| **URL Query Parameter** | `POST http://127.0.0.1:8000/v1/chat/completions?timeout=30m` |
+| **Model Name Suffix** | `model: "gemini-3.7-flash-high:timeout=30m"` or `model: "gemini-3.7-flash-high:30m"` |
+| **In-Prompt Directive** | `[antigravity:timeout=30m]` embedded at the top of your prompt or system instruction |
+
 ---
 
 ## 🚀 Production Deployment (Systemd / PM2 / Nginx)
@@ -550,9 +589,10 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
-        # Crucial for SSE Streaming
+        # Crucial for SSE Streaming and Long Reasoning Tasks
         proxy_buffering off;
-        proxy_read_timeout 600s;
+        proxy_read_timeout 1800s;
+        proxy_send_timeout 1800s;
     }
 }
 ```
