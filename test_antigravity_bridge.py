@@ -884,6 +884,172 @@ class TestAntigravityBridge(unittest.TestCase):
         prof_huge, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=600000)
         self.assertEqual(prof_huge, 3600.0)
 
+    def test_parse_api_keys(self):
+        """Test parsing single, multiple, labeled, and structured API key strings."""
+        # 1. Labeled comma-separated
+        res = antigravity_bridge.parse_api_keys("agent-cursor:sk-agv-111,agent-hermes:sk-agv-222")
+        self.assertEqual(res, {"sk-agv-111": "agent-cursor", "sk-agv-222": "agent-hermes"})
+
+        # 2. Simple comma-separated without labels
+        res = antigravity_bridge.parse_api_keys("sk-1, sk-2, sk-3")
+        self.assertEqual(res, {"sk-1": "default", "sk-2": "default", "sk-3": "default"})
+
+        # 3. Equals format
+        res = antigravity_bridge.parse_api_keys("bot1=sk-aaa, bot2=sk-bbb")
+        self.assertEqual(res, {"sk-aaa": "bot1", "sk-bbb": "bot2"})
+
+        # 4. JSON format
+        res = antigravity_bridge.parse_api_keys('{"sk-json-1": "agent-json"}')
+        self.assertEqual(res, {"sk-json-1": "agent-json"})
+
+        # 5. Empty/None
+        self.assertEqual(antigravity_bridge.parse_api_keys(None), {})
+        self.assertEqual(antigravity_bridge.parse_api_keys(""), {})
+        self.assertEqual(antigravity_bridge.parse_api_keys("   "), {})
+
+    def test_generate_and_mask_api_key(self):
+        """Test API key token generation and masking."""
+        key = antigravity_bridge.generate_api_key("sk-agv-")
+        self.assertTrue(key.startswith("sk-agv-"))
+        self.assertEqual(len(key), 7 + 32)  # 'sk-agv-' (7) + 32 hex chars
+
+        masked = antigravity_bridge.mask_api_key(key)
+        self.assertTrue(masked.startswith("sk-agv-"))
+        self.assertIn("...", masked)
+        self.assertTrue(masked.endswith(key[-6:]))
+
+        self.assertEqual(antigravity_bridge.mask_api_key(""), "")
+        self.assertEqual(antigravity_bridge.mask_api_key("short1234"), "sho...34")
+
+    def test_save_and_revoke_api_key_to_env(self):
+        """Test saving and revoking API keys in a temporary .env file."""
+        import tempfile
+        with tempfile.NamedTemporaryFile("w+", delete=False) as tf:
+            tf.write("# Initial config\nPORT=8000\n")
+            temp_env = tf.name
+
+        try:
+            # 1. Save first key
+            ok, p = antigravity_bridge.save_api_key_to_env("agent-cursor", "sk-agv-123456", env_path=temp_env)
+            self.assertTrue(ok)
+            with open(temp_env, "r", encoding="utf-8") as f:
+                content = f.read()
+            keys = antigravity_bridge.parse_api_keys(content.split("ANTIGRAVITY_BRIDGE_API_KEYS=")[1].split("\n")[0])
+            self.assertEqual(keys.get("sk-agv-123456"), "agent-cursor")
+
+            # 2. Save second key
+            ok, p = antigravity_bridge.save_api_key_to_env("agent-hermes", "sk-agv-789012", env_path=temp_env)
+            self.assertTrue(ok)
+            with open(temp_env, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("agent-cursor:sk-agv-123456", content)
+            self.assertIn("agent-hermes:sk-agv-789012", content)
+
+            # 3. Revoke by label
+            ok, p, removed = antigravity_bridge.revoke_api_key_from_env("agent-cursor", env_path=temp_env)
+            self.assertTrue(ok)
+            self.assertEqual(len(removed), 1)
+            self.assertEqual(removed[0], ("agent-cursor", "sk-agv-123456"))
+
+            # 4. Verify only agent-hermes remains
+            with open(temp_env, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertNotIn("sk-agv-123456", content)
+            self.assertIn("agent-hermes:sk-agv-789012", content)
+
+            # 5. Revoke by key
+            ok, p, removed = antigravity_bridge.revoke_api_key_from_env("sk-agv-789012", env_path=temp_env)
+            self.assertTrue(ok)
+            self.assertEqual(len(removed), 1)
+
+            # 6. Revoking non-existent should return False
+            ok, p, removed = antigravity_bridge.revoke_api_key_from_env("non-existent", env_path=temp_env)
+            self.assertFalse(ok)
+        finally:
+            if os.path.exists(temp_env):
+                os.remove(temp_env)
+
+    def test_multi_api_key_server_auth(self):
+        """Test server authentication across multiple active API keys, header types, and endpoints."""
+        server = ThreadedHTTPServer(("127.0.0.1", 0), AntigravityBridgeHandler)
+        server.profiles = ["default_test"]
+        server.api_keys = {
+            "sk-test-cursor": "agent-cursor",
+            "sk-test-hermes": "agent-hermes",
+        }
+        port = server.server_port
+
+        import threading
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            models_url = f"http://127.0.0.1:{port}/v1/models"
+            health_url = f"http://127.0.0.1:{port}/health"
+            keys_url = f"http://127.0.0.1:{port}/v1/keys"
+
+            # 1. Health check is public and reports auth state
+            with urllib.request.urlopen(urllib.request.Request(health_url)) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                self.assertTrue(data.get("auth_required"))
+                self.assertEqual(data.get("active_keys_count"), 2)
+
+            # 2. Unauthenticated request to /v1/models should get 401
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(urllib.request.Request(models_url))
+            self.assertEqual(ctx.exception.code, 401)
+
+            # 3. Invalid key should get 401
+            req_wrong = urllib.request.Request(models_url, headers={"Authorization": "Bearer sk-invalid-key"})
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req_wrong)
+            self.assertEqual(ctx.exception.code, 401)
+
+            # 4. Valid key 1 via Authorization Bearer
+            req_auth1 = urllib.request.Request(models_url, headers={"Authorization": "Bearer sk-test-cursor"})
+            with urllib.request.urlopen(req_auth1) as resp:
+                self.assertEqual(resp.status, 200)
+
+            # 5. Valid key 2 via x-api-key header
+            req_auth2 = urllib.request.Request(models_url, headers={"x-api-key": "sk-test-hermes"})
+            with urllib.request.urlopen(req_auth2) as resp:
+                self.assertEqual(resp.status, 200)
+
+            # 6. Valid key via query parameter ?api_key=...
+            req_query = urllib.request.Request(f"{models_url}?api_key=sk-test-cursor")
+            with urllib.request.urlopen(req_query) as resp:
+                self.assertEqual(resp.status, 200)
+
+            # 7. List active keys endpoint (/v1/keys)
+            req_keys = urllib.request.Request(keys_url, headers={"Authorization": "Bearer sk-test-cursor"})
+            with urllib.request.urlopen(req_keys) as resp:
+                self.assertEqual(resp.status, 200)
+                data = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(data.get("total"), 2)
+                labels = [item["label"] for item in data.get("data", [])]
+                self.assertIn("agent-cursor", labels)
+                self.assertIn("agent-hermes", labels)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_handle_key_cli(self):
+        """Test API Key CLI commands (list, help, unknown)."""
+        import io
+        from contextlib import redirect_stdout
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            code = antigravity_bridge.handle_key_cli(["--help"])
+            self.assertEqual(code, 0)
+        self.assertIn("API Key Manager CLI", f.getvalue())
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            code = antigravity_bridge.handle_key_cli(["list"])
+            self.assertEqual(code, 0)
+        self.assertIn("Agent / Label", f.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

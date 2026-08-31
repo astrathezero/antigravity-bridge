@@ -237,6 +237,26 @@ curl http://127.0.0.1:8000/health
 
 ---
 
+## 🔑 คำสั่งจัดการ API Key สำหรับ Agent (API Key Manager CLI)
+
+Antigravity Bridge รองรับระบบ **Multiple API Keys** เพื่อแยก Agent แต่ละตัว (เช่น Cursor, Hermes, Cline, Claude Dev) และบันทึกลงในไฟล์ `.env` ให้อัตโนมัติ:
+
+| คำสั่ง | คำสั่งลัด Standalone | คำอธิบายการทำงาน |
+| :--- | :--- | :--- |
+| `python3 antigravity_bridge.py key list` | `python3 manage_keys.py list` | แสดงตารางรายชื่อ API Key, Label ของ Agent และสถานะการใช้งาน |
+| `python3 antigravity_bridge.py key create <ชื่อ>` | `python3 manage_keys.py create <ชื่อ>` | สร้างรหัส API Key ปลอดภัยแบบสุ่มและบันทึกลงใน `.env` ทันที |
+| `python3 antigravity_bridge.py key add <ชื่อ> <key>` | `python3 manage_keys.py add <ชื่อ> <key>` | เพิ่ม API Key ที่มีอยู่เดิมพร้อมกำหนดชื่อ Label ลงใน `.env` |
+| `python3 antigravity_bridge.py key revoke <ชื่อ\|key>` | `python3 manage_keys.py revoke <ชื่อ\|key>` | เพิกถอนและลบ API Key ออกจากไฟล์ `.env` |
+| `python3 antigravity_bridge.py key test <key>` | `python3 manage_keys.py test <key>` | ทดสอบส่งคำขอตรวจสอบความถูกต้องของ API Key กับเซิร์ฟเวอร์ที่กำลังรันอยู่ |
+
+### ตัวอย่างการตั้งค่าใน `.env`:
+```bash
+# กำหนด Multiple API Keys พร้อมชื่อ Agent แต่ละตัว
+ANTIGRAVITY_BRIDGE_API_KEYS=agent-cursor:sk-agv-a1b2c3d4,agent-hermes:sk-agv-e5f6g7h8,team-dev:sk-agv-99887766
+```
+
+---
+
 ## 📡 รายละเอียด REST API Endpoints
 
 ### 1. ตรวจสอบสถานะเซิร์ฟเวอร์ (`GET /health`)
@@ -326,7 +346,8 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: app
 | **`ANTIGRAVITY_PORT`** | `int` | `8000` | หมายเลขพอร์ตที่เปิดให้บริการ |
 | **`ANTIGRAVITY_PROFILE_CONCURRENCY`** | `int` | `1` | จำนวนคำขอพร้อมกันสูงสุดต่อโปรไฟล์ (เช่น `2` เพื่อเพิ่ม Throughput) |
 | **`ANTIGRAVITY_PROFILES`** | `str` | *Auto* | รายชื่อโปรไฟล์ที่ต้องการหมุนเวียน (คั่นด้วยจุลภาค) |
-| **`ANTIGRAVITY_BRIDGE_API_KEY`** | `str` | `None` | API Key ที่บังคับให้ Client ต้องแนบมาเพื่อความปลอดภัย |
+| **`ANTIGRAVITY_BRIDGE_API_KEYS`** | `str` | `None` | กำหนด API Key หลายตัวพร้อมชื่อ Agent (`agent-1:sk-xxx,agent-2:sk-yyy`) |
+| **`ANTIGRAVITY_BRIDGE_API_KEY`** | `str` | `None` | API Key เดี่ยวที่บังคับให้ Client ต้องแนบมาเพื่อความปลอดภัย |
 | **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อซ่อนข้อความสรุปโปรไฟล์/โควตาที่ท้ายคำตอบของโมเดล |
 | **`ANTIGRAVITY_NO_PROXY`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบตรวจจับ Proxy และต่อเน็ตโดยตรง |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบเบื้องหลังที่รีเฟรช Token ทุก 55 นาที |

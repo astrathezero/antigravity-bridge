@@ -237,6 +237,26 @@ The CLI provides built-in subcommands to manage multiple Google profiles:
 
 ---
 
+## 🔑 API Key Manager CLI Reference (Multiple Keys & Agents)
+
+Antigravity Bridge includes built-in Multi-API Key management for isolating and authenticating requests from different AI agents (e.g. Cursor, Hermes, Cline, Claude Dev):
+
+| Command | Standalone Shortcut | Description |
+| :--- | :--- | :--- |
+| `python3 antigravity_bridge.py key list` | `python3 manage_keys.py list` | Display active API keys, agent labels, and status |
+| `python3 antigravity_bridge.py key create <label>` | `python3 manage_keys.py create <label>` | Generate and save a cryptographically secure random token to `.env` |
+| `python3 antigravity_bridge.py key add <label> <key>` | `python3 manage_keys.py add <label> <key>` | Register an existing custom API key with a label in `.env` |
+| `python3 antigravity_bridge.py key revoke <label\|key>` | `python3 manage_keys.py revoke <label\|key>` | Revoke and remove an API key from `.env` |
+| `python3 antigravity_bridge.py key test <key>` | `python3 manage_keys.py test <key>` | Live test API key authentication against running bridge server |
+
+### Key Configuration in `.env`:
+```bash
+# Multiple API Keys format with agent labels
+ANTIGRAVITY_BRIDGE_API_KEYS=agent-cursor:sk-agv-a1b2c3d4,agent-hermes:sk-agv-e5f6g7h8,team-dev:sk-agv-99887766
+```
+
+---
+
 ## 📡 REST API Reference
 
 ### 1. Health Check (`GET /health`)
@@ -326,7 +346,8 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: app
 | **`ANTIGRAVITY_PORT`** | `int` | `8000` | Port number to listen on |
 | **`ANTIGRAVITY_PROFILE_CONCURRENCY`** | `int` | `1` | Max concurrent requests per profile (e.g. `2` for higher capacity) |
 | **`ANTIGRAVITY_PROFILES`** | `str` | *Auto* | Comma-separated list of profile names to rotate through |
-| **`ANTIGRAVITY_BRIDGE_API_KEY`** | `str` | `None` | Secret API key to require from clients (`Bearer <key>`) |
+| **`ANTIGRAVITY_BRIDGE_API_KEYS`** | `str` | `None` | Comma-separated or labeled API Keys (`agent-1:sk-xxx,agent-2:sk-yyy`) |
+| **`ANTIGRAVITY_BRIDGE_API_KEY`** | `str` | `None` | Single secret API key to require from clients (`Bearer <key>`) |
 | **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | `int/bool`| `0` | Set `1` to hide the status footer tag from AI responses |
 | **`ANTIGRAVITY_NO_PROXY`** | `int/bool`| `0` | Set `1` to disable proxy auto-detection |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `int/bool`| `0` | Set `1` to disable background 55-minute OAuth token refresh |

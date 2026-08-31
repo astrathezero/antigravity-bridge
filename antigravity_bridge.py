@@ -2754,8 +2754,246 @@ def generate_image_with_agy(
 
 
 
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+def parse_api_keys(raw_val: Any) -> Dict[str, str]:
+    """Parse raw API key configuration string or data structure into {key: label} mapping."""
+    if not raw_val:
+        return {}
+    if isinstance(raw_val, dict):
+        return {str(k).strip(): str(v).strip() for k, v in raw_val.items() if str(k).strip()}
+    if isinstance(raw_val, (list, tuple, set)):
+        result: Dict[str, str] = {}
+        for item in raw_val:
+            result.update(parse_api_keys(str(item)))
+        return result
 
+    s = str(raw_val).strip()
+    if not s:
+        return {}
+
+    # JSON formatted string support
+    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+        try:
+            parsed = json.loads(s)
+            return parse_api_keys(parsed)
+        except Exception:
+            pass
+
+    result: Dict[str, str] = {}
+    entries = re.split(r"[,;\n]+", s)
+    for entry in entries:
+        entry = entry.strip().strip("'\"")
+        if not entry or entry.startswith("#"):
+            continue
+        if ":" in entry:
+            parts = entry.split(":", 1)
+            label = parts[0].strip()
+            key = parts[1].strip()
+            if key:
+                result[key] = label or "default"
+        elif "=" in entry:
+            parts = entry.split("=", 1)
+            label = parts[0].strip()
+            key = parts[1].strip()
+            if key:
+                result[key] = label or "default"
+        else:
+            result[entry] = "default"
+    return result
+
+
+def generate_api_key(prefix: str = "sk-agv-") -> str:
+    """Generate a cryptographically secure random API key token."""
+    return f"{prefix}{secrets.token_hex(16)}"
+
+
+def mask_api_key(key: str) -> str:
+    """Mask an API key string for safe display in CLI and logs."""
+    if not key:
+        return ""
+    if len(key) <= 12:
+        return key[:3] + "..." + key[-2:]
+    return key[:8] + "..." + key[-6:]
+
+
+def find_primary_env_file(create_if_missing: bool = True) -> str:
+    """Find existing or default .env target file for reading/writing configuration."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(script_dir, ".env"),
+        os.path.expanduser("~/.config/antigravity/bridge.env"),
+        os.path.expanduser("~/.config/antigravity/.env"),
+    ]
+    for p in candidates:
+        if os.path.exists(p) and os.path.isfile(p):
+            return p
+
+    target = os.path.join(script_dir, ".env") if os.path.exists(script_dir) else os.path.join(os.getcwd(), ".env")
+    if create_if_missing:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+        except Exception:
+            pass
+    return target
+
+
+def save_api_key_to_env(label: str, key: str, env_path: Optional[str] = None) -> Tuple[bool, str]:
+    """Add or update an API key with its label in the target .env file."""
+    path = env_path or find_primary_env_file(create_if_missing=True)
+    label = (label or "default").strip()
+    key = key.strip()
+    if not key:
+        return False, "Key cannot be empty"
+
+    lines: List[str] = []
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as exc:
+            return False, f"Failed to read {path}: {exc}"
+
+    existing_keys: Dict[str, str] = {}
+    found_idx = -1
+    for idx, line in enumerate(lines):
+        trimmed = line.strip()
+        if trimmed.startswith("ANTIGRAVITY_BRIDGE_API_KEYS="):
+            found_idx = idx
+            raw_val = trimmed.split("=", 1)[1].strip().strip("'\"")
+            existing_keys.update(parse_api_keys(raw_val))
+        elif trimmed.startswith("ANTIGRAVITY_BRIDGE_API_KEY="):
+            raw_val = trimmed.split("=", 1)[1].strip().strip("'\"")
+            if raw_val and raw_val not in existing_keys:
+                existing_keys[raw_val] = "default"
+
+    existing_keys[key] = label
+
+    serialized_entries = []
+    for k_val, l_val in existing_keys.items():
+        if l_val and l_val != "default":
+            serialized_entries.append(f"{l_val}:{k_val}")
+        else:
+            serialized_entries.append(k_val)
+
+    new_line = f"ANTIGRAVITY_BRIDGE_API_KEYS={','.join(serialized_entries)}\n"
+
+    if found_idx != -1:
+        lines[found_idx] = new_line
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"\n# API Keys for client and agent authentication\n{new_line}")
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        # Also update active process environment
+        os.environ["ANTIGRAVITY_BRIDGE_API_KEYS"] = ",".join(serialized_entries)
+        return True, path
+    except Exception as exc:
+        return False, f"Failed to write {path}: {exc}"
+
+
+def revoke_api_key_from_env(target: str, env_path: Optional[str] = None) -> Tuple[bool, str, List[Tuple[str, str]]]:
+    """Revoke and remove an API key or label from the target .env file."""
+    path = env_path or find_primary_env_file(create_if_missing=False)
+    if not os.path.exists(path):
+        return False, f"Config file not found at {path}", []
+
+    target = target.strip()
+    if not target:
+        return False, "Target label or key cannot be empty", []
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as exc:
+        return False, f"Failed to read {path}: {exc}", []
+
+    removed: List[Tuple[str, str]] = []
+    found_keys = False
+
+    for idx, line in enumerate(lines):
+        trimmed = line.strip()
+        if trimmed.startswith("ANTIGRAVITY_BRIDGE_API_KEYS="):
+            found_keys = True
+            raw_val = trimmed.split("=", 1)[1].strip().strip("'\"")
+            parsed = parse_api_keys(raw_val)
+            remaining: Dict[str, str] = {}
+            for k, l in parsed.items():
+                if k == target or l == target or (len(target) >= 6 and k.startswith(target)):
+                    removed.append((l, k))
+                else:
+                    remaining[k] = l
+            if remaining:
+                serialized = [f"{l}:{k}" if l and l != "default" else k for k, l in remaining.items()]
+                lines[idx] = f"ANTIGRAVITY_BRIDGE_API_KEYS={','.join(serialized)}\n"
+                os.environ["ANTIGRAVITY_BRIDGE_API_KEYS"] = ",".join(serialized)
+            else:
+                lines[idx] = "ANTIGRAVITY_BRIDGE_API_KEYS=\n"
+                if "ANTIGRAVITY_BRIDGE_API_KEYS" in os.environ:
+                    del os.environ["ANTIGRAVITY_BRIDGE_API_KEYS"]
+        elif trimmed.startswith("ANTIGRAVITY_BRIDGE_API_KEY="):
+            raw_val = trimmed.split("=", 1)[1].strip().strip("'\"")
+            if raw_val == target or target == "default" or (len(target) >= 6 and raw_val.startswith(target)):
+                removed.append(("default", raw_val))
+                lines[idx] = "ANTIGRAVITY_BRIDGE_API_KEY=\n"
+                if "ANTIGRAVITY_BRIDGE_API_KEY" in os.environ:
+                    del os.environ["ANTIGRAVITY_BRIDGE_API_KEY"]
+
+    if not removed:
+        return False, f"No matching API key or label found for '{target}' in {path}", []
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        return True, path, removed
+    except Exception as exc:
+        return False, f"Failed to write {path}: {exc}", []
+
+
+def get_configured_api_keys(cli_key: Optional[str] = None, cli_keys: Optional[str] = None) -> Dict[str, str]:
+    """Retrieve all active configured API keys mapped to their agent/client labels."""
+    result: Dict[str, str] = {}
+
+    # 1. Check environment variable ANTIGRAVITY_BRIDGE_API_KEYS
+    env_keys = os.environ.get("ANTIGRAVITY_BRIDGE_API_KEYS", "").strip()
+    if env_keys:
+        result.update(parse_api_keys(env_keys))
+
+    # 2. Check environment variable ANTIGRAVITY_BRIDGE_API_KEY
+    env_single = os.environ.get("ANTIGRAVITY_BRIDGE_API_KEY", "").strip()
+    if env_single and env_single not in result:
+        result[env_single] = "default"
+
+    # 3. Check CLI arguments
+    if cli_keys:
+        result.update(parse_api_keys(cli_keys))
+    if cli_key and cli_key not in result:
+        result[cli_key] = "default"
+
+    # 4. Fallback directly to reading .env file if environment was not loaded
+    if not result:
+        env_file = find_primary_env_file(create_if_missing=False)
+        if os.path.exists(env_file):
+            try:
+                with open(env_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("ANTIGRAVITY_BRIDGE_API_KEYS="):
+                            val = line.split("=", 1)[1].strip().strip("'\"")
+                            result.update(parse_api_keys(val))
+                        elif line.startswith("ANTIGRAVITY_BRIDGE_API_KEY="):
+                            val = line.split("=", 1)[1].strip().strip("'\"")
+                            if val and val not in result:
+                                result[val] = "default"
+            except Exception:
+                pass
+
+    return result
+
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     """Multi-threaded HTTP server for handling concurrent API calls."""
     daemon_threads = True
     allow_reuse_address = True
@@ -2792,27 +3030,52 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _authorized(self) -> bool:
-        """Validate Authorization / x-api-key header against server configured api_key if set."""
-        expected_key = getattr(self.server, "api_key", None)
-        if not expected_key:
-            # If server has no --api-key configured, allow all requests
+        """Validate Authorization / x-api-key / api-key header against server configured api_keys."""
+        api_keys = getattr(self.server, "api_keys", None)
+        if api_keys is None:
+            single_key = getattr(self.server, "api_key", None)
+            if single_key:
+                api_keys = {single_key: "default"}
+            else:
+                api_keys = {}
+
+        if not api_keys:
+            # If server has no API keys configured, allow all requests (open dev mode)
+            self.auth_client = "anonymous"
             return True
 
-        # Check standard Authorization: Bearer <key>
+        # Extract candidate key from headers or URL query string
+        candidate_key = None
+
         auth_header = self.headers.get("Authorization", "").strip()
         if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            if token == expected_key:
-                return True
+            candidate_key = auth_header[7:].strip()
+        elif auth_header:
+            candidate_key = auth_header
 
-        # Check Anthropic x-api-key: <key>
-        x_key = self.headers.get("x-api-key", "").strip()
-        if x_key and x_key == expected_key:
-            return True
+        if not candidate_key:
+            x_key = self.headers.get("x-api-key", "").strip()
+            if x_key:
+                candidate_key = x_key
 
-        # Check generic api-key: <key>
-        generic_key = self.headers.get("api-key", "").strip()
-        if generic_key and generic_key == expected_key:
+        if not candidate_key:
+            generic_key = self.headers.get("api-key", "").strip()
+            if generic_key:
+                candidate_key = generic_key
+
+        if not candidate_key and "?" in self.path:
+            try:
+                query_str = self.path.split("?", 1)[1]
+                q_params = urllib.parse.parse_qs(query_str)
+                if "api_key" in q_params and q_params["api_key"]:
+                    candidate_key = q_params["api_key"][0].strip()
+                elif "key" in q_params and q_params["key"]:
+                    candidate_key = q_params["key"][0].strip()
+            except Exception:
+                pass
+
+        if candidate_key and candidate_key in api_keys:
+            self.auth_client = api_keys[candidate_key]
             return True
 
         return False
@@ -3022,10 +3285,13 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 active_profiles = pm.get_ordered_profiles()
                 active_p = active_profiles[0] if active_profiles else None
                 total_profiles = len(pm._profiles)
+                configured_keys = getattr(self.server, "api_keys", {}) or {}
                 self._send_json_response({
                     "status": "ok",
                     "service": "antigravity-bridge",
                     "active_profile": active_p or "default",
+                    "auth_required": bool(configured_keys),
+                    "active_keys_count": len(configured_keys),
                     "concurrency": {
                         "active_in_flight": pm.get_total_in_flight(),
                         "max_pool_capacity": total_profiles * pm.concurrency_per_profile,
@@ -3037,9 +3303,32 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
             if not self._authorized():
                 self._send_json_response(
-                    {"error": {"message": "Unauthorized API Key", "type": "invalid_request_error"}},
+                    {
+                        "error": {
+                            "message": "Invalid or missing API key. Provide a valid Bearer token, x-api-key, or api-key header.",
+                            "type": "authentication_error",
+                            "code": 401,
+                        }
+                    },
                     status_code=401,
                 )
+                return
+
+            if path in ("/v1/keys", "/keys", "/v1/api-keys", "/api-keys"):
+                configured_keys = getattr(self.server, "api_keys", {}) or {}
+                keys_data = [
+                    {
+                        "label": label,
+                        "key_masked": mask_api_key(k),
+                        "status": "active",
+                    }
+                    for k, label in configured_keys.items()
+                ]
+                self._send_json_response({
+                    "object": "list",
+                    "data": keys_data,
+                    "total": len(keys_data),
+                })
                 return
 
             if path in ("/v1/profiles", "/profiles"):
@@ -3096,14 +3385,22 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             is_profiles_config = path in ("/v1/profiles/config", "/profiles/config", "/v1/config", "/config")
             is_profiles_disable = path in ("/v1/profiles/disable", "/profiles/disable")
             is_profiles_enable = path in ("/v1/profiles/enable", "/profiles/enable")
+            is_keys_create = path in ("/v1/keys/create", "/keys/create", "/v1/api-keys/create", "/api-keys/create")
+            is_keys_revoke = path in ("/v1/keys/revoke", "/keys/revoke", "/v1/api-keys/revoke", "/api-keys/revoke")
 
-            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check or is_profiles_config or is_profiles_disable or is_profiles_enable):
+            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check or is_profiles_config or is_profiles_disable or is_profiles_enable or is_keys_create or is_keys_revoke):
                 self._send_json_response({"error": "Not Found"}, status_code=404)
                 return
 
             if not self._authorized():
                 self._send_json_response(
-                    {"error": {"message": "Unauthorized API Key", "type": "invalid_request_error"}},
+                    {
+                        "error": {
+                            "message": "Invalid or missing API key. Provide a valid Bearer token, x-api-key, or api-key header.",
+                            "type": "authentication_error",
+                            "code": 401,
+                        }
+                    },
                     status_code=401,
                 )
                 return
@@ -3134,8 +3431,45 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         status_code=400,
                     )
                     return
-            else:
-                req_json = {}
+            if is_keys_create:
+                label = req_json.get("label", "agent-custom").strip()
+                custom_key = req_json.get("key", "").strip()
+                key_to_save = custom_key or generate_api_key()
+                ok, path_or_err = save_api_key_to_env(label, key_to_save)
+                if ok:
+                    new_keys = get_configured_api_keys()
+                    if hasattr(self.server, "api_keys"):
+                        self.server.api_keys = new_keys
+                    self._send_json_response({
+                        "status": "ok",
+                        "label": label,
+                        "key": key_to_save,
+                        "key_masked": mask_api_key(key_to_save),
+                        "saved_to": path_or_err,
+                    })
+                else:
+                    self._send_json_response({"error": path_or_err}, status_code=500)
+                return
+
+            if is_keys_revoke:
+                target = req_json.get("target") or req_json.get("label") or req_json.get("key")
+                if not target:
+                    self._send_json_response({"error": "Missing 'target', 'label', or 'key' in request body"}, status_code=400)
+                    return
+                ok, path_or_err, removed = revoke_api_key_from_env(str(target).strip())
+                if ok:
+                    new_keys = get_configured_api_keys()
+                    if hasattr(self.server, "api_keys"):
+                        self.server.api_keys = new_keys
+                    self._send_json_response({
+                        "status": "ok",
+                        "removed_count": len(removed),
+                        "removed": [{"label": l, "key_masked": mask_api_key(k)} for l, k in removed],
+                        "saved_to": path_or_err,
+                    })
+                else:
+                    self._send_json_response({"error": path_or_err}, status_code=404)
+                return
 
             # Handle Profile management endpoints
             if is_profiles_config:
@@ -4400,8 +4734,171 @@ Examples:
         return 1
 
 
+def handle_key_cli(argv: List[str]) -> int:
+    """CLI subcommand handler for managing Antigravity API keys."""
+    if argv and argv[0] in ("-h", "--help", "help"):
+        print("""
+Antigravity Bridge - API Key Manager CLI 🔑
+
+Usage:
+  python3 antigravity_bridge.py key list                     List all active API keys, labels, and config source
+  python3 antigravity_bridge.py key create [label]           Generate and save a new secure random API key to .env
+  python3 antigravity_bridge.py key add <label> <key>        Add an existing custom API key with a label to .env
+  python3 antigravity_bridge.py key revoke <label|key>       Revoke and remove an API key from .env
+  python3 antigravity_bridge.py key test <key> [options]     Test authentication with an API key against running server
+
+Shortcuts:
+  python3 antigravity_bridge.py keys                         Shortcut to list all keys
+  python3 antigravity_bridge.py key generate [label]         Alias for create
+  python3 antigravity_bridge.py key remove <label|key>       Alias for revoke
+
+Examples:
+  python3 antigravity_bridge.py key create agent-cursor
+  python3 antigravity_bridge.py key create agent-hermes
+  python3 antigravity_bridge.py key add client-team sk-custom-key-12345
+  python3 antigravity_bridge.py key list
+  python3 antigravity_bridge.py key test sk-agv-xxxxxxxx
+  python3 antigravity_bridge.py key revoke agent-cursor
+""")
+        return 0
+
+    sub = argv[0].lower() if argv else "list"
+    env_file = find_primary_env_file(create_if_missing=False)
+
+    if sub in ("list", "ls", "status", "all"):
+        keys_map = get_configured_api_keys()
+        print("\n" + "=" * 90)
+        print(f"{'Agent / Label':<24} {'API Key (Masked)':<34} {'Status':<12} {'Source'}")
+        print("=" * 90)
+        if not keys_map:
+            print("No API keys currently configured (Server running in open unauthenticated mode).")
+            print("Run 'python3 antigravity_bridge.py key create <label>' to generate your first key!")
+        else:
+            for k, label in keys_map.items():
+                masked = mask_api_key(k)
+                status = "Active"
+                source = f".env ({os.path.basename(env_file)})" if os.path.exists(env_file) else "Environment"
+                print(f"{label:<24} {masked:<34} {status:<12} {source}")
+        print("=" * 90)
+        print(f"Total Configured Keys: {len(keys_map)}")
+        if os.path.exists(env_file):
+            print(f"Config File: {env_file}")
+        print()
+        return 0
+
+    elif sub in ("create", "generate", "new"):
+        label = argv[1].strip() if len(argv) > 1 else f"agent-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
+        new_key = generate_api_key("sk-agv-")
+        ok, path_or_err = save_api_key_to_env(label, new_key)
+        if not ok:
+            print(f"[Error] Failed to save API key: {path_or_err}")
+            return 1
+
+        print("\n" + "=" * 90)
+        print(f"  [SUCCESS] New API Key Created for Agent: '{label}'")
+        print("=" * 90)
+        print(f"  Label:   {label}")
+        print(f"  API Key: {new_key}")
+        print("=" * 90)
+        print(f"[SAVED] Persisted to: {path_or_err}")
+        print("[NOTE] Copy this key now and pass it in 'Authorization: Bearer <key>' or 'x-api-key'.")
+        print()
+        return 0
+
+    elif sub in ("add", "set"):
+        if len(argv) < 3:
+            print("[Error] Usage: python3 antigravity_bridge.py key add <label> <custom_key>")
+            return 1
+        label = argv[1].strip()
+        custom_key = argv[2].strip()
+        ok, path_or_err = save_api_key_to_env(label, custom_key)
+        if not ok:
+            print(f"[Error] Failed to add API key: {path_or_err}")
+            return 1
+        print(f"\n[SUCCESS] API Key for '{label}' added successfully ({mask_api_key(custom_key)})!")
+        print(f"[SAVED] Persisted to: {path_or_err}\n")
+        return 0
+
+    elif sub in ("revoke", "remove", "rm", "delete"):
+        if len(argv) < 2:
+            print("[Error] Usage: python3 antigravity_bridge.py key revoke <label_or_key>")
+            return 1
+        target = argv[1].strip()
+        ok, path_or_err, removed = revoke_api_key_from_env(target)
+        if not ok:
+            print(f"[Error] Failed to revoke key: {path_or_err}")
+            return 1
+        print(f"\n[SUCCESS] Revoked {len(removed)} API key(s) matching '{target}':")
+        for l, k in removed:
+            print(f"  - {l}: {mask_api_key(k)}")
+        print(f"[SAVED] Updated: {path_or_err}\n")
+        return 0
+
+    elif sub in ("test", "check", "verify"):
+        if len(argv) < 2:
+            print("[Error] Usage: python3 antigravity_bridge.py key test <api_key> [--host 127.0.0.1] [--port 8000]")
+            return 1
+        test_key = argv[1].strip()
+        host = "127.0.0.1"
+        port = 8000
+        for i, a in enumerate(argv):
+            if a == "--host" and i + 1 < len(argv):
+                host = argv[i + 1]
+            elif a == "--port" and i + 1 < len(argv):
+                try:
+                    port = int(argv[i + 1])
+                except ValueError:
+                    pass
+
+        test_url = f"http://{host}:{port}/v1/models"
+        req = urllib.request.Request(test_url, headers={"Authorization": f"Bearer {test_key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    print(f"\n[SUCCESS] API Key is VALID and ACTIVE!")
+                    print(f"  Server URL:    {test_url}")
+                    print(f"  Key (Masked):  {mask_api_key(test_key)}")
+                    print(f"  HTTP Status:   200 OK")
+                    print(f"  Available Models: {len(data.get('data', []))} models ready\n")
+                    return 0
+                else:
+                    print(f"\n[FAILED] Server responded with HTTP status {resp.status}.\n")
+                    return 1
+        except urllib.error.HTTPError as he:
+            if he.code == 401:
+                print(f"\n[FAILED] Unauthorized (401): API key '{mask_api_key(test_key)}' was rejected by server at http://{host}:{port}.\n")
+            else:
+                print(f"\n[FAILED] HTTP Error {he.code}: {he.reason}\n")
+            return 1
+        except Exception as exc:
+            print(f"\n[WARNING] Could not connect to bridge server at http://{host}:{port} ({exc}).")
+            configured = get_configured_api_keys()
+            if test_key in configured:
+                print(f"[LOCAL CHECK] Key '{mask_api_key(test_key)}' matches local config label '{configured[test_key]}'.\n")
+                return 0
+            else:
+                print(f"[LOCAL CHECK] Key '{mask_api_key(test_key)}' does NOT match any local keys in .env.\n")
+                return 1
+
+    else:
+        print(f"[Error] Unknown key command '{sub}'. Run 'python3 antigravity_bridge.py key --help' for usage.")
+        return 1
+
+
 def main():
-    # Handle Profile & Diagnostic CLI subcommands before parser
+    # 1. Handle API Key management CLI subcommands before parser
+    known_key_subs = {"key", "keys", "apikey", "apikeys", "manage-keys", "manage_keys", "key-manager"}
+    if len(sys.argv) > 1 and sys.argv[1].lower() in known_key_subs:
+        if sys.argv[1].lower() in ("key", "keys", "apikey", "apikeys", "manage-keys", "manage_keys", "key-manager"):
+            sub_args = sys.argv[2:] if sys.argv[1].lower() in ("key", "apikey") else sys.argv[1:]
+            if sys.argv[1].lower() in ("keys", "manage-keys", "manage_keys") and not sub_args:
+                sub_args = ["list"]
+        else:
+            sub_args = sys.argv[1:]
+        sys.exit(handle_key_cli(sub_args))
+
+    # 2. Handle Profile & Diagnostic CLI subcommands before parser
     known_subs = {
         "profile", "profiles", "login", "auth", "diag", "doctor", "debug", "info",
         "test", "check", "probe", "reset", "unblock", "refresh", "reauth", "sync",
@@ -4426,7 +4923,8 @@ def main():
     parser.add_argument("--total-timeout", type=float, default=DEFAULT_TOTAL_TIMEOUT, help=f"Total execution timeout across all profile fallback attempts in seconds (default: {int(DEFAULT_TOTAL_TIMEOUT)})")
     parser.add_argument("--quota-cache", default=DEFAULT_QUOTA_CACHE_FILE, help=f"Path to quota cache JSON file (default: {DEFAULT_QUOTA_CACHE_FILE})")
     parser.add_argument("--check-profiles-on-start", action="store_true", help="Probe profile availability actively on startup")
-    parser.add_argument("--api-key", default=os.environ.get("ANTIGRAVITY_BRIDGE_API_KEY"), help="API Key for authentication")
+    parser.add_argument("--api-key", default=os.environ.get("ANTIGRAVITY_BRIDGE_API_KEY"), help="Single API Key for authentication")
+    parser.add_argument("--api-keys", default=os.environ.get("ANTIGRAVITY_BRIDGE_API_KEYS"), help="Comma-separated or labeled API Keys for authentication (e.g. 'agent1:sk-xxx,agent2:sk-yyy')")
     parser.add_argument("--enable-cors", "--cors", action="store_true", help="Enable wildcard CORS headers (Access-Control-Allow-Origin: *)")
     parser.add_argument("--image-router-url", default=DEFAULT_IMAGE_ROUTER_URL, help=f"Image generation router URL (default: {DEFAULT_IMAGE_ROUTER_URL})")
     parser.add_argument("--image-router-key", default=DEFAULT_IMAGE_ROUTER_KEY, help="API Key for image generation router")
@@ -4475,6 +4973,8 @@ def main():
 
     auto_refresh_sec = 0.0 if (args.no_auto_refresh or os.environ.get("ANTIGRAVITY_NO_AUTO_REFRESH", "").lower() in ("1", "true", "yes")) else (args.auto_refresh_min * 60.0)
 
+    configured_api_keys = get_configured_api_keys(args.api_key, args.api_keys)
+
     max_concurrent_capacity = len(configured_profiles) * max(1, effective_concurrency)
     logger.info("Starting Antigravity API Bridge Server...")
     logger.info("Detected CLI Binary: %s", cli_bin)
@@ -4494,7 +4994,8 @@ def main():
     server.profiles = configured_profiles
     server.profile_manager = profile_manager
     server.show_profile_status = show_profile_status
-    server.api_key = args.api_key
+    server.api_keys = configured_api_keys
+    server.api_key = args.api_key or (list(configured_api_keys.keys())[0] if configured_api_keys else None)
     server.enable_cors = args.enable_cors
     server.image_router_url = args.image_router_url
     server.image_router_key = args.image_router_key
@@ -4504,8 +5005,11 @@ def main():
     if auto_refresh_sec > 0:
         start_token_refresh_daemon(server, interval_seconds=auto_refresh_sec)
 
-    if server.api_key:
-        logger.info("API Key Authentication: ENABLED")
+    if server.api_keys:
+        labels_summary = ", ".join([f"{l} ({mask_api_key(k)})" for k, l in server.api_keys.items()])
+        logger.info("API Key Authentication: ENABLED (%d key(s) configured: %s)", len(server.api_keys), labels_summary)
+    elif server.api_key:
+        logger.info("API Key Authentication: ENABLED (1 key configured: %s)", mask_api_key(server.api_key))
     else:
         logger.info("API Key Authentication: DISABLED (Unauthenticated local requests allowed)")
 
