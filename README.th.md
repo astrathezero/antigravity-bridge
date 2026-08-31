@@ -38,11 +38,13 @@
   - [1. สิ่งที่ต้องมีก่อน (Prerequisites)](#1-สิ่งที่ต้องมีก่อน-prerequisites)
   - [2. โคลนและเตรียมไฟล์โปรเจกต์](#2-โคลนและเตรียมไฟล์โปรเจกต์)
   - [3. ตั้งค่าสภาพแวดล้อม (.env)](#3-ตั้งค่าสภาพแวดล้อม-env)
-  - [4. เพิ่มโปรไฟล์บัญชี Google](#4-เพิ่มโปรไฟล์บัญชี-google)
-  - [5. เริ่มรัน Bridge Server](#5-เริ่มรัน-bridge-server)
-  - [6. ทดสอบและตรวจสอบสถานะ](#6-ทดสอบและตรวจสอบสถานะ)
+  - [4. จัดการ API Key สำหรับ Agent (ทางเลือก)](#4-จัดการ-api-key-สำหรับ-agent-ทางเลือก)
+  - [5. เพิ่มโปรไฟล์บัญชี Google](#5-เพิ่มโปรไฟล์บัญชี-google)
+  - [6. เริ่มรัน Bridge Server](#6-เริ่มรัน-bridge-server)
+  - [7. ทดสอบและตรวจสอบสถานะ](#7-ทดสอบและตรวจสอบสถานะ)
 - [🤖 ตารางโมเดลที่รองรับ (Supported Models Matrix)](#-ตารางโมเดลที่รองรับ-supported-models-matrix)
 - [👤 คำสั่งจัดการโปรไฟล์ CLI (Profile Manager CLI)](#-คำสั่งจัดการโปรไฟล์-cli-profile-manager-cli)
+- [🔑 คำสั่งจัดการ API Key สำหรับ Agent (API Key Manager CLI)](#-คำสั่งจัดการ-api-key-สำหรับ-agent-api-key-manager-cli)
 - [📡 รายละเอียด REST API Endpoints](#-รายละเอียด-rest-api-endpoints)
   - [1. ตรวจสอบสถานะเซิร์ฟเวอร์ (`GET /health`)](#1-ตรวจสอบสถานะเซิร์ฟเวอร์-get-health)
   - [2. แสดงรายชื่อโมเดล (`GET /v1/models`)](#2-แสดงรายชื่อโมเดล-get-v1models)
@@ -73,10 +75,12 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                  Antigravity Bridge Server (Port 8000)                 │
+│  ├── Multi-API Key Auth & Client Isolator (Cursor, Hermes, Cline)      │
 │  ├── Dual API Translators (OpenAI v1 & Anthropic Messages)             │
 │  ├── Multi-Concurrent Profile Pool & Dynamic Lease Allocator           │
 │  ├── Smart Quota Detector (คำนวณ Cooldown อัตโนมัติ & สลับ Profile)    │
-│  ├── Context Compactor & Heartbeat Generator (ป้องกัน Proxy Timeout)   │
+│  ├── Dynamic Timeout Scaling (สูงสุด 2 ชม.) & รองรับ Prompt ขนาดใหญ่   │
+│  ├── Context Compactor & SSE Keep-Alive Heartbeat Generator            │
 │  ├── Background OAuth Auto-Refresh Daemon (รีเฟรชทุก 55 นาที)          │
 │  └── Google Imagen 3 & Gemini Image Router                             │
 └───────────────────────────────────┬────────────────────────────────────┘
@@ -94,6 +98,10 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
 
 ## ✨ ฟีเจอร์หลัก (Key Features)
 
+- 🔑 **ระบบ Multiple API Keys & แยกสิทธิ์ตาม Agent**:
+  - กำหนด API Key ปลอดภัยแยกสำหรับ Agent แต่ละตัว (Cursor, Hermes, Cline, Claude Dev) ได้โดยตรงในไฟล์ `.env`
+  - มีเครื่องมือ CLI Standalone (`manage_keys.py` / `python3 antigravity_bridge.py key`) สำหรับสร้าง, ดู, เพิกถอน และทดสอบ Key
+  - ตรวจสอบผ่าน `Authorization: Bearer <key>`, `x-api-key: <key>`, `api-key: <key>` หรือ URL Parameter
 - ⚡ **Multi-Concurrent Profile Pool & การประมวลผลแบบขนาน**:
   - **Isolated Sandboxes**: รันแต่ละโปรไฟล์ในไดเรกทอรีเฉพาะแยกขาดจากกัน (`~/.config/antigravity/sandboxes/<profile>/`) หมดปัญหา SQLite database lock (`conversation_summaries.db`) และการชนกันของไฟล์ Auth
   - **ความจุขนานสูง**: กำหนดจำนวนคำขอพร้อมกันต่อโปรไฟล์ได้ (เช่น 14 โปรไฟล์ × 2 Concurrency = **รองรับพร้อมกันสูงสุด 28 คำขอ**)
@@ -150,10 +158,18 @@ ANTIGRAVITY_HOST=127.0.0.1
 ANTIGRAVITY_PORT=8000
 ANTIGRAVITY_PROFILE_CONCURRENCY=2
 # ANTIGRAVITY_DISABLED_PROFILES=reserve_profile
-# ANTIGRAVITY_BRIDGE_API_KEY=sk-antigravity
+# ANTIGRAVITY_BRIDGE_API_KEYS=agent-cursor:sk-agv-111,agent-hermes:sk-agv-222
 ```
 
-### 4. เพิ่มโปรไฟล์บัญชี Google
+### 4. จัดการ API Key สำหรับ Agent (ทางเลือก)
+สร้าง API Key ที่ปลอดภัยสำหรับ Agent แต่ละตัว:
+```bash
+python3 manage_keys.py create agent-cursor
+python3 manage_keys.py create agent-hermes
+python3 manage_keys.py list
+```
+
+### 5. เพิ่มโปรไฟล์บัญชี Google
 เพิ่มบัญชี Google เข้าสู่ระบบแบบ Interactive:
 ```bash
 python3 antigravity_bridge.py login profile_1
@@ -164,7 +180,7 @@ python3 antigravity_bridge.py login profile_2
 > 2. เมื่อหน้าจอ Terminal กลับมาและแสดงเครื่องหมาย `>` ให้พิมพ์ว่า `hi` แล้วกด `Enter` เพื่อเริ่มใช้งาน
 > 3. พิมพ์คำสั่ง `/exit` (หรือกด `Ctrl+D`) เพื่อบันทึกข้อมูล Token ลงใน `~/.config/antigravity/profiles/<ชื่อโปรไฟล์>/`
 
-### 5. เริ่มรัน Bridge Server
+### 6. เริ่มรัน Bridge Server
 
 #### วิธีที่ 1: ติดตั้งเป็น Systemd Service อัตโนมัติ (แนะนำสำหรับ Linux VPS)
 ```bash
@@ -177,7 +193,7 @@ chmod +x setup_systemd.sh
 python3 antigravity_bridge.py
 ```
 
-### 6. ทดสอบและตรวจสอบสถานะ
+### 7. ทดสอบและตรวจสอบสถานะ
 ```bash
 # ตรวจสอบสถานะโปรไฟล์และความจุ Concurrency:
 python3 antigravity_bridge.py profiles

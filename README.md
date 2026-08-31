@@ -38,11 +38,13 @@
   - [1. Prerequisites](#1-prerequisites)
   - [2. Clone & Setup](#2-clone--setup)
   - [3. Configure Environment (.env)](#3-configure-environment-env)
-  - [4. Add Google Profiles](#4-add-google-profiles)
-  - [5. Launch Bridge Server](#5-launch-bridge-server)
-  - [6. Verify & Health Check](#6-verify--health-check)
+  - [4. Manage API Keys (Optional)](#4-manage-api-keys-optional)
+  - [5. Add Google Profiles](#5-add-google-profiles)
+  - [6. Launch Bridge Server](#6-launch-bridge-server)
+  - [7. Verify & Health Check](#7-verify--health-check)
 - [🤖 Supported Models Matrix](#-supported-models-matrix)
 - [👤 Profile Manager CLI Reference](#-profile-manager-cli-reference)
+- [🔑 API Key Manager CLI Reference](#-api-key-manager-cli-reference-multiple-keys--agents)
 - [📡 REST API Reference](#-rest-api-reference)
   - [1. Health Check (`GET /health`)](#1-health-check-get-health)
   - [2. List Models (`GET /v1/models`)](#2-list-models-get-v1models)
@@ -73,10 +75,12 @@ Antigravity Bridge acts as a unified HTTP gateway between your applications (Her
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                  Antigravity Bridge Server (Port 8000)                 │
+│  ├── Multi-API Key Auth & Client Isolator (Cursor, Hermes, Cline)      │
 │  ├── Dual API Translators (OpenAI v1 & Anthropic Messages)             │
 │  ├── Multi-Concurrent Profile Pool & Dynamic Lease Allocator           │
 │  ├── Smart Quota Detector (Auto-Calculates Reset Timers & Rotates)     │
-│  ├── Context Compactor & Heartbeat Generator (For Long Reasoning)      │
+│  ├── Dynamic Timeout Scaling (Up to 2h) & Large Prompt Support         │
+│  ├── Context Compactor & SSE Keep-Alive Heartbeat Generator            │
 │  ├── Background OAuth Auto-Refresh Daemon (Every 55m)                  │
 │  └── Google Imagen 3 & Gemini Image Router                             │
 └───────────────────────────────────┬────────────────────────────────────┘
@@ -94,6 +98,10 @@ Antigravity Bridge acts as a unified HTTP gateway between your applications (Her
 
 ## ✨ Key Features
 
+- 🔑 **Multi-API Key Management & Agent Isolation**:
+  - Assign separate, secure API keys to different agents (Cursor, Hermes, Cline, Claude Dev) directly in `.env`.
+  - Built-in standalone CLI tool (`manage_keys.py` / `python3 antigravity_bridge.py key`) to create, list, revoke, and test keys.
+  - Automatically verifies `Authorization: Bearer <key>`, `x-api-key: <key>`, `api-key: <key>`, or `?api_key=<key>`.
 - ⚡ **Multi-Concurrent Profile Pool**:
   - **Isolated Sandboxes**: Each profile runs in its own isolated runtime directory (`~/.config/antigravity/sandboxes/<profile>/`), completely eliminating SQLite database locks (`conversation_summaries.db`) and auth file collisions.
   - **Parallel Capacity**: Configurable concurrent requests per profile (e.g. 14 profiles × 2 concurrency = **28 parallel requests**).
@@ -150,10 +158,18 @@ ANTIGRAVITY_HOST=127.0.0.1
 ANTIGRAVITY_PORT=8000
 ANTIGRAVITY_PROFILE_CONCURRENCY=2
 # ANTIGRAVITY_DISABLED_PROFILES=reserve_profile
-# ANTIGRAVITY_BRIDGE_API_KEY=sk-antigravity
+# ANTIGRAVITY_BRIDGE_API_KEYS=agent-cursor:sk-agv-111,agent-hermes:sk-agv-222
 ```
 
-### 4. Add Google Profiles
+### 4. Manage API Keys (Optional)
+Generate secure API keys for your AI agents:
+```bash
+python3 manage_keys.py create agent-cursor
+python3 manage_keys.py create agent-hermes
+python3 manage_keys.py list
+```
+
+### 5. Add Google Profiles
 Add your Google account profiles interactively:
 ```bash
 python3 antigravity_bridge.py login profile_1
@@ -164,7 +180,7 @@ python3 antigravity_bridge.py login profile_2
 > 2. When the terminal prompt displays `>`, type `hi` and press `Enter` to activate.
 > 3. Type `/exit` (or `Ctrl+D`) to save the profile credentials to `~/.config/antigravity/profiles/<name>/`.
 
-### 5. Launch Bridge Server
+### 6. Launch Bridge Server
 
 #### Option A: 1-Click Systemd Service (Recommended for Linux)
 ```bash
@@ -177,7 +193,7 @@ chmod +x setup_systemd.sh
 python3 antigravity_bridge.py
 ```
 
-### 6. Verify & Health Check
+### 7. Verify & Health Check
 ```bash
 # Check profile pool status:
 python3 antigravity_bridge.py profiles
