@@ -3431,6 +3431,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         status_code=400,
                     )
                     return
+            else:
+                req_json = {}
             if is_keys_create:
                 label = req_json.get("label", "agent-custom").strip()
                 custom_key = req_json.get("key", "").strip()
