@@ -4384,9 +4384,11 @@ Examples:
             print(f"[Error] Local profile '{name}' not found at {source_dir}")
             return 1
 
-        remote_dest = f"{remote}:~/.config/antigravity/profiles/"
+        subprocess.run(["ssh", remote, "mkdir -p ~/.config/antigravity/profiles"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        remote_dest = f"{remote}:~/.config/antigravity/profiles/{name}"
+        subprocess.run(["ssh", remote, f"mkdir -p ~/.config/antigravity/profiles/{name}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f"[INFO] Copying profile '{name}' to {remote_dest}...")
-        res = subprocess.call(["scp", "-r", source_dir, remote_dest])
+        res = subprocess.call(["scp", "-r", f"{source_dir}/.", remote_dest])
         if res == 0:
             print(f"[SUCCESS] Profile '{name}' successfully copied to {remote}!")
         else:
