@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import signal
 import sys
 import subprocess
 import threading
@@ -1061,6 +1062,92 @@ class TestAntigravityBridge(unittest.TestCase):
             code = antigravity_bridge.handle_key_cli(["list"])
             self.assertEqual(code, 0)
         self.assertIn("Agent / Label", f.getvalue())
+
+    def test_kill_process_tree(self):
+        """Test kill_process_tree cleanly terminates process tree and handles errors."""
+        # 1. None proc should not raise
+        antigravity_bridge.kill_process_tree(None)
+
+        # 2. Already terminated proc (poll() returns 0) should not call killpg
+        mock_done = MagicMock()
+        mock_done.poll.return_value = 0
+        with patch("os.killpg") as mock_killpg:
+            antigravity_bridge.kill_process_tree(mock_done)
+            mock_killpg.assert_not_called()
+
+        # 3. Active proc with pid should call killpg on POSIX
+        mock_active = MagicMock()
+        mock_active.poll.return_value = None
+        mock_active.pid = 98765
+        with patch("os.killpg") as mock_killpg:
+            antigravity_bridge.kill_process_tree(mock_active)
+            if os.name != "nt" and hasattr(os, "killpg"):
+                mock_killpg.assert_called_once_with(98765, signal.SIGKILL)
+
+        # 4. ProcessLookupError should be swallowed silently
+        mock_lookup_err = MagicMock()
+        mock_lookup_err.poll.return_value = None
+        mock_lookup_err.pid = 98766
+        with patch("os.killpg", side_effect=ProcessLookupError):
+            antigravity_bridge.kill_process_tree(mock_lookup_err)
+
+    @patch("subprocess.Popen")
+    def test_execute_cli_command_stdin_devnull(self, mock_popen):
+        """Test execute_cli_command uses DEVNULL and start_new_session when stdin is empty."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = ("Output text", "")
+        mock_popen.return_value = mock_proc
+
+        out = antigravity_bridge.execute_cli_command('echo "{prompt}"', "hello")
+        self.assertEqual(out, "Output text")
+        mock_popen.assert_called_once()
+        _, kwargs = mock_popen.call_args
+        self.assertEqual(kwargs.get("stdin"), subprocess.DEVNULL)
+        if os.name != "nt":
+            self.assertTrue(kwargs.get("start_new_session"))
+
+    @patch("subprocess.Popen")
+    def test_execute_cli_command_timeout_calls_kill_process_tree(self, mock_popen):
+        """Test execute_cli_command invokes kill_process_tree on subprocess.TimeoutExpired."""
+        mock_proc = MagicMock()
+        mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd=["agy"], timeout=1.0)
+        mock_popen.return_value = mock_proc
+
+        with patch.object(antigravity_bridge, "kill_process_tree") as mock_kill_tree:
+            with self.assertRaises(RuntimeError) as ctx:
+                antigravity_bridge.execute_cli_command('agy -p "{prompt}"', "prompt text", timeout=1.0)
+            self.assertIn("CLI Execution Timeout", str(ctx.exception))
+            mock_kill_tree.assert_called()
+
+    def test_extract_request_timeouts_custom_autoscale_caps(self):
+        """Test custom max autoscale and total timeout caps when configured on server."""
+        handler = MagicMock()
+        handler.server = MagicMock()
+        handler.server.profile_timeout = 60.0
+        handler.server.total_timeout = 120.0
+        handler.server.max_autoscale_timeout = 150.0
+        handler.server.max_total_timeout = 300.0
+        handler.headers = {}
+        handler.path = "/v1/chat/completions"
+
+        # 100k chars prompt: without cap would be 60 + 9 * 75 = 735s.
+        # With max_autoscale_timeout = 150.0s, it must be clamped to 150.0s.
+        prof, total = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=100000)
+        self.assertEqual(prof, 150.0)
+        # Total timeout with max_total_timeout = 300.0s
+        self.assertEqual(total, 300.0)
+
+    def test_send_json_response_broken_pipe_suppression(self):
+        """Test that BrokenPipeError during send_json_response is raised cleanly for caller suppression."""
+        handler = MagicMock()
+        handler.server = MagicMock()
+        handler.server.enable_cors = False
+        handler.wfile = MagicMock()
+        handler.wfile.write.side_effect = BrokenPipeError(32, "Broken pipe")
+
+        with self.assertRaises(BrokenPipeError):
+            antigravity_bridge.AntigravityBridgeHandler._send_json_response(handler, {"key": "val"})
 
 
 if __name__ == "__main__":

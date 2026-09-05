@@ -30,6 +30,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -83,6 +84,8 @@ MAX_CLI_ARG_BYTES = 350000        # 350KB safe CLI argument limit (macOS ARG_MAX
 
 DEFAULT_PROFILE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_PROFILE_TIMEOUT", "180.0"))  # Default execution timeout per profile attempt in seconds
 DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TOTAL_TIMEOUT", "480.0"))       # Total execution timeout across all profile fallback attempts in seconds
+DEFAULT_MAX_AUTOSCALE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT", "3600.0"))  # Maximum auto-scaled profile timeout ceiling
+DEFAULT_MAX_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_TOTAL_TIMEOUT", "18000.0"))        # Maximum total fallback budget ceiling
 
 DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "https://aiapirouter.mrserm.com/v1")
 DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "sk-36a01df06cfa9e5f-5mbqa9-11db659b")
@@ -2333,6 +2336,38 @@ def detect_local_proxy() -> Optional[str]:
     return None
 
 
+def kill_process_tree(proc: Optional[subprocess.Popen]) -> None:
+    """Safely terminate a subprocess and all of its descendants (process group)."""
+    if proc is None:
+        return
+    try:
+        poll_res = proc.poll()
+        if poll_res is not None and poll_res != "":
+            return
+    except Exception:
+        pass
+
+    try:
+        pid = getattr(proc, "pid", None)
+        if isinstance(pid, int) and pid > 0 and os.name != "nt" and hasattr(os, "killpg"):
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        else:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def execute_cli_command(
     cmd_template: str,
     prompt_text: str,
@@ -2399,6 +2434,7 @@ def execute_cli_command(
 
     temp_prompt_file: Optional[str] = None
     stdin_file_handle = None
+    proc: Optional[subprocess.Popen] = None
     try:
         if stdin_input:
             stdin_bytes = stdin_input.encode("utf-8")
@@ -2416,8 +2452,12 @@ def execute_cli_command(
                 proc_stdin = subprocess.PIPE
                 comm_input = stdin_input
         else:
-            proc_stdin = subprocess.PIPE
+            proc_stdin = subprocess.DEVNULL
             comm_input = None
+
+        popen_kwargs: Dict[str, Any] = {}
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
 
         proc = subprocess.Popen(
             argv,
@@ -2430,18 +2470,21 @@ def execute_cli_command(
             encoding="utf-8",
             errors="replace",
             env=env,
+            **popen_kwargs,
         )
         try:
             stdout_data, stderr_data = proc.communicate(input=comm_input, timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            kill_process_tree(proc)
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=2.0)
             except Exception:
-                pass
+                stdout_data, stderr_data = "", ""
             logger.error("CLI execution timed out after %.1fs for profile '%s'", timeout, profile or "default")
             raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
     finally:
+        if proc is not None and proc.poll() is None:
+            kill_process_tree(proc)
         if stdin_file_handle:
             try:
                 stdin_file_handle.close()
@@ -2453,7 +2496,7 @@ def execute_cli_command(
             except Exception:
                 pass
 
-    if proc.returncode != 0:
+    if proc is not None and proc.returncode != 0:
         err_msg = stderr_data.strip() or stdout_data.strip() or f"Exit code {proc.returncode}"
         logger.error("CLI execution failed for profile '%s' (code %d): %s", profile or "default", proc.returncode, err_msg)
         raise RuntimeError(f"CLI Execution Error (profile={profile or 'default'}): {err_msg}")
@@ -3093,18 +3136,22 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
         return False
 
     def _send_json_response(self, data: Dict[str, Any], status_code: int = 200, extra_headers: Optional[Dict[str, str]] = None) -> None:
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        if extra_headers:
-            for hk, hv in extra_headers.items():
-                self.send_header(hk, hv)
-        if getattr(self.server, "enable_cors", False):
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if extra_headers:
+                for hk, hv in extra_headers.items():
+                    self.send_header(hk, hv)
+            if getattr(self.server, "enable_cors", False):
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Headers", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            logger.debug("Client disconnected before _send_json_response could complete")
+            raise
 
     def _send_cors_headers(self) -> None:
         self.send_response(204)
@@ -3270,16 +3317,26 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
         if req_prof_timeout is not None:
             effective_prof_timeout = max(1.0, min(req_prof_timeout, 7200.0))  # Up to 2 hours if requested
         else:
+            max_autoscale = getattr(self.server, "max_autoscale_timeout", None)
+            if not isinstance(max_autoscale, (int, float)):
+                max_autoscale = DEFAULT_MAX_AUTOSCALE_TIMEOUT
             if prompt_len > 10000:
                 scaled = server_prof_timeout + ((prompt_len - 10000) / 10000.0) * 75.0
-                effective_prof_timeout = max(server_prof_timeout, min(scaled, 3600.0))  # Auto-scales up to 60 min (3600s)
+                effective_prof_timeout = max(server_prof_timeout, min(scaled, float(max_autoscale)))
             else:
                 effective_prof_timeout = server_prof_timeout
 
         if req_total_timeout is not None:
             effective_total_timeout = max(req_total_timeout, effective_prof_timeout)
-        else:
+        elif req_prof_timeout is not None:
             effective_total_timeout = max(server_total_timeout, effective_prof_timeout * 2.5)
+        else:
+            max_total_cap = getattr(self.server, "max_total_timeout", None)
+            if not isinstance(max_total_cap, (int, float)):
+                max_total_cap = DEFAULT_MAX_TOTAL_TIMEOUT
+            effective_total_timeout = max(server_total_timeout, effective_prof_timeout * 2.5)
+            if isinstance(max_total_cap, (int, float)) and max_total_cap > 0:
+                effective_total_timeout = min(effective_total_timeout, float(max_total_cap))
 
         effective_total_timeout = max(1.0, min(effective_total_timeout, 18000.0))  # Up to 5 hours
 
@@ -4109,13 +4166,22 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 },
             }
 
-            self._send_json_response(response_payload, extra_headers=extra_resp_headers)
+            try:
+                self._send_json_response(response_payload, extra_headers=extra_resp_headers)
+            except (BrokenPipeError, ConnectionResetError):
+                logger.warning("Client disconnected before receiving JSON response")
+                return
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning("Client connection broken during request processing")
         except Exception as exc:
             logger.error("Unhandled Exception in do_POST: %s", exc)
-            self._send_json_response(
-                {"error": {"message": f"Internal Server Error: {exc}", "type": "api_error"}},
-                status_code=500,
-            )
+            try:
+                self._send_json_response(
+                    {"error": {"message": f"Internal Server Error: {exc}", "type": "api_error"}},
+                    status_code=500,
+                )
+            except Exception:
+                pass
 
 
 def get_profile_account_email(profile: Optional[str]) -> str:
@@ -4935,6 +5001,8 @@ def main():
     parser.add_argument("--cooldown-sec", type=float, default=300.0, help="Base cooldown seconds for exhausted profiles (default: 300)")
     parser.add_argument("--profile-timeout", type=float, default=DEFAULT_PROFILE_TIMEOUT, help=f"Execution timeout per profile attempt in seconds (default: {int(DEFAULT_PROFILE_TIMEOUT)})")
     parser.add_argument("--total-timeout", type=float, default=DEFAULT_TOTAL_TIMEOUT, help=f"Total execution timeout across all profile fallback attempts in seconds (default: {int(DEFAULT_TOTAL_TIMEOUT)})")
+    parser.add_argument("--max-autoscale-timeout", type=float, default=DEFAULT_MAX_AUTOSCALE_TIMEOUT, help=f"Maximum allowed auto-scaled profile timeout in seconds (default: {int(DEFAULT_MAX_AUTOSCALE_TIMEOUT)})")
+    parser.add_argument("--max-total-timeout", type=float, default=DEFAULT_MAX_TOTAL_TIMEOUT, help=f"Maximum total fallback timeout budget in seconds (default: {int(DEFAULT_MAX_TOTAL_TIMEOUT)})")
     parser.add_argument("--quota-cache", default=DEFAULT_QUOTA_CACHE_FILE, help=f"Path to quota cache JSON file (default: {DEFAULT_QUOTA_CACHE_FILE})")
     parser.add_argument("--check-profiles-on-start", action="store_true", help="Probe profile availability actively on startup")
     parser.add_argument("--api-key", default=os.environ.get("ANTIGRAVITY_BRIDGE_API_KEY"), help="Single API Key for authentication")
@@ -5015,6 +5083,8 @@ def main():
     server.image_router_key = args.image_router_key
     server.profile_timeout = args.profile_timeout
     server.total_timeout = args.total_timeout
+    server.max_autoscale_timeout = args.max_autoscale_timeout
+    server.max_total_timeout = args.max_total_timeout
 
     if auto_refresh_sec > 0:
         start_token_refresh_daemon(server, interval_seconds=auto_refresh_sec)
