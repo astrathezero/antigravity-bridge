@@ -1131,6 +1131,123 @@ def persist_disabled_profile(profile: str, disabled: bool = True) -> None:
         logger.warning("Failed to persist disabled profile '%s' to %s: %s", profile, cfg_file, exc)
 
 
+class ProfileSandboxBusyError(RuntimeError):
+    """Raised when a profile sandbox directory is currently locked or in use by another running process."""
+    pass
+
+
+MAC_KEYCHAIN_LOCK = threading.Lock()
+_PROFILE_THREAD_LOCKS: Dict[str, threading.Lock] = {}
+_PROFILE_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def get_profile_thread_lock(profile_name: Optional[str]) -> threading.Lock:
+    """Get or create in-memory lock for a profile within this process."""
+    key = profile_name or "default"
+    with _PROFILE_THREAD_LOCKS_GUARD:
+        if key not in _PROFILE_THREAD_LOCKS:
+            _PROFILE_THREAD_LOCKS[key] = threading.Lock()
+        return _PROFILE_THREAD_LOCKS[key]
+
+
+def get_profile_sandbox_base_path(profile_name: Optional[str]) -> str:
+    """Get the base path of a profile's sandbox directory without touching disk files."""
+    key = profile_name or "default"
+    return os.path.expanduser(f"~/.config/antigravity/sandboxes/{key}")
+
+
+def is_profile_sandbox_locked(profile_name: Optional[str]) -> bool:
+    """Check whether a profile's sandbox is currently locked or in use by ANY process or thread.
+    Returns True if either the in-process thread lock is held or the OS file lock (.sandbox.lock) is held.
+    """
+    key = profile_name or "default"
+    # 1. Check in-process thread lock
+    t_lock = get_profile_thread_lock(key)
+    if t_lock.locked():
+        return True
+
+    # 2. Check OS-level file lock non-blockingly
+    if os.name != "nt":
+        import fcntl
+        sandbox_base = get_profile_sandbox_base_path(profile_name)
+        lock_file = os.path.join(sandbox_base, ".sandbox.lock")
+        if os.path.exists(lock_file):
+            try:
+                fd = os.open(lock_file, os.O_RDWR)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # Acquired lock successfully -> Not locked by anyone else!
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    return False
+                except (BlockingIOError, IOError, OSError):
+                    # Lock is held by another process!
+                    return True
+                finally:
+                    os.close(fd)
+            except Exception:
+                pass
+    return False
+
+
+class SandboxDirectoryLock:
+    """OS-level advisory file lock and thread lock ensuring only one CLI execution per profile sandbox at a time."""
+
+    def __init__(self, sandbox_dir: str, profile_name: Optional[str] = None):
+        self.sandbox_dir = sandbox_dir
+        self.profile_name = profile_name or "default"
+        self.lock_file = os.path.join(sandbox_dir, ".sandbox.lock")
+        self.lock_fd = None
+        self._t_lock = get_profile_thread_lock(self.profile_name)
+        self._acquired_thread_lock = False
+
+    def __enter__(self):
+        # 1. Thread-level lock within the current process (non-blocking)
+        acquired = self._t_lock.acquire(blocking=False)
+        if not acquired:
+            raise ProfileSandboxBusyError(
+                f"Profile '{self.profile_name}' sandbox is currently locked by another running process"
+            )
+        self._acquired_thread_lock = True
+
+        # 2. OS-level file lock across processes (non-blocking)
+        if os.name != "nt":
+            import fcntl
+            os.makedirs(self.sandbox_dir, exist_ok=True)
+            try:
+                self.lock_fd = open(self.lock_file, "a+")
+                fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, IOError, OSError):
+                if self.lock_fd:
+                    try:
+                        self.lock_fd.close()
+                    except Exception:
+                        pass
+                    self.lock_fd = None
+                if self._acquired_thread_lock:
+                    self._t_lock.release()
+                    self._acquired_thread_lock = False
+                raise ProfileSandboxBusyError(
+                    f"Profile '{self.profile_name}' sandbox is currently locked by another running process"
+                )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.lock_fd is not None and os.name != "nt":
+            import fcntl
+            try:
+                fcntl.flock(self.lock_fd.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                self.lock_fd.close()
+            except Exception:
+                pass
+            self.lock_fd = None
+        if self._acquired_thread_lock:
+            self._t_lock.release()
+            self._acquired_thread_lock = False
+
+
 class ProfileManager:
     """Thread-safe manager for tracking profile quota states, cooldowns, and smart routing."""
 
@@ -1145,8 +1262,19 @@ class ProfileManager:
         self.cache_file = os.path.expanduser(cache_file)
         self.default_cooldown = default_cooldown
         self.max_cooldown = max_cooldown
-        self.concurrency_per_profile = max(1, int(concurrency_per_profile))
+        # Each profile maps to an isolated filesystem sandbox (~/.config/antigravity/sandboxes/<profile>).
+        # Running >1 concurrent execution in the same sandbox directory causes SQLite lock contention,
+        # token overwrites, and hangs. Concurrency per profile is strictly enforced as 1.
+        env_concurrency = os.environ.get("ANTIGRAVITY_PROFILE_CONCURRENCY")
+        parsed_concurrency = int(env_concurrency) if env_concurrency else int(concurrency_per_profile)
+        if parsed_concurrency > 1:
+            logger.warning(
+                "Profile concurrency was requested as %d, but clamping to 1 to guarantee filesystem sandbox isolation and prevent collisions.",
+                parsed_concurrency,
+            )
+        self.concurrency_per_profile = 1
         self.lock = threading.Lock()
+        self.condition = threading.Condition(self.lock)
         self.current_idx = 0
         self._profiles: List[Optional[str]] = profiles if profiles is not None else get_available_profiles()
         self.state: Dict[str, Dict[str, Any]] = {}
@@ -1426,17 +1554,22 @@ class ProfileManager:
             self.save_cache()
 
     def get_ordered_profiles(self) -> List[Optional[str]]:
-        """Return candidate profiles ordered by availability:
-        1. Ready / Healthy profiles (authenticated & not in cooldown), rotated round-robin.
-        2. Recovering profiles (cooldown timestamp expired).
-        3. Exhausted profiles (sorted by earliest cooldown expiration).
-        4. Unauthenticated profiles (last resort).
+        """Return candidate profiles ordered by availability and concurrency:
+        1. Ready & completely IDLE profiles (in_flight == 0), rotated round-robin.
+        2. Ready profiles with free capacity (in_flight < concurrency_per_profile, least-loaded first).
+        3. Recovering profiles with free capacity (cooldown expired / idle first).
+        4. Saturated / busy profiles (in_flight >= concurrency_per_profile).
+        5. Unauthenticated profiles (last resort).
+        6. Exhausted profiles (sorted by earliest cooldown expiration).
         """
         now = time.time()
         with self.lock:
             profiles = list(self._profiles)
-            ready: List[Optional[str]] = []
-            recovering: List[Optional[str]] = []
+            ready_idle: List[Optional[str]] = []
+            ready_avail: List[Optional[str]] = []
+            ready_busy: List[Optional[str]] = []
+            recovering_idle: List[Optional[str]] = []
+            recovering_busy: List[Optional[str]] = []
             exhausted: List[Tuple[float, Optional[str]]] = []
             unauthenticated: List[Optional[str]] = []
 
@@ -1458,77 +1591,159 @@ class ProfileManager:
                     unauthenticated.append(p)
                     continue
 
-                if status in ("EXHAUSTED", "RATE_LIMITED", "ERROR_COOLDOWN"):
-                    recovering.append(p)
-                else:
-                    ready.append(p)
+                in_fl = self.in_flight.get(key, 0)
+                is_recovering = status in ("EXHAUSTED", "RATE_LIMITED", "ERROR_COOLDOWN")
+                is_locked = is_profile_sandbox_locked(p)
+                is_busy = (in_fl >= self.concurrency_per_profile) or is_locked
 
-            # Round-robin among ready profiles
-            if ready:
-                idx = self.current_idx % len(ready)
-                ready = ready[idx:] + ready[:idx]
-                self.current_idx = (idx + 1) % len(ready)
+                if is_recovering:
+                    if not is_busy:
+                        recovering_idle.append(p)
+                    else:
+                        recovering_busy.append(p)
+                else:
+                    if in_fl == 0 and not is_locked:
+                        ready_idle.append(p)
+                    elif not is_busy:
+                        ready_avail.append(p)
+                    else:
+                        ready_busy.append(p)
+
+            # Round-robin among ready_idle profiles
+            if ready_idle:
+                idx = self.current_idx % len(ready_idle)
+                ready_idle = ready_idle[idx:] + ready_idle[:idx]
+                self.current_idx = (idx + 1) % len(ready_idle)
+
+            # Sort partially loaded ready profiles by in_flight ascending
+            ready_avail.sort(key=lambda p: self.in_flight.get(p or "default", 0))
 
             # Exhausted profiles sorted by earliest cooldown expiration
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
 
-            # Complete prioritized fallback chain across ALL configured profiles:
-            # 1. Ready & healthy profiles (rotated round-robin)
-            # 2. Recovering profiles (cooldown expired / temporary error backoff)
-            # 3. Unauthenticated / untested profiles
-            # 4. Exhausted profiles (last resort fallback, earliest reset first)
-            all_ordered = ready + recovering + unauthenticated + exhausted_profiles
+            all_ordered = (
+                ready_idle
+                + ready_avail
+                + recovering_idle
+                + ready_busy
+                + recovering_busy
+                + unauthenticated
+                + exhausted_profiles
+            )
             return all_ordered if all_ordered else [None]
 
-    def acquire_profile(self, candidates: Optional[List[Optional[str]]] = None) -> Optional[str]:
-        """Atomically select and acquire an idle/available candidate profile with free in-flight lease."""
-        with self.lock:
-            target_list = list(candidates) if candidates is not None else self.get_ordered_profiles()
-            now = time.time()
-            # 1. Prefer ready candidates where in_flight < concurrency_per_profile
-            available = [
-                p for p in target_list
-                if self.in_flight.get(p or "default", 0) < self.concurrency_per_profile
-                and self.state.get(p or "default", {}).get("status") != "DISABLED"
-                and (self.state.get(p or "default", {}).get("exhausted_until", 0) == 0 or now >= self.state.get(p or "default", {}).get("exhausted_until", 0))
-            ]
-            if available:
-                if candidates is not None:
-                    chosen = available[0]
-                else:
-                    chosen = available[self.current_idx % len(available)]
-                    self.current_idx = (self.current_idx + 1) % len(available)
-                key = chosen or "default"
-                self.in_flight[key] = self.in_flight.get(key, 0) + 1
-                return chosen
+    def acquire_profile(
+        self,
+        candidates: Optional[List[Optional[str]]] = None,
+        wait_timeout: float = 0.0,
+    ) -> Optional[str]:
+        """Atomically select and acquire an idle/available candidate profile with free in-flight lease.
+        If all candidates are busy and wait_timeout > 0, waits up to wait_timeout for an in-flight job to release.
+        """
+        deadline = time.time() + wait_timeout if wait_timeout > 0 else 0.0
+        with self.condition:
+            while True:
+                target_list = list(candidates) if candidates is not None else self.get_ordered_profiles()
+                now = time.time()
+                # 1. Prefer ready candidates where in_flight < concurrency_per_profile and not locked
+                available = [
+                    p for p in target_list
+                    if self.in_flight.get(p or "default", 0) < self.concurrency_per_profile
+                    and not is_profile_sandbox_locked(p)
+                    and self.state.get(p or "default", {}).get("status") != "DISABLED"
+                    and (self.state.get(p or "default", {}).get("exhausted_until", 0) == 0 or now >= self.state.get(p or "default", {}).get("exhausted_until", 0))
+                ]
+                if available:
+                    if candidates is not None:
+                        chosen = available[0]
+                    else:
+                        # Prioritize strictly IDLE profiles (in_flight == 0 and not locked) first
+                        idles = [p for p in available if self.in_flight.get(p or "default", 0) == 0]
+                        if idles:
+                            chosen = idles[self.current_idx % len(idles)]
+                            self.current_idx = (self.current_idx + 1) % len(idles)
+                        else:
+                            # Choose least-loaded profile
+                            available.sort(key=lambda p: self.in_flight.get(p or "default", 0))
+                            chosen = available[0]
+                    key = chosen or "default"
+                    self.in_flight[key] = self.in_flight.get(key, 0) + 1
+                    return chosen
 
-            # 2. Fallback to recovering/exhausted candidates if free in-flight capacity
-            recovering_available = [
-                p for p in target_list
-                if self.in_flight.get(p or "default", 0) < self.concurrency_per_profile
-                and self.state.get(p or "default", {}).get("status") != "DISABLED"
-            ]
-            if recovering_available:
-                chosen = recovering_available[0]
-                key = chosen or "default"
-                self.in_flight[key] = self.in_flight.get(key, 0) + 1
-                return chosen
+                # 2. Fallback to recovering/exhausted candidates if free in-flight capacity and not locked
+                recovering_available = [
+                    p for p in target_list
+                    if self.in_flight.get(p or "default", 0) < self.concurrency_per_profile
+                    and not is_profile_sandbox_locked(p)
+                    and self.state.get(p or "default", {}).get("status") != "DISABLED"
+                ]
+                if recovering_available:
+                    if candidates is not None:
+                        chosen = recovering_available[0]
+                    else:
+                        recovering_idles = [p for p in recovering_available if self.in_flight.get(p or "default", 0) == 0]
+                        if recovering_idles:
+                            chosen = recovering_idles[self.current_idx % len(recovering_idles)]
+                            self.current_idx = (self.current_idx + 1) % len(recovering_idles)
+                        else:
+                            chosen = recovering_available[0]
+                    key = chosen or "default"
+                    self.in_flight[key] = self.in_flight.get(key, 0) + 1
+                    return chosen
+
+                if wait_timeout > 0:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        break
+                    self.condition.wait(timeout=min(0.5, remaining))
+                else:
+                    break
 
             return None
 
+    def is_profile_busy(self, profile: Optional[str]) -> bool:
+        """Check if a profile is currently at or above its concurrency limit or its sandbox is locked."""
+        key = profile or "default"
+        with self.lock:
+            if self.in_flight.get(key, 0) >= self.concurrency_per_profile:
+                return True
+        return is_profile_sandbox_locked(profile)
+
+    def get_idle_profiles(self) -> List[Optional[str]]:
+        """Return list of ready profiles that currently have 0 in-flight requests and unlocked sandboxes."""
+        now = time.time()
+        with self.lock:
+            return [
+                p for p in self._profiles
+                if self.in_flight.get(p or "default", 0) == 0
+                and not is_profile_sandbox_locked(p)
+                and self.state.get(p or "default", {}).get("status") != "DISABLED"
+                and (self.state.get(p or "default", {}).get("exhausted_until", 0) == 0 or now >= self.state.get(p or "default", {}).get("exhausted_until", 0))
+            ]
+
+    def get_busy_profiles(self) -> List[Optional[str]]:
+        """Return list of profiles that are currently at or above max concurrency or have locked sandboxes."""
+        with self.lock:
+            return [
+                p for p in self._profiles
+                if self.in_flight.get(p or "default", 0) >= self.concurrency_per_profile
+                or is_profile_sandbox_locked(p)
+            ]
+
     def acquire_specific_profile(self, profile: Optional[str]) -> None:
         """Increment in-flight count for a specific profile."""
-        with self.lock:
+        with self.condition:
             key = profile or "default"
             self.in_flight[key] = self.in_flight.get(key, 0) + 1
 
     def release_profile(self, profile: Optional[str]) -> None:
-        """Atomically release an in-flight lease for a profile."""
-        with self.lock:
+        """Atomically release an in-flight lease for a profile and notify any waiting callers."""
+        with self.condition:
             key = profile or "default"
             if key in self.in_flight:
                 self.in_flight[key] = max(0, self.in_flight[key] - 1)
+            self.condition.notify_all()
 
     def get_in_flight(self, profile: Optional[str]) -> int:
         """Get current in-flight count for a profile."""
@@ -1573,8 +1788,15 @@ class ProfileManager:
                 is_avail = (cooldown_left == 0 and info.get("status") != "DISABLED")
                 info["available"] = is_avail
                 info["cooldown_seconds_remaining"] = cooldown_left
-                info["in_flight"] = self.in_flight.get(key, 0)
-                info["max_concurrency"] = self.concurrency_per_profile
+                in_fl = self.in_flight.get(key, 0)
+                max_c = self.concurrency_per_profile
+                is_locked = is_profile_sandbox_locked(p)
+                is_busy = (in_fl >= max_c) or is_locked
+                info["in_flight"] = in_fl
+                info["max_concurrency"] = max_c
+                info["is_locked"] = is_locked
+                info["is_busy"] = is_busy
+                info["concurrency_status"] = "BUSY" if is_busy else ("IDLE" if in_fl == 0 else "PARTIAL")
 
                 if info.get("status") == "DISABLED" or cooldown_left > 0:
                     quota_pct = 0
@@ -2216,7 +2438,6 @@ def parse_cmd_template(
         return argv, prompt_text
 
 
-MAC_KEYCHAIN_LOCK = threading.Lock()
 
 
 def get_profile_sandbox_dir(profile_name: Optional[str]) -> str:
@@ -2386,133 +2607,135 @@ def execute_cli_command(
     log_str = " ".join(argv)[:120] if argv else cmd_template[:120]
     logger.info("Executing CLI command (profile=%s, timeout=%.1fs): %s", profile or "default", timeout, log_str)
 
-    sandbox_dir = get_profile_sandbox_dir(profile)
+    sandbox_base = get_profile_sandbox_base_path(profile)
+    with SandboxDirectoryLock(sandbox_base, profile):
+        sandbox_dir = get_profile_sandbox_dir(profile)
 
-    # Filtered environment with isolated HOME and XDG variables
-    allowed_env_keys = {
-        "PATH", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL",
-        "SYSTEMROOT", "TEMP", "TMP",
-        "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK",
-        "ANTIGRAVITY_PROFILE", "ANTIGRAVITY_PROFILES", "ANTIGRAVITY_HOME",
-        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
-    }
-    env = {k: v for k, v in os.environ.items() if k in allowed_env_keys or k.startswith("ANTIGRAVITY_")}
-    env["HOME"] = sandbox_dir
-    env["USERPROFILE"] = sandbox_dir
-    env["XDG_CONFIG_HOME"] = os.path.join(sandbox_dir, ".config")
-    env["XDG_DATA_HOME"] = os.path.join(sandbox_dir, ".local", "share")
-    env["XDG_CACHE_HOME"] = os.path.join(sandbox_dir, ".cache")
-    if profile:
-        env["ANTIGRAVITY_PROFILE"] = profile
+        # Filtered environment with isolated HOME and XDG variables
+        allowed_env_keys = {
+            "PATH", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL",
+            "SYSTEMROOT", "TEMP", "TMP",
+            "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK",
+            "ANTIGRAVITY_PROFILE", "ANTIGRAVITY_PROFILES", "ANTIGRAVITY_HOME",
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy",
+        }
+        env = {k: v for k, v in os.environ.items() if k in allowed_env_keys or k.startswith("ANTIGRAVITY_")}
+        env["HOME"] = sandbox_dir
+        env["USERPROFILE"] = sandbox_dir
+        env["XDG_CONFIG_HOME"] = os.path.join(sandbox_dir, ".config")
+        env["XDG_DATA_HOME"] = os.path.join(sandbox_dir, ".local", "share")
+        env["XDG_CACHE_HOME"] = os.path.join(sandbox_dir, ".cache")
+        if profile:
+            env["ANTIGRAVITY_PROFILE"] = profile
 
-    proxy_url = detect_local_proxy()
-    if proxy_url:
-        env["ALL_PROXY"] = proxy_url
-        env["all_proxy"] = proxy_url
-        env["HTTPS_PROXY"] = proxy_url
-        env["https_proxy"] = proxy_url
-        env["HTTP_PROXY"] = proxy_url
-        env["http_proxy"] = proxy_url
-        env["NO_PROXY"] = "127.0.0.1,localhost,::1"
-        env["no_proxy"] = "127.0.0.1,localhost,::1"
-        logger.info("[PROXY] Active Outbound Proxy: %s (Bypassing 127.0.0.1,localhost)", proxy_url)
+        proxy_url = detect_local_proxy()
+        if proxy_url:
+            env["ALL_PROXY"] = proxy_url
+            env["all_proxy"] = proxy_url
+            env["HTTPS_PROXY"] = proxy_url
+            env["https_proxy"] = proxy_url
+            env["HTTP_PROXY"] = proxy_url
+            env["http_proxy"] = proxy_url
+            env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+            env["no_proxy"] = "127.0.0.1,localhost,::1"
+            logger.info("[PROXY] Active Outbound Proxy: %s (Bypassing 127.0.0.1,localhost)", proxy_url)
 
-    if profile:
-        email_preview, token_preview = sync_profile_to_system(profile)
-        profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}")
-        if not os.path.exists(profile_dir):
-            alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile}")
-            if os.path.exists(alt_dir) and os.path.isdir(alt_dir):
-                profile_dir = alt_dir
+        if profile:
+            email_preview, token_preview = sync_profile_to_system(profile)
+            profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}")
+            if not os.path.exists(profile_dir):
+                alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile}")
+                if os.path.exists(alt_dir) and os.path.isdir(alt_dir):
+                    profile_dir = alt_dir
 
-        if os.path.exists(profile_dir) and os.path.isdir(profile_dir):
-            logger.info(
-                "[PROFILE SWAP] Activated profile '%s' (OS: %s) | Email: %s | Token: %s | Source: %s",
-                profile,
-                get_os_type(),
-                email_preview,
-                token_preview,
-                profile_dir,
-            )
-        else:
-            logger.warning("[PROFILE SWAP] Profile directory not found for '%s' (checked %s)", profile, profile_dir)
-
-    temp_prompt_file: Optional[str] = None
-    stdin_file_handle = None
-    proc: Optional[subprocess.Popen] = None
-    try:
-        if stdin_input:
-            stdin_bytes = stdin_input.encode("utf-8")
-            if len(stdin_bytes) > MAX_CLI_ARG_BYTES:
-                temp_prompt_file = os.path.join(
-                    sandbox_dir,
-                    f".prompt_{os.getpid()}_{threading.get_ident()}_{int(time.time()*1000)}.tmp",
+            if os.path.exists(profile_dir) and os.path.isdir(profile_dir):
+                logger.info(
+                    "[PROFILE SWAP] Activated profile '%s' (OS: %s) | Email: %s | Token: %s | Source: %s",
+                    profile,
+                    get_os_type(),
+                    email_preview,
+                    token_preview,
+                    profile_dir,
                 )
-                with open(temp_prompt_file, "w", encoding="utf-8") as f:
-                    f.write(stdin_input)
-                stdin_file_handle = open(temp_prompt_file, "r", encoding="utf-8")
-                proc_stdin = stdin_file_handle
-                comm_input = None
             else:
-                proc_stdin = subprocess.PIPE
-                comm_input = stdin_input
-        else:
-            proc_stdin = subprocess.DEVNULL
-            comm_input = None
+                logger.warning("[PROFILE SWAP] Profile directory not found for '%s' (checked %s)", profile, profile_dir)
 
-        popen_kwargs: Dict[str, Any] = {}
-        if os.name != "nt":
-            popen_kwargs["start_new_session"] = True
-
-        proc = subprocess.Popen(
-            argv,
-            cwd=sandbox_dir,
-            shell=False,
-            stdin=proc_stdin,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            **popen_kwargs,
-        )
+        temp_prompt_file: Optional[str] = None
+        stdin_file_handle = None
+        proc: Optional[subprocess.Popen] = None
         try:
-            stdout_data, stderr_data = proc.communicate(input=comm_input, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            kill_process_tree(proc, force=True)
-            try:
-                stdout_data, stderr_data = proc.communicate(timeout=2.0)
-            except Exception:
-                stdout_data, stderr_data = "", ""
-            logger.error("CLI execution timed out after %.1fs for profile '%s'", timeout, profile or "default")
-            raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
-    finally:
-        if proc is not None and proc.poll() is None:
-            kill_process_tree(proc, force=True)
-        if stdin_file_handle:
-            try:
-                stdin_file_handle.close()
-            except Exception:
-                pass
-        if temp_prompt_file and os.path.exists(temp_prompt_file):
-            try:
-                os.remove(temp_prompt_file)
-            except Exception:
-                pass
+            if stdin_input:
+                stdin_bytes = stdin_input.encode("utf-8")
+                if len(stdin_bytes) > MAX_CLI_ARG_BYTES:
+                    temp_prompt_file = os.path.join(
+                        sandbox_dir,
+                        f".prompt_{os.getpid()}_{threading.get_ident()}_{int(time.time()*1000)}.tmp",
+                    )
+                    with open(temp_prompt_file, "w", encoding="utf-8") as f:
+                        f.write(stdin_input)
+                    stdin_file_handle = open(temp_prompt_file, "r", encoding="utf-8")
+                    proc_stdin = stdin_file_handle
+                    comm_input = None
+                else:
+                    proc_stdin = subprocess.PIPE
+                    comm_input = stdin_input
+            else:
+                proc_stdin = subprocess.DEVNULL
+                comm_input = None
 
-    if proc is not None and proc.returncode != 0:
-        err_msg = stderr_data.strip() or stdout_data.strip() or f"Exit code {proc.returncode}"
-        logger.error("CLI execution failed for profile '%s' (code %d): %s", profile or "default", proc.returncode, err_msg)
-        raise RuntimeError(f"CLI Execution Error (profile={profile or 'default'}): {err_msg}")
+            popen_kwargs: Dict[str, Any] = {}
+            if os.name != "nt":
+                popen_kwargs["start_new_session"] = True
 
-    output_text = stdout_data.strip() or stderr_data.strip()
-    if not output_text:
-        err_hint = stderr_data.strip() or stdout_data.strip() or "Empty stdout/stderr"
-        logger.error("CLI execution returned empty output for profile '%s': %s", profile or "default", err_hint)
-        raise RuntimeError(f"CLI Execution returned empty output for profile '{profile or 'default'}': {err_hint}")
+            proc = subprocess.Popen(
+                argv,
+                cwd=sandbox_dir,
+                shell=False,
+                stdin=proc_stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                **popen_kwargs,
+            )
+            try:
+                stdout_data, stderr_data = proc.communicate(input=comm_input, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                kill_process_tree(proc, force=True)
+                try:
+                    stdout_data, stderr_data = proc.communicate(timeout=2.0)
+                except Exception:
+                    stdout_data, stderr_data = "", ""
+                logger.error("CLI execution timed out after %.1fs for profile '%s'", timeout, profile or "default")
+                raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
+        finally:
+            if proc is not None and proc.poll() is None:
+                kill_process_tree(proc, force=True)
+            if stdin_file_handle:
+                try:
+                    stdin_file_handle.close()
+                except Exception:
+                    pass
+            if temp_prompt_file and os.path.exists(temp_prompt_file):
+                try:
+                    os.remove(temp_prompt_file)
+                except Exception:
+                    pass
 
-    return output_text
+        if proc is not None and proc.returncode != 0:
+            err_msg = stderr_data.strip() or stdout_data.strip() or f"Exit code {proc.returncode}"
+            logger.error("CLI execution failed for profile '%s' (code %d): %s", profile or "default", proc.returncode, err_msg)
+            raise RuntimeError(f"CLI Execution Error (profile={profile or 'default'}): {err_msg}")
+
+        output_text = stdout_data.strip() or stderr_data.strip()
+        if not output_text:
+            err_hint = stderr_data.strip() or stdout_data.strip() or "Empty stdout/stderr"
+            logger.error("CLI execution returned empty output for profile '%s': %s", profile or "default", err_hint)
+            raise RuntimeError(f"CLI Execution returned empty output for profile '{profile or 'default'}': {err_hint}")
+
+        return output_text
 
 
 def execute_cli_with_fallback(
@@ -2523,6 +2746,7 @@ def execute_cli_with_fallback(
     profiles: Optional[List[Optional[str]]] = None,
     model_name: Optional[str] = None,
     profile_manager: Optional[ProfileManager] = None,
+    preferred_profile: Optional[str] = None,
 ) -> Tuple[str, Optional[str]]:
     """Execute CLI command trying profiles dynamically in parallel-safe worker pool until one succeeds or total timeout budget is reached."""
     mgr = profile_manager or GLOBAL_PROFILE_MANAGER
@@ -2530,6 +2754,16 @@ def execute_cli_with_fallback(
         mgr.set_profiles(profiles)
 
     candidate_profiles = mgr.get_ordered_profiles()
+    if preferred_profile and preferred_profile in candidate_profiles:
+        if not mgr.is_profile_busy(preferred_profile) and not mgr.is_in_cooldown(preferred_profile):
+            candidate_profiles = [preferred_profile] + [p for p in candidate_profiles if p != preferred_profile]
+        else:
+            logger.info(
+                "Preferred profile '%s' is currently busy (in_flight=%d) or in cooldown, auto-routing to alternative idle profile",
+                preferred_profile,
+                mgr.get_in_flight(preferred_profile),
+            )
+
     errors: List[str] = []
     tried_profiles: set = set()
     start_time = time.time()
@@ -2550,8 +2784,13 @@ def execute_cli_with_fallback(
         if not available_candidates:
             break
 
-        profile = mgr.acquire_profile(available_candidates)
+        # Check if all available candidates are currently busy
+        all_busy = all(mgr.is_profile_busy(p) for p in available_candidates)
+        wait_time = min(2.0, remaining_budget) if all_busy else 0.0
+        profile = mgr.acquire_profile(available_candidates, wait_timeout=wait_time)
         if profile is None and available_candidates:
+            # If still none free after wait, take the least-loaded candidate
+            available_candidates.sort(key=lambda p: mgr.get_in_flight(p))
             profile = available_candidates[0]
             mgr.acquire_specific_profile(profile)
 
@@ -2595,7 +2834,9 @@ def execute_cli_with_fallback(
         except Exception as exc:
             err_str = str(exc)
             logger.warning("Profile '%s' execution failed: %s", profile_key, exc)
-            if "authentication required" in err_str.lower() or "not signed in" in err_str.lower():
+            if "sandbox is currently locked" in err_str.lower():
+                logger.info("Profile '%s' sandbox is locked/busy by another process. Routing to alternative profile.", profile_key)
+            elif "authentication required" in err_str.lower() or "not signed in" in err_str.lower():
                 mgr.mark_exhausted(profile, err_str, cooldown_seconds=3600.0)
             elif is_quota_or_rate_limit_error(err_str):
                 mgr.mark_exhausted(profile, err_str)
@@ -3388,6 +3629,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         "active_in_flight": pm.get_total_in_flight(),
                         "max_pool_capacity": total_profiles * pm.concurrency_per_profile,
                         "concurrency_per_profile": pm.concurrency_per_profile,
+                        "idle_profiles_count": len(pm.get_idle_profiles()),
+                        "busy_profiles_count": len(pm.get_busy_profiles()),
                     },
                     "profiles": pm.get_status_summary(),
                 })
@@ -3432,6 +3675,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         "active_in_flight": pm.get_total_in_flight(),
                         "max_pool_capacity": total_profiles * pm.concurrency_per_profile,
                         "concurrency_per_profile": pm.concurrency_per_profile,
+                        "idle_profiles_count": len(pm.get_idle_profiles()),
+                        "busy_profiles_count": len(pm.get_busy_profiles()),
                     },
                     "profiles": pm.get_status_summary(),
                 })
@@ -3934,6 +4179,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 heartbeat = SSEHeartbeat(self.wfile, interval=3.0, is_anthropic=is_anthropic)
 
+            req_profile = (
+                self.headers.get("X-Antigravity-Profile")
+                or self.headers.get("X-Profile")
+                or (req_json.get("profile") if isinstance(req_json.get("profile"), str) else None)
+            )
+
             try:
                 output_text, used_profile = execute_cli_with_fallback(
                     custom_tpl,
@@ -3943,6 +4194,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     profiles=configured_profiles,
                     model_name=model,
                     profile_manager=profile_manager,
+                    preferred_profile=req_profile,
                 )
                 logger.info("Successfully executed CLI using profile: %s (model=%s, timeout=%.1fs)", used_profile or "default", model, prof_timeout)
             except Exception as exc:
@@ -4001,6 +4253,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 extra_resp_headers["X-Antigravity-Profiles-Ready"] = str(ready_ct)
                 extra_resp_headers["X-Antigravity-Profiles-Total"] = str(len(summary))
                 extra_resp_headers["X-Antigravity-Profile-Quota-Percent"] = str(profile_manager.get_estimated_quota_percent(used_profile))
+                extra_resp_headers["X-Antigravity-Concurrency-In-Flight"] = str(profile_manager.get_total_in_flight())
+                extra_resp_headers["X-Antigravity-Profile-Concurrency-Status"] = summary.get(used_profile or "default", {}).get("concurrency_status", "IDLE")
 
             # --- Handle Anthropic API format (/v1/messages) ---
             if is_anthropic:
@@ -4284,20 +4538,23 @@ Examples:
             all_profiles = get_available_profiles()
             summary = pm.get_status_summary()
 
-        print("\n" + "=" * 108)
-        print(f"{'Profile Name':<16} {'Google Account Email':<30} {'Status':<11} {'In-Flight':<11} {'Cooldown':<10} {'Est. Quota':<12} {'Success'}")
-        print("=" * 108)
+        print("\n" + "=" * 118)
+        print(f"{'Profile Name':<16} {'Google Account Email':<28} {'Status':<10} {'Concurrency':<14} {'Cooldown':<10} {'Est. Quota':<12} {'Success'}")
+        print("=" * 118)
         for p in all_profiles:
             name = p or "default"
             email = get_profile_account_email(p)
             info = summary.get(name, {})
             status = info.get("status", "OK")
-            in_flight = f"{info.get('in_flight', 0)}/{info.get('max_concurrency', 1)}"
+            in_fl = info.get('in_flight', 0)
+            max_c = info.get('max_concurrency', 1)
+            c_status = info.get('concurrency_status', 'IDLE')
+            concurrency_display = f"{in_fl}/{max_c} ({c_status})"
             cooldown = f"{info.get('cooldown_seconds_remaining', 0)}s" if info.get("cooldown_seconds_remaining", 0) > 0 else "Ready"
             succ = info.get("success_count", 0)
             q_pct = f"{info.get('estimated_quota_percent', 100)}%"
-            print(f"{name:<16} {email:<30} {status:<11} {in_flight:<11} {cooldown:<10} {q_pct:<12} {succ}")
-        print("=" * 108 + "\n")
+            print(f"{name:<16} {email:<28} {status:<10} {concurrency_display:<14} {cooldown:<10} {q_pct:<12} {succ}")
+        print("=" * 118 + "\n")
         return 0
 
     elif sub in ("set", "use", "config", "order", "rotate"):

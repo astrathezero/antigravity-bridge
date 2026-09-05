@@ -7,6 +7,7 @@ import signal
 import sys
 import subprocess
 import threading
+import tempfile
 import time
 import unittest
 import urllib.request
@@ -1202,6 +1203,105 @@ class TestAntigravityBridge(unittest.TestCase):
         written_bytes = b"".join([call[0][0] for call in wfile.write.call_args_list if call[0]])
         self.assertIn(b": keep-alive\n\n", written_bytes)
         self.assertIn(b'event: ping\ndata: {"type": "ping"}\n\n', written_bytes)
+
+
+    def test_profile_concurrency_tracking_and_status(self):
+        """Test ProfileManager in_flight tracking, busy status, and summary formatting."""
+        pm = ProfileManager(profiles=["alpha", "beta"], concurrency_per_profile=1)
+        self.assertEqual(len(pm.get_idle_profiles()), 2)
+        self.assertEqual(len(pm.get_busy_profiles()), 0)
+        self.assertFalse(pm.is_profile_busy("alpha"))
+
+        # Acquire alpha
+        chosen = pm.acquire_profile(["alpha", "beta"])
+        self.assertEqual(chosen, "alpha")
+        self.assertTrue(pm.is_profile_busy("alpha"))
+        self.assertFalse(pm.is_profile_busy("beta"))
+        self.assertEqual(pm.get_in_flight("alpha"), 1)
+        self.assertEqual(len(pm.get_idle_profiles()), 1)
+        self.assertEqual(len(pm.get_busy_profiles()), 1)
+
+        summary = pm.get_status_summary()
+        self.assertEqual(summary["alpha"]["concurrency_status"], "BUSY")
+        self.assertTrue(summary["alpha"]["is_busy"])
+        self.assertEqual(summary["beta"]["concurrency_status"], "IDLE")
+        self.assertFalse(summary["beta"]["is_busy"])
+
+        # Release alpha
+        pm.release_profile("alpha")
+        self.assertFalse(pm.is_profile_busy("alpha"))
+        self.assertEqual(pm.get_in_flight("alpha"), 0)
+        self.assertEqual(pm.get_status_summary()["alpha"]["concurrency_status"], "IDLE")
+
+    def test_execute_cli_with_fallback_routes_around_busy_profile(self):
+        """Test that execute_cli_with_fallback dynamically routes away from busy profile to idle profile."""
+        pm = ProfileManager(profiles=["p_busy", "p_idle"], concurrency_per_profile=1)
+        pm.acquire_specific_profile("p_busy")
+        self.assertTrue(pm.is_profile_busy("p_busy"))
+
+        executed_profiles = []
+
+        def mock_exec(cmd_tpl, prompt, timeout=180.0, profile=None, model_name=None):
+            executed_profiles.append(profile)
+            return f"Success from {profile}"
+
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            output, used_profile = execute_cli_with_fallback('echo "{prompt}"', "hello", profile_manager=pm)
+            self.assertEqual(used_profile, "p_idle")
+            self.assertIn("Success from p_idle", output)
+            self.assertEqual(executed_profiles, ["p_idle"])
+
+    def test_execute_cli_with_fallback_preferred_profile_busy_reroutes(self):
+        """Test that if preferred_profile is busy, fallback immediately chooses an idle profile."""
+        pm = ProfileManager(profiles=["prof_1", "prof_2"], concurrency_per_profile=1)
+        pm.acquire_specific_profile("prof_1")
+        self.assertTrue(pm.is_profile_busy("prof_1"))
+
+        def mock_exec(cmd_tpl, prompt, timeout=180.0, profile=None, model_name=None):
+            return f"Result from {profile}"
+
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            output, used_profile = execute_cli_with_fallback(
+                'echo "{prompt}"',
+                "test",
+                profile_manager=pm,
+                preferred_profile="prof_1",
+            )
+            self.assertEqual(used_profile, "prof_2")
+            self.assertIn("Result from prof_2", output)
+
+    def test_sandbox_directory_lock_blocks_concurrent_access(self):
+        """Test that SandboxDirectoryLock raises RuntimeError on concurrent acquisition."""
+        temp_dir = tempfile.mkdtemp(prefix="test_sandbox_lock_")
+        try:
+            lock1 = antigravity_bridge.SandboxDirectoryLock(temp_dir, profile_name="test_p")
+            lock2 = antigravity_bridge.SandboxDirectoryLock(temp_dir, profile_name="test_p")
+
+            with lock1:
+                # Same thread / process attempt while locked
+                with self.assertRaises(RuntimeError) as ctx:
+                    with lock2:
+                        pass
+                self.assertIn("currently locked", str(ctx.exception).lower())
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_execute_cli_with_fallback_recovers_from_sandbox_lock(self):
+        """Test that a sandbox lock collision automatically falls back to next profile without error cooldown."""
+        pm = ProfileManager(profiles=["locked_p", "free_p"], concurrency_per_profile=1)
+
+        def mock_exec(cmd_tpl, prompt, timeout=180.0, profile=None, model_name=None):
+            if profile == "locked_p":
+                raise RuntimeError("Profile 'locked_p' sandbox is currently locked by another running process")
+            return f"Success from {profile}"
+
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            out, used = execute_cli_with_fallback('echo "{prompt}"', "query", profile_manager=pm)
+            self.assertEqual(used, "free_p")
+            self.assertIn("Success from free_p", out)
+            # locked_p should NOT be in cooldown or marked with status ERROR_COOLDOWN / EXHAUSTED
+            self.assertFalse(pm.is_in_cooldown("locked_p"))
+            self.assertEqual(pm.state["locked_p"]["status"], "OK")
 
 
 if __name__ == "__main__":
