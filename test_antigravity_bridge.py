@@ -877,6 +877,8 @@ class TestAntigravityBridge(unittest.TestCase):
         handler.server = MagicMock()
         handler.server.profile_timeout = 180.0
         handler.server.total_timeout = 480.0
+        handler.server.max_autoscale_timeout = 3600.0
+        handler.server.max_total_timeout = 9000.0
         handler.headers = {}
         handler.path = "/v1/chat/completions"
 
@@ -884,18 +886,36 @@ class TestAntigravityBridge(unittest.TestCase):
         prof_small, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=5000)
         self.assertEqual(prof_small, 180.0)
 
-        # Large prompt (55k chars) -> 180 + (45000 / 10000) * 75 = 180 + 337.5 = 517.5s (~8.6 min)
+        # Large prompt (55k chars) -> 180 + (45000 / 10000) * 15 = 180 + 67.5 = 247.5s
         prof_large, total_large = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=55000)
-        self.assertEqual(prof_large, 180.0 + (45000 / 10000.0) * 75.0)
-        self.assertGreaterEqual(total_large, prof_large * 2.5)
+        self.assertEqual(prof_large, 180.0 + (45000 / 10000.0) * 15.0)
+        self.assertGreaterEqual(total_large, prof_large * 2.0)
 
-        # Massive prompt (100k chars) -> 180 + 9 * 75 = 855.0s (~14.25 min)
+        # Massive prompt (100k chars) -> 180 + 9 * 15 = 315.0s
         prof_100k, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=100000)
-        self.assertEqual(prof_100k, 855.0)
+        self.assertEqual(prof_100k, 315.0)
 
-        # Huge prompt (600k chars) -> capped at 3600s (60 min)
-        prof_huge, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=600000)
+        # Huge prompt (600k chars) -> 180 + 59 * 15 = 1065.0s
+        prof_600k, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=600000)
+        self.assertEqual(prof_600k, 1065.0)
+
+        # Extreme prompt (2.5M chars) -> capped at 3600s (60 min)
+        prof_huge, _ = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler, {}, prompt_len=2500000)
         self.assertEqual(prof_huge, 3600.0)
+
+        # Default server settings (fail-fast interactive bounds: 90s base, 150s max autoscale, 300s max total)
+        handler_default = MagicMock()
+        handler_default.server = None
+        handler_default.headers = {}
+        handler_default.path = "/v1/chat/completions"
+        prof_def_small, total_def_small = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler_default, {}, prompt_len=5000)
+        self.assertEqual(prof_def_small, 90.0)
+        self.assertEqual(total_def_small, 240.0)
+
+        # 120KB prompt with default settings -> must be capped at 150.0s (prevents 800s+ timeout blowout)
+        prof_def_120k, total_def_120k = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler_default, {}, prompt_len=120000)
+        self.assertEqual(prof_def_120k, 150.0)
+        self.assertEqual(total_def_120k, 300.0)
 
     def test_parse_api_keys(self):
         """Test parsing single, multiple, labeled, and structured API key strings."""
@@ -1091,6 +1111,15 @@ class TestAntigravityBridge(unittest.TestCase):
         with patch("os.killpg", side_effect=ProcessLookupError):
             antigravity_bridge.kill_process_tree(mock_lookup_err)
 
+        # 5. force=True should call killpg even if poll() returns 0 (killing grandchild processes)
+        mock_orphan = MagicMock()
+        mock_orphan.poll.return_value = 0
+        mock_orphan.pid = 98767
+        with patch("os.killpg") as mock_killpg:
+            antigravity_bridge.kill_process_tree(mock_orphan, force=True)
+            if os.name != "nt" and hasattr(os, "killpg"):
+                mock_killpg.assert_called_once_with(98767, signal.SIGKILL)
+
     @patch("subprocess.Popen")
     def test_execute_cli_command_stdin_devnull(self, mock_popen):
         """Test execute_cli_command uses DEVNULL and start_new_session when stdin is empty."""
@@ -1148,6 +1177,31 @@ class TestAntigravityBridge(unittest.TestCase):
 
         with self.assertRaises(BrokenPipeError):
             antigravity_bridge.AntigravityBridgeHandler._send_json_response(handler, {"key": "val"})
+
+    def test_sse_heartbeat_openai(self):
+        """Test that SSEHeartbeat emits comment keep-alive and OpenAI delta chunk, and stops cleanly."""
+        wfile = MagicMock()
+        hb = antigravity_bridge.SSEHeartbeat(wfile, interval=0.01, is_anthropic=False)
+        time.sleep(0.05)
+        hb.stop()
+
+        self.assertFalse(hb.running)
+        written_bytes = b"".join([call[0][0] for call in wfile.write.call_args_list if call[0]])
+        self.assertIn(b": keep-alive\n\n", written_bytes)
+        self.assertIn(b"chat.completion.chunk", written_bytes)
+        self.assertIn(b'"delta": {}', written_bytes)
+
+    def test_sse_heartbeat_anthropic(self):
+        """Test that SSEHeartbeat emits comment keep-alive and Anthropic ping event."""
+        wfile = MagicMock()
+        hb = antigravity_bridge.SSEHeartbeat(wfile, interval=0.01, is_anthropic=True)
+        time.sleep(0.05)
+        hb.stop()
+
+        self.assertFalse(hb.running)
+        written_bytes = b"".join([call[0][0] for call in wfile.write.call_args_list if call[0]])
+        self.assertIn(b": keep-alive\n\n", written_bytes)
+        self.assertIn(b'event: ping\ndata: {"type": "ping"}\n\n', written_bytes)
 
 
 if __name__ == "__main__":

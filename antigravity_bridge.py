@@ -82,10 +82,10 @@ logger = logging.getLogger("antigravity_bridge")
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
 MAX_CLI_ARG_BYTES = 350000        # 350KB safe CLI argument limit (macOS ARG_MAX=1MB, Linux ARG_MAX=2MB)
 
-DEFAULT_PROFILE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_PROFILE_TIMEOUT", "180.0"))  # Default execution timeout per profile attempt in seconds
-DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TOTAL_TIMEOUT", "480.0"))       # Total execution timeout across all profile fallback attempts in seconds
-DEFAULT_MAX_AUTOSCALE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT", "3600.0"))  # Maximum auto-scaled profile timeout ceiling
-DEFAULT_MAX_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_TOTAL_TIMEOUT", "18000.0"))        # Maximum total fallback budget ceiling
+DEFAULT_PROFILE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_PROFILE_TIMEOUT", "90.0"))  # Default execution timeout per profile attempt in seconds (fail-fast)
+DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TOTAL_TIMEOUT", "240.0"))       # Total execution timeout across all profile fallback attempts in seconds
+DEFAULT_MAX_AUTOSCALE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT", "150.0"))  # Maximum auto-scaled profile timeout ceiling
+DEFAULT_MAX_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_TOTAL_TIMEOUT", "300.0"))        # Maximum total fallback budget ceiling
 
 DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "https://aiapirouter.mrserm.com/v1")
 DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "sk-36a01df06cfa9e5f-5mbqa9-11db659b")
@@ -1724,6 +1724,10 @@ def inject_os_keyring_token(raw_oauth_str: str) -> bool:
                 p.communicate(input=b64_val.encode("utf-8"), timeout=2.0)
                 return p.returncode == 0
             except Exception as e:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
                 logger.debug("Linux secret-tool injection error: %s", e)
                 return False
     return False
@@ -2336,16 +2340,17 @@ def detect_local_proxy() -> Optional[str]:
     return None
 
 
-def kill_process_tree(proc: Optional[subprocess.Popen]) -> None:
+def kill_process_tree(proc: Optional[subprocess.Popen], force: bool = False) -> None:
     """Safely terminate a subprocess and all of its descendants (process group)."""
     if proc is None:
         return
-    try:
-        poll_res = proc.poll()
-        if poll_res is not None and poll_res != "":
-            return
-    except Exception:
-        pass
+    if not force:
+        try:
+            poll_res = proc.poll()
+            if poll_res is not None and poll_res != "":
+                return
+        except Exception:
+            pass
 
     try:
         pid = getattr(proc, "pid", None)
@@ -2475,7 +2480,7 @@ def execute_cli_command(
         try:
             stdout_data, stderr_data = proc.communicate(input=comm_input, timeout=timeout)
         except subprocess.TimeoutExpired:
-            kill_process_tree(proc)
+            kill_process_tree(proc, force=True)
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=2.0)
             except Exception:
@@ -2484,7 +2489,7 @@ def execute_cli_command(
             raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
     finally:
         if proc is not None and proc.poll() is None:
-            kill_process_tree(proc)
+            kill_process_tree(proc, force=True)
         if stdin_file_handle:
             try:
                 stdin_file_handle.close()
@@ -3055,10 +3060,11 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 class SSEHeartbeat:
-    """Sends periodic SSE comment pings (: keep-alive) to prevent gateways/clients from timing out during long CLI executions."""
-    def __init__(self, wfile: Any, interval: float = 3.0):
+    """Sends periodic SSE comment pings and active data chunks to prevent gateways/clients from timing out during long CLI executions."""
+    def __init__(self, wfile: Any, interval: float = 3.0, is_anthropic: bool = False):
         self.wfile = wfile
         self.interval = interval
+        self.is_anthropic = is_anthropic
         self.running = True
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -3072,12 +3078,26 @@ class SSEHeartbeat:
             try:
                 with self.lock:
                     self.wfile.write(b": keep-alive\n\n")
+                    if self.is_anthropic:
+                        self.wfile.write(b'event: ping\ndata: {"type": "ping"}\n\n')
+                    else:
+                        ping_chunk = json.dumps({
+                            "id": "ping",
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+                        })
+                        self.wfile.write(f"data: {ping_chunk}\n\n".encode("utf-8"))
                     self.wfile.flush()
             except Exception:
                 break
 
     def stop(self) -> None:
         self.running = False
+        try:
+            self.thread.join(timeout=0.5)
+        except Exception:
+            pass
 
 
 class AntigravityBridgeHandler(BaseHTTPRequestHandler):
@@ -3320,9 +3340,10 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             max_autoscale = getattr(self.server, "max_autoscale_timeout", None)
             if not isinstance(max_autoscale, (int, float)):
                 max_autoscale = DEFAULT_MAX_AUTOSCALE_TIMEOUT
+            max_autoscale = max(float(max_autoscale), server_prof_timeout)
             if prompt_len > 10000:
-                scaled = server_prof_timeout + ((prompt_len - 10000) / 10000.0) * 75.0
-                effective_prof_timeout = max(server_prof_timeout, min(scaled, float(max_autoscale)))
+                scaled = server_prof_timeout + ((prompt_len - 10000) / 10000.0) * 15.0
+                effective_prof_timeout = max(server_prof_timeout, min(scaled, max_autoscale))
             else:
                 effective_prof_timeout = server_prof_timeout
 
@@ -3334,7 +3355,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             max_total_cap = getattr(self.server, "max_total_timeout", None)
             if not isinstance(max_total_cap, (int, float)):
                 max_total_cap = DEFAULT_MAX_TOTAL_TIMEOUT
-            effective_total_timeout = max(server_total_timeout, effective_prof_timeout * 2.5)
+            if isinstance(max_total_cap, (int, float)) and max_total_cap > 0:
+                max_total_cap = max(float(max_total_cap), server_total_timeout)
+            effective_total_timeout = max(server_total_timeout, effective_prof_timeout * 2.0)
             if isinstance(max_total_cap, (int, float)) and max_total_cap > 0:
                 effective_total_timeout = min(effective_total_timeout, float(max_total_cap))
 
@@ -3909,7 +3932,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.flush()
-                heartbeat = SSEHeartbeat(self.wfile, interval=3.0)
+                heartbeat = SSEHeartbeat(self.wfile, interval=3.0, is_anthropic=is_anthropic)
 
             try:
                 output_text, used_profile = execute_cli_with_fallback(
