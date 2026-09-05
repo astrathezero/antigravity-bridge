@@ -77,6 +77,11 @@ def load_dotenv(paths: Optional[List[str]] = None) -> None:
 # Auto-load private environment configuration if present
 load_dotenv()
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 logger = logging.getLogger("antigravity_bridge")
 
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
@@ -410,16 +415,16 @@ def detect_cli_command() -> Tuple[str, str]:
     # 1. Search PATH (works on Linux, macOS, and Windows)
     agy_path = shutil.which("agy")
     if agy_path:
-        return ("agy", f'"{agy_path}" --dangerously-skip-permissions -p "{{prompt}}"')
+        return ("agy", f'"{agy_path}" --dangerously-skip-permissions --print-timeout 20m0s -p "{{prompt}}"')
 
     # 2. Check ~/.local/bin/agy (Linux/macOS) or Windows %USERPROFILE%\.local\bin\agy.exe
     home = os.path.expanduser("~")
     local_bin = os.path.join(home, ".local", "bin", "agy.exe" if os.name == "nt" else "agy")
     if os.path.exists(local_bin) and os.access(local_bin, os.X_OK if os.name != "nt" else os.F_OK):
-        return ("agy", f'"{local_bin}" --dangerously-skip-permissions -p "{{prompt}}"')
+        return ("agy", f'"{local_bin}" --dangerously-skip-permissions --print-timeout 20m0s -p "{{prompt}}"')
 
     # Fallback to standard agy command name
-    return ("agy", 'agy --dangerously-skip-permissions -p "{prompt}"')
+    return ("agy", 'agy --dangerously-skip-permissions --print-timeout 20m0s -p "{prompt}"')
 
 
 def normalize_tools(
@@ -4207,7 +4212,23 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         if is_anthropic:
                             self.wfile.write(f"event: error\ndata: {json.dumps(err_payload)}\n\n".encode("utf-8"))
                         else:
-                            self.wfile.write(f"data: {json.dumps(err_payload)}\n\n".encode("utf-8"))
+                            err_chunk = {
+                                "id": f"chatcmpl-err-{uuid.uuid4().hex[:8]}",
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "role": "assistant",
+                                            "content": f"\n\n⚠️ **Antigravity Bridge Error:** {exc}",
+                                        },
+                                        "finish_reason": "stop",
+                                    }
+                                ],
+                            }
+                            self.wfile.write(f"data: {json.dumps(err_chunk)}\n\n".encode("utf-8"))
                             self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
                     except Exception:
