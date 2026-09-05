@@ -910,13 +910,13 @@ class TestAntigravityBridge(unittest.TestCase):
         handler_default.headers = {}
         handler_default.path = "/v1/chat/completions"
         prof_def_small, total_def_small = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler_default, {}, prompt_len=5000)
-        self.assertEqual(prof_def_small, 90.0)
-        self.assertEqual(total_def_small, 240.0)
+        self.assertEqual(prof_def_small, 600.0)
+        self.assertEqual(total_def_small, 1800.0)
 
-        # 120KB prompt with default settings -> must be capped at 150.0s (prevents 800s+ timeout blowout)
+        # 120KB prompt with default settings -> scaled base
         prof_def_120k, total_def_120k = antigravity_bridge.AntigravityBridgeHandler._extract_request_timeouts(handler_default, {}, prompt_len=120000)
-        self.assertEqual(prof_def_120k, 150.0)
-        self.assertEqual(total_def_120k, 300.0)
+        self.assertEqual(prof_def_120k, 765.0)
+        self.assertEqual(total_def_120k, 1800.0)
 
     def test_parse_api_keys(self):
         """Test parsing single, multiple, labeled, and structured API key strings."""

@@ -82,10 +82,10 @@ logger = logging.getLogger("antigravity_bridge")
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
 MAX_CLI_ARG_BYTES = 350000        # 350KB safe CLI argument limit (macOS ARG_MAX=1MB, Linux ARG_MAX=2MB)
 
-DEFAULT_PROFILE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_PROFILE_TIMEOUT", "90.0"))  # Default execution timeout per profile attempt in seconds (fail-fast)
-DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TOTAL_TIMEOUT", "240.0"))       # Total execution timeout across all profile fallback attempts in seconds
-DEFAULT_MAX_AUTOSCALE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT", "150.0"))  # Maximum auto-scaled profile timeout ceiling
-DEFAULT_MAX_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_TOTAL_TIMEOUT", "300.0"))        # Maximum total fallback budget ceiling
+DEFAULT_PROFILE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_PROFILE_TIMEOUT", "600.0"))  # Default execution timeout per profile attempt in seconds (10 mins)
+DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TOTAL_TIMEOUT", "1800.0"))       # Total execution timeout across all profile fallback attempts in seconds (30 mins)
+DEFAULT_MAX_AUTOSCALE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT", "900.0"))  # Maximum auto-scaled profile timeout ceiling (15 mins)
+DEFAULT_MAX_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_TOTAL_TIMEOUT", "3600.0"))        # Maximum total fallback budget ceiling (1 hour)
 
 DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "https://aiapirouter.mrserm.com/v1")
 DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "sk-36a01df06cfa9e5f-5mbqa9-11db659b")
