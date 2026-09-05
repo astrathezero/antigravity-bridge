@@ -91,6 +91,10 @@ DEFAULT_QUOTA_WINDOW_SECONDS = 10800.0  # 3-hour sliding window for Google Gemin
 DEFAULT_FLASH_QUOTA_CAPACITY = 50       # Baseline 50 requests capacity per 3h window for Flash
 
 SUPPORTED_MODELS = {
+    "gemini-3.8-flash": ("gemini-3.8-flash", "high"),
+    "gemini-3.8-flash-high": ("gemini-3.8-flash", "high"),
+    "gemini-3.8-flash-medium": ("gemini-3.8-flash", "medium"),
+    "gemini-3.8-flash-low": ("gemini-3.8-flash", "low"),
     "gemini-3.7-flash": ("gemini-3.7-flash", "high"),
     "gemini-3.7-flash-high": ("gemini-3.7-flash", "high"),
     "gemini-3.7-flash-medium": ("gemini-3.7-flash", "medium"),
@@ -121,6 +125,10 @@ SUPPORTED_MODELS = {
 
 MODEL_CONTEXT_LIMITS = {
     # Gemini Flash Models (1M tokens)
+    "gemini-3.8-flash": 1000000,
+    "gemini-3.8-flash-high": 1000000,
+    "gemini-3.8-flash-medium": 1000000,
+    "gemini-3.8-flash-low": 1000000,
     "gemini-3.7-flash": 1000000,
     "gemini-3.7-flash-high": 1000000,
     "gemini-3.7-flash-medium": 1000000,
@@ -2125,7 +2133,11 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
         effort = "high"
         model_lower = model_lower[:-5]
 
-    if "gemini-3.7-flash" in model_lower:
+    if "gemini-3.8-flash" in model_lower:
+        flags.extend(["--model", "gemini-3.8-flash"])
+        if not effort:
+            effort = "high"
+    elif "gemini-3.7-flash" in model_lower:
         flags.extend(["--model", "gemini-3.7-flash"])
         if not effort:
             effort = "medium"

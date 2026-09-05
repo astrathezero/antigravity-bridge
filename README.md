@@ -208,6 +208,10 @@ curl http://127.0.0.1:8000/health
 
 | Model ID (`model`) | Backend CLI Mapping | Reasoning Effort | Description | Max Context |
 | :--- | :--- | :---: | :--- | :---: |
+| **`gemini-3.8-flash-high`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (High Reasoning Effort) | 1,000,000 |
+| **`gemini-3.8-flash-medium`** | `--model gemini-3.8-flash` | `medium` | Gemini 3.8 Flash (Medium Reasoning Effort) | 1,000,000 |
+| **`gemini-3.8-flash-low`** | `--model gemini-3.8-flash` | `low` | Gemini 3.8 Flash (Low Reasoning Effort) | 1,000,000 |
+| **`gemini-3.8-flash`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (Standard) | 1,000,000 |
 | **`gemini-3.7-flash-high`** | `--model gemini-3.7-flash` | `high` | Gemini 3.7 Flash (High Reasoning Effort) | 1,000,000 |
 | **`gemini-3.7-flash-medium`** | `--model gemini-3.7-flash` | `medium` | Gemini 3.7 Flash (Medium Reasoning Effort) | 1,000,000 |
 | **`gemini-3.7-flash-low`** | `--model gemini-3.7-flash` | `low` | Gemini 3.7 Flash (Low Reasoning Effort) | 1,000,000 |

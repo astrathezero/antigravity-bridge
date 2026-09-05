@@ -16,8 +16,8 @@ Environment=PYTHONUNBUFFERED=1
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-MemoryMax=2G
-TasksMax=256
+MemoryMax=4G
+TasksMax=512
 
 [Install]
 WantedBy=multi-user.target

@@ -253,6 +253,18 @@ class TestAntigravityBridge(unittest.TestCase):
 
     def test_resolve_model_flags(self):
         """Test model flag mapping with reasoning effort defaults."""
+        flags_38 = resolve_model_flags("gemini-3.8-flash")
+        self.assertEqual(flags_38, ["--model", "gemini-3.8-flash", "--effort", "high"])
+
+        flags_38_high = resolve_model_flags("gemini-3.8-flash-high")
+        self.assertEqual(flags_38_high, ["--model", "gemini-3.8-flash", "--effort", "high"])
+
+        flags_38_med = resolve_model_flags("gemini-3.8-flash-medium")
+        self.assertEqual(flags_38_med, ["--model", "gemini-3.8-flash", "--effort", "medium"])
+
+        flags_38_low = resolve_model_flags("gemini-3.8-flash-low")
+        self.assertEqual(flags_38_low, ["--model", "gemini-3.8-flash", "--effort", "low"])
+
         flags_37 = resolve_model_flags("gemini-3.7-flash")
         self.assertEqual(flags_37, ["--model", "gemini-3.7-flash", "--effort", "high"])
 

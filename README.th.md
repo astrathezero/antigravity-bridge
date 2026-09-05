@@ -208,6 +208,10 @@ curl http://127.0.0.1:8000/health
 
 | Model ID (`model`) | การแมปคำสั่ง CLI | ระดับ Reasoning | คำอธิบาย | ขนาด Context |
 | :--- | :--- | :---: | :--- | :---: |
+| **`gemini-3.8-flash-high`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับสูง) | 1,000,000 |
+| **`gemini-3.8-flash-medium`** | `--model gemini-3.8-flash` | `medium` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับกลาง) | 1,000,000 |
+| **`gemini-3.8-flash-low`** | `--model gemini-3.8-flash` | `low` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับเร็ว) | 1,000,000 |
+| **`gemini-3.8-flash`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (ค่ามาตรฐาน) | 1,000,000 |
 | **`gemini-3.7-flash-high`** | `--model gemini-3.7-flash` | `high` | Gemini 3.7 Flash (คิดวิเคราะห์ระดับสูง) | 1,000,000 |
 | **`gemini-3.7-flash-medium`** | `--model gemini-3.7-flash` | `medium` | Gemini 3.7 Flash (คิดวิเคราะห์ระดับกลาง) | 1,000,000 |
 | **`gemini-3.7-flash-low`** | `--model gemini-3.7-flash` | `low` | Gemini 3.7 Flash (คิดวิเคราะห์ระดับเร็ว) | 1,000,000 |
