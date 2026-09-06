@@ -1303,6 +1303,89 @@ class TestAntigravityBridge(unittest.TestCase):
             self.assertFalse(pm.is_in_cooldown("locked_p"))
             self.assertEqual(pm.state["locked_p"]["status"], "OK")
 
+    def test_calculate_dynamic_stall_timeout(self):
+        """Test dynamic stall timeout calculations for short prompts, long prompts, and reasoning models."""
+        # Short prompt (< 2k chars): 40 + (50/2000)*35 = ~40.9s
+        short_stall = antigravity_bridge.calculate_dynamic_stall_timeout(50)
+        self.assertGreaterEqual(short_stall, 35.0)
+        self.assertLessEqual(short_stall, 50.0)
+
+        # Medium prompt (5k chars): base default 75.0s
+        med_stall = antigravity_bridge.calculate_dynamic_stall_timeout(5000)
+        self.assertEqual(med_stall, 75.0)
+
+        # Long prompt (80k chars): 75 + ((80000-20000)/40000)*30 = 75 + 45 = 120.0s
+        long_stall = antigravity_bridge.calculate_dynamic_stall_timeout(80000)
+        self.assertEqual(long_stall, 120.0)
+
+        # Reasoning model (even on short prompt): floor at 90.0s
+        reasoning_stall = antigravity_bridge.calculate_dynamic_stall_timeout(100, model_name="gemini-3.8-flash-high")
+        self.assertGreaterEqual(reasoning_stall, 90.0)
+
+        claude_thinking_stall = antigravity_bridge.calculate_dynamic_stall_timeout(100, model_name="claude-3-7-sonnet-thinking")
+        self.assertGreaterEqual(claude_thinking_stall, 90.0)
+
+    def test_process_activity_tracker_hung_process_stalls(self):
+        """Test that a silent, deadlocked/sleeping process triggers stall watchdog and is killed."""
+        proc = subprocess.Popen(["sleep", "10"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        tracker = antigravity_bridge.ProcessActivityTracker(
+            proc=proc,
+            timeout=5.0,
+            stall_timeout=0.6,
+            profile="test_hung",
+        )
+        t0 = time.time()
+        with self.assertRaises(RuntimeError) as ctx:
+            tracker.run()
+        elapsed = time.time() - t0
+        self.assertIn("CLI Execution Stalled", str(ctx.exception))
+        self.assertLess(elapsed, 2.5)  # Should terminate well before timeout (5.0s)
+        self.assertIsNotNone(proc.poll())  # Process must be killed
+
+    def test_process_activity_tracker_active_process_runs_long(self):
+        """Test that an active process streaming output runs long without triggering stall ('ยาวจริง ไม่ได้ค้าง')."""
+        cmd = ["bash", "-c", "echo tick1; sleep 0.4; echo tick2; sleep 0.4; echo tick3"]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        tracker = antigravity_bridge.ProcessActivityTracker(
+            proc=proc,
+            timeout=5.0,
+            stall_timeout=0.7,
+            profile="test_active",
+        )
+        stdout_out, stderr_out = tracker.run()
+        self.assertIn("tick1", stdout_out)
+        self.assertIn("tick2", stdout_out)
+        self.assertIn("tick3", stdout_out)
+        self.assertFalse(tracker.stalled)
+
+    def test_extract_stall_timeout_headers_and_body(self):
+        """Test extraction of stall_timeout from headers and body."""
+        handler = MagicMock()
+        handler.headers = {"X-Stall-Timeout": "45s"}
+        handler.path = "/v1/chat/completions"
+        s = antigravity_bridge.AntigravityBridgeHandler._extract_stall_timeout(handler, {})
+        self.assertEqual(s, 45.0)
+
+        handler.headers = {}
+        s_body = antigravity_bridge.AntigravityBridgeHandler._extract_stall_timeout(handler, {"stall_timeout": 80.0})
+        self.assertEqual(s_body, 80.0)
+
+    def test_execute_cli_with_fallback_routes_on_stall(self):
+        """Test that when a profile stalls, fallback immediately routes to alternative profile."""
+        pm = ProfileManager(profiles=["hung_profile", "good_profile"], concurrency_per_profile=1)
+
+        def mock_exec(cmd_tpl, prompt, timeout=180.0, profile=None, model_name=None, stall_timeout=None, output_callback=None):
+            if profile == "hung_profile":
+                raise RuntimeError(f"CLI Execution Stalled: no activity for {stall_timeout}s (profile=hung_profile)")
+            return f"Healthy response from {profile}"
+
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            out, used = execute_cli_with_fallback('echo "{prompt}"', "query", profile_manager=pm)
+            self.assertEqual(used, "good_profile")
+            self.assertIn("Healthy response from good_profile", out)
+            self.assertEqual(pm.state["hung_profile"]["status"], "ERROR_COOLDOWN")
+            self.assertTrue(pm.is_in_cooldown("hung_profile"))
+
 
 if __name__ == "__main__":
     unittest.main()

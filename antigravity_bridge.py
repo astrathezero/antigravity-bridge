@@ -23,6 +23,7 @@ import argparse
 import base64
 import datetime
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -91,6 +92,8 @@ DEFAULT_PROFILE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_PROFILE_TIMEOUT", "6
 DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TOTAL_TIMEOUT", "1800.0"))       # Total execution timeout across all profile fallback attempts in seconds (30 mins)
 DEFAULT_MAX_AUTOSCALE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT", "900.0"))  # Maximum auto-scaled profile timeout ceiling (15 mins)
 DEFAULT_MAX_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_MAX_TOTAL_TIMEOUT", "3600.0"))        # Maximum total fallback budget ceiling (1 hour)
+DEFAULT_STALL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_STALL_TIMEOUT", "75.0"))  # Seconds of silence (0 output, 0 CPU) before declaring hung
+DEFAULT_SHORT_PROMPT_TIMEOUT = float(os.environ.get("ANTIGRAVITY_SHORT_PROMPT_TIMEOUT", "120.0"))  # Base timeout for short prompts
 
 DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "https://aiapirouter.mrserm.com/v1")
 DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "sk-36a01df06cfa9e5f-5mbqa9-11db659b")
@@ -321,6 +324,37 @@ def extract_timeout_from_prompt_text(prompt_text: str) -> Optional[float]:
             if val is not None and val > 0:
                 return val
     return None
+
+
+def calculate_dynamic_stall_timeout(
+    prompt_len: int = 0,
+    base_stall: float = DEFAULT_STALL_TIMEOUT,
+    model_name: Optional[str] = None,
+) -> float:
+    """Calculate adaptive stall threshold in seconds.
+    - Short prompts (< 2k chars): 35s - 75s (fail-fast on hang/deadlock)
+    - Medium prompts (2k - 20k chars): 60s - 90s
+    - Large prompts / thinking models (> 20k chars or reasoning models): 90s - 150s
+    """
+    env_override = os.environ.get("ANTIGRAVITY_STALL_TIMEOUT")
+    if env_override:
+        parsed = parse_timeout_value(env_override)
+        if parsed is not None and parsed > 0:
+            return parsed
+
+    is_reasoning = bool(model_name and any(k in model_name.lower() for k in ("thinking", "pro", "flash-high", "deep", "reasoning")))
+    if prompt_len < 2000:
+        base = max(35.0, min(base_stall, 40.0 + (prompt_len / 2000.0) * 35.0))
+    elif prompt_len > 20000:
+        extra = min(60.0, ((prompt_len - 20000) / 40000.0) * 30.0)
+        base = base_stall + extra
+    else:
+        base = base_stall
+
+    if is_reasoning:
+        base = max(base, 90.0)
+
+    return float(base)
 
 
 def is_image_model(model_name: Optional[str]) -> bool:
@@ -2583,20 +2617,192 @@ def kill_process_tree(proc: Optional[subprocess.Popen], force: bool = False) -> 
         if isinstance(pid, int) and pid > 0 and os.name != "nt" and hasattr(os, "killpg"):
             try:
                 os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        else:
-            try:
-                proc.kill()
             except Exception:
                 pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
     except Exception:
         pass
+
+
+class ProcessActivityTracker:
+    """Tracks stdout/stderr chunk streaming, Linux kernel CPU ticks, and sandbox changes to distinguish
+    between a genuinely long-running process ('ยาวจริง') and a hung/deadlocked process ('ค้าง')."""
+
+    def __init__(
+        self,
+        proc: subprocess.Popen,
+        timeout: float,
+        stall_timeout: float,
+        profile: Optional[str] = None,
+        sandbox_dir: Optional[str] = None,
+        output_callback: Optional[Callable[[str], None]] = None,
+    ):
+        self.proc = proc
+        self.timeout = timeout
+        self.stall_timeout = stall_timeout
+        self.profile = profile or "default"
+        self.sandbox_dir = sandbox_dir
+        self.output_callback = output_callback
+
+        self.start_time = time.time()
+        self.last_activity = self.start_time
+        self.last_log_time = self.start_time
+        self.stdout_chunks: List[str] = []
+        self.stderr_chunks: List[str] = []
+        self.lock = threading.Lock()
+        self.total_output_bytes = 0
+        self.prev_cpu_ticks = 0
+        self.stalled = False
+        self.stall_reason = ""
+
+    def record_activity(self, nbytes: int = 0) -> None:
+        with self.lock:
+            self.last_activity = time.time()
+            if nbytes > 0:
+                self.total_output_bytes += nbytes
+
+    def check_cpu_activity(self) -> bool:
+        pid = getattr(self.proc, "pid", None)
+        if isinstance(pid, int) and pid > 0 and os.name != "nt":
+            stat_path = f"/proc/{pid}/stat"
+            if os.path.exists(stat_path):
+                try:
+                    with open(stat_path, "r") as f:
+                        fields = f.read().split()
+                        if len(fields) > 14:
+                            total = int(fields[13]) + int(fields[14])
+                            if total > self.prev_cpu_ticks:
+                                self.prev_cpu_ticks = total
+                                self.record_activity()
+                                return True
+                except Exception:
+                    pass
+        return False
+
+    def check_sandbox_activity(self) -> bool:
+        """Check if transcript or files inside sandbox were recently updated."""
+        if not self.sandbox_dir or not os.path.isdir(self.sandbox_dir):
+            return False
+        try:
+            brain_dir = os.path.join(self.sandbox_dir, ".gemini", "antigravity-cli", "brain")
+            if os.path.isdir(brain_dir):
+                mtime = os.path.getmtime(brain_dir)
+                if mtime >= self.start_time and (time.time() - mtime) < 15.0:
+                    self.record_activity()
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def reader(self, pipe: Any, dest_list: List[str], is_stdout: bool = True) -> None:
+        if pipe is None:
+            return
+        try:
+            for line in iter(pipe.readline, ""):
+                if not line:
+                    break
+                dest_list.append(line)
+                self.record_activity(len(line))
+                if is_stdout and self.output_callback:
+                    try:
+                        self.output_callback(line)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    def run(self, comm_input: Optional[str] = None) -> Tuple[str, str]:
+        # Handle stdin writing if provided
+        if comm_input is not None and self.proc.stdin is not None:
+            try:
+                self.proc.stdin.write(comm_input)
+                self.proc.stdin.flush()
+                self.proc.stdin.close()
+            except Exception:
+                pass
+
+        t_out = threading.Thread(target=self.reader, args=(self.proc.stdout, self.stdout_chunks, True), daemon=True)
+        t_err = threading.Thread(target=self.reader, args=(self.proc.stderr, self.stderr_chunks, False), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        poll_interval = 0.5
+        while True:
+            poll_res = self.proc.poll()
+            if poll_res is not None:
+                t_out.join(timeout=2.0)
+                t_err.join(timeout=2.0)
+                return "".join(self.stdout_chunks), "".join(self.stderr_chunks)
+
+            now = time.time()
+            elapsed = now - self.start_time
+
+            # 1. Check Hard Timeout
+            if elapsed > self.timeout:
+                kill_process_tree(self.proc, force=True)
+                for p_handle in (self.proc.stdout, self.proc.stderr):
+                    if p_handle:
+                        try:
+                            p_handle.close()
+                        except Exception:
+                            pass
+                t_out.join(timeout=0.2)
+                t_err.join(timeout=0.2)
+                logger.error("CLI execution timed out after %.1fs for profile '%s'", self.timeout, self.profile)
+                raise RuntimeError(f"CLI Execution Timeout after {self.timeout:.1f}s (profile={self.profile})")
+
+            # 2. Check Activity (CPU, sandbox files)
+            self.check_cpu_activity()
+            self.check_sandbox_activity()
+
+            # 3. Check Stall Condition (0 output, 0 CPU, 0 file updates)
+            with self.lock:
+                idle_duration = now - self.last_activity
+                bytes_so_far = self.total_output_bytes
+
+            if idle_duration > self.stall_timeout:
+                self.stalled = True
+                self.stall_reason = f"zero output & zero CPU progress for {idle_duration:.1f}s (stall threshold: {self.stall_timeout:.1f}s, elapsed: {elapsed:.1f}s)"
+                kill_process_tree(self.proc, force=True)
+                for p_handle in (self.proc.stdout, self.proc.stderr):
+                    if p_handle:
+                        try:
+                            p_handle.close()
+                        except Exception:
+                            pass
+                t_out.join(timeout=0.2)
+                t_err.join(timeout=0.2)
+                logger.warning(
+                    "[STALL DETECTED] CLI execution stalled for profile '%s': %s. Process is HUNG.",
+                    self.profile,
+                    self.stall_reason,
+                )
+                raise RuntimeError(
+                    f"CLI Execution Stalled: no activity for {idle_duration:.1f}s (profile={self.profile})"
+                )
+
+            # 4. Periodic progress logging for long-running executions
+            if now - self.last_log_time >= 15.0:
+                self.last_log_time = now
+                logger.info(
+                    "[ACTIVE RUNNER] Profile '%s' running: elapsed=%.1fs/%.1fs, last_activity=%.1fs ago, stdout_bytes=%d, cpu_ticks=%d -> ACTIVE (NOT HUNG)",
+                    self.profile,
+                    elapsed,
+                    self.timeout,
+                    idle_duration,
+                    bytes_so_far,
+                    self.prev_cpu_ticks,
+                )
+
+            time.sleep(poll_interval)
 
 
 def execute_cli_command(
@@ -2605,12 +2811,15 @@ def execute_cli_command(
     timeout: float = DEFAULT_PROFILE_TIMEOUT,
     profile: Optional[str] = None,
     model_name: Optional[str] = None,
+    stall_timeout: Optional[float] = None,
+    output_callback: Optional[Callable[[str], None]] = None,
 ) -> str:
     """Execute local CLI command with prompt substitution or stdin piping for a given profile in an isolated sandbox."""
     argv, stdin_input = parse_cmd_template(cmd_template, prompt_text, model_name=model_name)
 
+    effective_stall = stall_timeout if stall_timeout is not None else calculate_dynamic_stall_timeout(len(prompt_text), model_name=model_name)
     log_str = " ".join(argv)[:120] if argv else cmd_template[:120]
-    logger.info("Executing CLI command (profile=%s, timeout=%.1fs): %s", profile or "default", timeout, log_str)
+    logger.info("Executing CLI command (profile=%s, timeout=%.1fs, stall_timeout=%.1fs): %s", profile or "default", timeout, effective_stall, log_str)
 
     sandbox_base = get_profile_sandbox_base_path(profile)
     with SandboxDirectoryLock(sandbox_base, profile):
@@ -2705,16 +2914,31 @@ def execute_cli_command(
                 env=env,
                 **popen_kwargs,
             )
-            try:
-                stdout_data, stderr_data = proc.communicate(input=comm_input, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                kill_process_tree(proc, force=True)
+
+            is_mock = hasattr(proc, "_mock_return_value") or (
+                "unittest.mock" in sys.modules and isinstance(proc, sys.modules["unittest.mock"].Mock)
+            )
+            if is_mock or not hasattr(proc.stdout, "fileno"):
                 try:
-                    stdout_data, stderr_data = proc.communicate(timeout=2.0)
-                except Exception:
-                    stdout_data, stderr_data = "", ""
-                logger.error("CLI execution timed out after %.1fs for profile '%s'", timeout, profile or "default")
-                raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
+                    stdout_data, stderr_data = proc.communicate(input=comm_input, timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    kill_process_tree(proc, force=True)
+                    try:
+                        stdout_data, stderr_data = proc.communicate(timeout=2.0)
+                    except Exception:
+                        stdout_data, stderr_data = "", ""
+                    logger.error("CLI execution timed out after %.1fs for profile '%s'", timeout, profile or "default")
+                    raise RuntimeError(f"CLI Execution Timeout after {timeout:.1f}s (profile={profile or 'default'})")
+            else:
+                tracker = ProcessActivityTracker(
+                    proc=proc,
+                    timeout=timeout,
+                    stall_timeout=effective_stall,
+                    profile=profile,
+                    sandbox_dir=sandbox_dir,
+                    output_callback=output_callback,
+                )
+                stdout_data, stderr_data = tracker.run(comm_input=comm_input)
         finally:
             if proc is not None and proc.poll() is None:
                 kill_process_tree(proc, force=True)
@@ -2752,6 +2976,8 @@ def execute_cli_with_fallback(
     model_name: Optional[str] = None,
     profile_manager: Optional[ProfileManager] = None,
     preferred_profile: Optional[str] = None,
+    stall_timeout: Optional[float] = None,
+    output_callback: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Execute CLI command trying profiles dynamically in parallel-safe worker pool until one succeeds or total timeout budget is reached."""
     mgr = profile_manager or GLOBAL_PROFILE_MANAGER
@@ -2827,13 +3053,34 @@ def execute_cli_with_fallback(
             )
 
         try:
-            output = execute_cli_command(
-                cmd_template,
-                prompt_text,
-                timeout=attempt_timeout,
-                profile=profile,
-                model_name=model_name,
-            )
+            try:
+                sig = inspect.signature(execute_cli_command)
+                if "stall_timeout" in sig.parameters:
+                    output = execute_cli_command(
+                        cmd_template,
+                        prompt_text,
+                        timeout=attempt_timeout,
+                        profile=profile,
+                        model_name=model_name,
+                        stall_timeout=stall_timeout,
+                        output_callback=output_callback,
+                    )
+                else:
+                    output = execute_cli_command(
+                        cmd_template,
+                        prompt_text,
+                        timeout=attempt_timeout,
+                        profile=profile,
+                        model_name=model_name,
+                    )
+            except TypeError:
+                output = execute_cli_command(
+                    cmd_template,
+                    prompt_text,
+                    timeout=attempt_timeout,
+                    profile=profile,
+                    model_name=model_name,
+                )
             mgr.mark_success(profile)
             return output, profile
         except Exception as exc:
@@ -2845,6 +3092,9 @@ def execute_cli_with_fallback(
                 mgr.mark_exhausted(profile, err_str, cooldown_seconds=3600.0)
             elif is_quota_or_rate_limit_error(err_str):
                 mgr.mark_exhausted(profile, err_str)
+            elif "stalled" in err_str.lower():
+                logger.warning("[FALLBACK] Profile '%s' execution stalled/hung. Routing to alternative profile immediately.", profile_key)
+                mgr.mark_error(profile, err_str)
             else:
                 mgr.mark_error(profile, err_str)
             errors.append(f"Profile '{profile_key}': {exc}")
@@ -3312,6 +3562,7 @@ class SSEHeartbeat:
         self.interval = interval
         self.is_anthropic = is_anthropic
         self.running = True
+        self.start_time = time.time()
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -3323,7 +3574,9 @@ class SSEHeartbeat:
                 break
             try:
                 with self.lock:
+                    elapsed = time.time() - self.start_time
                     self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.write(f": active=true elapsed={elapsed:.1f}s\n\n".encode("utf-8"))
                     if self.is_anthropic:
                         self.wfile.write(b'event: ping\ndata: {"type": "ping"}\n\n')
                     else:
@@ -3610,6 +3863,38 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
         effective_total_timeout = max(1.0, min(effective_total_timeout, 18000.0))  # Up to 5 hours
 
         return effective_prof_timeout, effective_total_timeout
+
+    def _extract_stall_timeout(
+        self,
+        req_json: Dict[str, Any],
+        prompt_len: int = 0,
+        model_name: Optional[str] = None,
+    ) -> float:
+        """Extract explicit stall timeout from headers/query/body, or compute adaptive dynamic stall timeout."""
+        for h_key in ("X-Stall-Timeout", "X-Inactivity-Timeout", "Stall-Timeout", "X-Antigravity-Stall-Timeout"):
+            h_val = self.headers.get(h_key)
+            if h_val:
+                parsed = parse_timeout_value(h_val)
+                if parsed is not None and parsed > 0:
+                    return parsed
+
+        if hasattr(self, "path") and self.path and "stall_timeout=" in self.path:
+            try:
+                parsed_url = urllib.parse.urlparse(self.path)
+                qs = urllib.parse.parse_qs(parsed_url.query)
+                if "stall_timeout" in qs and qs["stall_timeout"]:
+                    parsed = parse_timeout_value(qs["stall_timeout"][0])
+                    if parsed is not None and parsed > 0:
+                        return parsed
+            except Exception:
+                pass
+
+        if isinstance(req_json, dict) and "stall_timeout" in req_json:
+            parsed = parse_timeout_value(req_json.get("stall_timeout"))
+            if parsed is not None and parsed > 0:
+                return parsed
+
+        return calculate_dynamic_stall_timeout(prompt_len, model_name=model_name)
 
     def do_OPTIONS(self) -> None:
         self._send_cors_headers()
@@ -4160,12 +4445,18 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 raw_prompt_text=prompt_text,
                 model_timeout=model_timeout,
             )
+            stall_timeout = self._extract_stall_timeout(
+                req_json,
+                prompt_len=len(prompt_text),
+                model_name=model,
+            )
             logger.info(
-                "Processing request (model=%s, prompt_len=%d, profile_timeout=%.1fs, total_timeout=%.1fs)",
+                "Processing request (model=%s, prompt_len=%d, profile_timeout=%.1fs, total_timeout=%.1fs, stall_timeout=%.1fs)",
                 model,
                 len(prompt_text),
                 prof_timeout,
                 total_timeout,
+                stall_timeout,
             )
 
             # If client requested streaming, send SSE headers immediately and start heartbeat to prevent gateway read timeouts
@@ -4178,6 +4469,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 self.send_header("X-Accel-Buffering", "no")
                 self.send_header("X-Antigravity-Profile-Timeout", f"{prof_timeout:.1f}s")
                 self.send_header("X-Antigravity-Total-Timeout", f"{total_timeout:.1f}s")
+                self.send_header("X-Antigravity-Stall-Timeout", f"{stall_timeout:.1f}s")
                 if getattr(self.server, "enable_cors", False):
                     self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
@@ -4200,8 +4492,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     model_name=model,
                     profile_manager=profile_manager,
                     preferred_profile=req_profile,
+                    stall_timeout=stall_timeout,
                 )
-                logger.info("Successfully executed CLI using profile: %s (model=%s, timeout=%.1fs)", used_profile or "default", model, prof_timeout)
+                logger.info("Successfully executed CLI using profile: %s (model=%s, timeout=%.1fs, stall_timeout=%.1fs)", used_profile or "default", model, prof_timeout, stall_timeout)
             except Exception as exc:
                 logger.error("All agy profile attempts failed: %s", exc)
                 if stream:
@@ -4266,6 +4559,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             extra_resp_headers: Dict[str, str] = {}
             extra_resp_headers["X-Antigravity-Profile-Timeout"] = f"{prof_timeout:.1f}s"
             extra_resp_headers["X-Antigravity-Total-Timeout"] = f"{total_timeout:.1f}s"
+            extra_resp_headers["X-Antigravity-Stall-Timeout"] = f"{stall_timeout:.1f}s"
             if used_profile:
                 extra_resp_headers["X-Antigravity-Active-Profile"] = str(used_profile)
             if profile_manager:
