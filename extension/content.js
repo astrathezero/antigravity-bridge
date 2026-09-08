@@ -12,6 +12,49 @@
 
   console.log('[Antigravity Content] Content script initialized.');
 
+  // ---- Extension Context Guard ----
+  // Chrome throws "Extension context invalidated" synchronously when the service worker restarts.
+  // .catch() doesn't catch synchronous throws, so we wrap every chrome.runtime call.
+  let contextInvalidated = false;
+  let reloadScheduled = false;
+
+  function isContextInvalidated(e) {
+    return e && typeof e.message === 'string' &&
+      (e.message.includes('Extension context invalidated') ||
+       e.message.includes('context invalidated') ||
+       e.message.includes('Cannot read properties of undefined'));
+  }
+
+  function handleContextInvalidated() {
+    if (contextInvalidated) return;
+    contextInvalidated = true;
+    console.warn('[Antigravity Content] Extension context invalidated — reloading page in 2s to restore connection...');
+    // Clean up listeners so they don't fire during reload
+    try { if (typeof window.__ANTIGRAVITY_CLEANUP__ === 'function') window.__ANTIGRAVITY_CLEANUP__(); } catch {}
+    if (!reloadScheduled) {
+      reloadScheduled = true;
+      // Delay reload so any in-flight job result can still be read from the page
+      setTimeout(() => { try { window.location.reload(); } catch {} }, 2000);
+    }
+  }
+
+  // Safe wrapper around chrome.runtime.sendMessage
+  function safeSend(msg) {
+    if (contextInvalidated) return;
+    try {
+      const p = chrome.runtime.sendMessage(msg);
+      if (p && typeof p.catch === 'function') {
+        p.catch(e => {
+          if (isContextInvalidated(e)) handleContextInvalidated();
+        });
+      }
+    } catch (e) {
+      if (isContextInvalidated(e)) {
+        handleContextInvalidated();
+      }
+    }
+  }
+
   // 1. Inject page.js into page context
   function injectPageScript() {
     try {
@@ -23,6 +66,7 @@
       (document.head || document.documentElement).appendChild(script);
     } catch (e) {
       console.warn('[Antigravity Content] Failed to inject page script:', e);
+      if (isContextInvalidated(e)) handleContextInvalidated();
     }
   }
   injectPageScript();
@@ -30,69 +74,59 @@
   // 2. Keepalive port to background worker
   let port = null;
   function ensurePort() {
+    if (contextInvalidated) return;
     try {
       if (!port) {
         port = chrome.runtime.connect({ name: 'gemini-tab' });
         port.onDisconnect.addListener(() => {
           port = null;
-          setTimeout(ensurePort, 2000);
+          if (!contextInvalidated) setTimeout(ensurePort, 2000);
         });
       }
     } catch (e) {
-      setTimeout(ensurePort, 3000);
+      if (isContextInvalidated(e)) {
+        handleContextInvalidated();
+      } else {
+        setTimeout(ensurePort, 3000);
+      }
     }
   }
   ensurePort();
 
   // Periodic heartbeat every 10s to keep worker from sleeping
   const heartbeatTimer = setInterval(() => {
+    if (contextInvalidated) { clearInterval(heartbeatTimer); return; }
     try {
       if (port) {
         port.postMessage({ type: 'content-heartbeat', time: Date.now() });
       } else {
         ensurePort();
       }
-      chrome.runtime.sendMessage({ type: 'content-ping' }).catch(() => {});
-    } catch {}
+      safeSend({ type: 'content-ping' });
+    } catch (e) {
+      if (isContextInvalidated(e)) handleContextInvalidated();
+    }
   }, 10000);
 
   // 3. Listen to messages from page.js (DOM world)
   const onWindowMessage = (event) => {
     if (event.source !== window || !event.data || typeof event.data !== 'object') return;
+    if (contextInvalidated) return;
 
     const msg = event.data;
 
     if (msg.type === 'AG_PAGE_READY' || msg.type === 'AG_DETECTED_EMAIL') {
       if (msg.email) {
-        chrome.runtime.sendMessage({
-          type: 'DETECTED_EMAIL',
-          email: msg.email
-        }).catch(() => {});
+        safeSend({ type: 'DETECTED_EMAIL', email: msg.email });
       }
     } else if (msg.type === 'AG_JOB_DELTA') {
-      chrome.runtime.sendMessage({
-        type: 'JOB_DELTA',
-        jobId: msg.jobId,
-        delta: msg.delta
-      }).catch(() => {});
+      safeSend({ type: 'JOB_DELTA', jobId: msg.jobId, delta: msg.delta });
     } else if (msg.type === 'AG_JOB_DONE') {
-      chrome.runtime.sendMessage({
-        type: 'JOB_DONE',
-        jobId: msg.jobId,
-        text: msg.text,
-        finishReason: msg.finishReason || 'stop'
-      }).catch(() => {});
+      safeSend({ type: 'JOB_DONE', jobId: msg.jobId, text: msg.text, finishReason: msg.finishReason || 'stop' });
     } else if (msg.type === 'AG_JOB_ERROR') {
-      chrome.runtime.sendMessage({
-        type: 'JOB_ERROR',
-        jobId: msg.jobId,
-        error: msg.error
-      }).catch(() => {});
+      safeSend({ type: 'JOB_ERROR', jobId: msg.jobId, error: msg.error });
     } else if (msg.type === 'AG_DEBUG') {
-      chrome.runtime.sendMessage({
-        type: 'DEBUG',
-        debug: msg.debug
-      }).catch(() => {});
+      safeSend({ type: 'DEBUG', debug: msg.debug });
     }
   };
   window.addEventListener('message', onWindowMessage);
@@ -102,24 +136,25 @@
     if (!message || !message.type) return;
 
     if (message.type === 'EXECUTE_JOB') {
-      window.postMessage({
-        type: 'AG_EXECUTE_JOB',
-        job: message.job
-      }, '*');
+      window.postMessage({ type: 'AG_EXECUTE_JOB', job: message.job }, '*');
       sendResponse({ status: 'dispatched' });
     } else if (message.type === 'CHECK_EMAIL') {
-      window.postMessage({
-        type: 'AG_CHECK_EMAIL'
-      }, '*');
+      window.postMessage({ type: 'AG_CHECK_EMAIL' }, '*');
       sendResponse({ status: 'checking' });
     }
     return true;
   };
-  chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  try {
+    chrome.runtime.onMessage.addListener(onRuntimeMessage);
+  } catch (e) {
+    if (isContextInvalidated(e)) handleContextInvalidated();
+  }
+
+  window.__ANTIGRAVITY_CONTENT_INITIALIZED__ = true;
 
   window.__ANTIGRAVITY_CLEANUP__ = () => {
     window.removeEventListener('message', onWindowMessage);
-    chrome.runtime.onMessage.removeListener(onRuntimeMessage);
+    try { chrome.runtime.onMessage.removeListener(onRuntimeMessage); } catch {}
     clearInterval(heartbeatTimer);
     if (port) {
       try { port.disconnect(); } catch {}
