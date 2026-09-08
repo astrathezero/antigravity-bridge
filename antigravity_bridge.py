@@ -3109,6 +3109,7 @@ def execute_cli_command(
             logger.info("[PROXY] Active Outbound Proxy: %s (Bypassing 127.0.0.1,localhost)", proxy_url)
 
         if profile:
+            email_preview, token_preview = sync_profile_to_system(profile)
             config_base = get_canonical_antigravity_dir()
             profile_dir = os.path.join(config_base, "profiles", profile)
             if not os.path.exists(profile_dir):
