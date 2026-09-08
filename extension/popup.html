@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Antigravity Web Bridge</title>
+  <style>
+    :root {
+      --bg-primary: #0f172a;
+      --bg-secondary: #1e293b;
+      --bg-card: rgba(30, 41, 59, 0.7);
+      --accent-purple: #8b5cf6;
+      --accent-blue: #38bdf8;
+      --accent-green: #10b981;
+      --accent-red: #ef4444;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: rgba(255, 255, 255, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    body {
+      width: 360px;
+      background: var(--bg-primary);
+      color: var(--text-main);
+      padding: 16px;
+      font-size: 13px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 14px;
+    }
+
+    .header-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      background: linear-gradient(135deg, #a78bfa, #38bdf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .status-connected {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .status-disconnected {
+      background: rgba(239, 68, 68, 0.15);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .status-connected .dot { background: #10b981; box-shadow: 0 0 6px #10b981; }
+    .status-disconnected .dot { background: #ef4444; }
+
+    .card {
+      background: var(--bg-card);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .card-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .field {
+      margin-bottom: 10px;
+    }
+
+    .field:last-child {
+      margin-bottom: 0;
+    }
+
+    label {
+      display: block;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+
+    input[type="text"], select {
+      width: 100%;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input[type="text"]:focus, select:focus {
+      border-color: var(--accent-purple);
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+      font-size: 12px;
+    }
+
+    .info-label {
+      color: var(--text-muted);
+    }
+
+    .info-value {
+      font-weight: 500;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .switch-container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 6px;
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 36px;
+      height: 20px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #334155;
+      transition: .3s;
+      border-radius: 20px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 14px;
+      width: 14px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .3s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: var(--accent-purple);
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(16px);
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    button {
+      flex: 1;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #7c3aed, #4f46e5);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #6d28d9, #4338ca);
+    }
+
+    .btn-secondary {
+      background: #334155;
+      color: var(--text-main);
+    }
+
+    .btn-secondary:hover {
+      background: #475569;
+    }
+
+    .alert {
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      margin-top: 8px;
+      display: none;
+    }
+
+    .alert-error {
+      background: rgba(239, 68, 68, 0.15);
+      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .alert-success {
+      background: rgba(16, 185, 129, 0.15);
+      color: #86efac;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-title">
+      <span>🌌</span> Antigravity Web
+    </div>
+    <div id="statusBadge" class="status-badge status-disconnected">
+      <span class="dot"></span>
+      <span id="statusText">Disconnected</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Bridge Connection</div>
+    <div class="field">
+      <label for="bridgeUrl">Bridge Server URL</label>
+      <input type="text" id="bridgeUrl" value="http://127.0.0.1:8000" placeholder="http://127.0.0.1:8000">
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Profile & Google Account</div>
+    <div class="info-row">
+      <span class="info-label">Active Gemini Email:</span>
+      <span id="detectedEmail" class="info-value">Detecting...</span>
+    </div>
+    <div class="field" style="margin-top: 8px;">
+      <label for="profileSelect">Target Bridge Profile</label>
+      <select id="profileSelect">
+        <option value="">(Auto-match by Google Email)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Model & Reasoning (Web)</div>
+    <div class="field">
+      <label for="webModelSelect">Preferred Gemini Web Model</label>
+      <select id="webModelSelect">
+        <option value="gemini-3.8-flash-thinking" selected>⚡ Gemini 3.8 / 2.0 Flash Thinking (Best Reasoning)</option>
+        <option value="gemini-2.0-flash">🚀 Gemini 2.0 Flash (Fast Output)</option>
+        <option value="gemini-1.5-pro">💎 Gemini 1.5 Pro / Advanced</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Channel Controls</div>
+    <div class="info-row">
+      <span class="info-label">CLI Channel:</span>
+      <span id="cliStatus" class="info-value">🟢 Enabled</span>
+    </div>
+    <div class="switch-container">
+      <span class="info-label">Web Extension Channel:</span>
+      <label class="switch">
+        <input type="checkbox" id="webChannelToggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <div id="alertBox" class="alert"></div>
+
+  <div class="btn-group">
+    <button id="saveBtn" class="btn-primary">Save & Connect</button>
+    <button id="openGeminiBtn" class="btn-secondary">Open Gemini</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

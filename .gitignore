@@ -8,8 +8,13 @@ scatch/
 scratch/
 *auth*.json
 *.png
+!extension/icons/*.png
 *.jpg
 *.jpeg
+
+# Browser user data
+chrome-data/
+deploy/chrome-data/
 
 # Private Environment & Configs (Ignored by Git)
 .env
@@ -25,3 +30,4 @@ local_patch.*
 *.staging
 *.bak
 *.bak.*
+antigravity-bridge-bundle*

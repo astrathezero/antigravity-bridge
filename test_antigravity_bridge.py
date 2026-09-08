@@ -433,13 +433,37 @@ class TestAntigravityBridge(unittest.TestCase):
                 self.assertEqual(resp_json["status"], "ok")
                 self.assertEqual(resp_json["profiles"]["p_alpha"]["status"], "DISABLED")
 
-            enable_url = f"http://127.0.0.1:{port}/v1/profiles/enable"
-            enable_req = json.dumps({"profile": "p_alpha"}).encode("utf-8")
-            req = urllib.request.Request(enable_url, data=enable_req, headers={"Content-Type": "application/json"})
+            # 12. Test /extension/status GET endpoint
+            ext_status_url = f"http://127.0.0.1:{port}/extension/status"
+            with urllib.request.urlopen(ext_status_url) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                self.assertIn("connected_profiles", resp_json)
+                self.assertIn("clients", resp_json)
+
+            # 13. Test /v1/profiles/toggle POST endpoint
+            toggle_url = f"http://127.0.0.1:{port}/v1/profiles/toggle"
+            toggle_req = json.dumps({"profile": "p_alpha", "channel": "web", "enabled": False}).encode("utf-8")
+            req = urllib.request.Request(toggle_url, data=toggle_req, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req) as resp:
                 resp_json = json.loads(resp.read().decode("utf-8"))
                 self.assertEqual(resp_json["status"], "ok")
-                self.assertEqual(resp_json["profiles"]["p_alpha"]["status"], "OK")
+                self.assertFalse(resp_json["web_enabled"])
+
+            # 14. Test channel-specific /v1/profiles/disable and enable
+            disable_cli_req = json.dumps({"profile": "p_alpha", "channel": "cli"}).encode("utf-8")
+            req = urllib.request.Request(disable_url, data=disable_cli_req, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp_json["status"], "ok")
+                self.assertFalse(resp_json["profiles"]["p_alpha"]["cli_enabled"])
+
+            enable_url = f"http://127.0.0.1:{port}/v1/profiles/enable"
+            enable_cli_req = json.dumps({"profile": "p_alpha", "channel": "cli"}).encode("utf-8")
+            req = urllib.request.Request(enable_url, data=enable_cli_req, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req) as resp:
+                resp_json = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(resp_json["status"], "ok")
+                self.assertTrue(resp_json["profiles"]["p_alpha"]["cli_enabled"])
         finally:
             server.shutdown()
             server.server_close()
@@ -1435,6 +1459,185 @@ class TestAntigravityBridge(unittest.TestCase):
             ordered = pm.get_ordered_profiles(model="gemini-3.8-flash")
             self.assertEqual(ordered[0], "p_healthy")
             self.assertEqual(ordered[1], "p_cooldown")
+
+    def test_dynamic_fallback_cli_gemini_to_sonnet_to_web(self):
+        """Test 3-tier fallback: CLI Gemini -> CLI Sonnet -> Web Extension when both CLI models hit quota limits."""
+        pm = ProfileManager(profiles=["p1"], concurrency_per_profile=1)
+
+        # 1. Gemini only in cooldown -> Fallback Tier 1: Sonnet on CLI
+        pm.mark_exhausted("p1", "Gemini quota exceeded", model="gemini-3.8-flash")
+        with patch.object(antigravity_bridge, "execute_cli_command", return_value="CLI Sonnet Output") as mock_cli:
+            res = execute_cli_with_fallback('echo "{prompt}"', "hello", profile_manager=pm, model_name="gemini-3.8-flash")
+            self.assertEqual(res.output, "CLI Sonnet Output")
+            self.assertEqual(res.effective_model, antigravity_bridge.DEFAULT_SONNET_FALLBACK_MODEL)
+            mock_cli.assert_called_once()
+
+        # 2. Both Gemini AND Claude in cooldown -> Fallback Tier 2: Web Extension
+        pm.mark_exhausted("p1", "Claude quota exceeded", model="claude-sonnet-4.6-thinking")
+        self.assertTrue(pm.is_family_in_cooldown("p1", "gemini"))
+        self.assertTrue(pm.is_family_in_cooldown("p1", "claude"))
+
+        # When Web Extension is connected
+        with patch.object(antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER, "is_profile_connected", return_value=True), \
+             patch.object(antigravity_bridge, "execute_web_command", return_value=antigravity_bridge.CLIExecutionResult("Web Output", "p1", antigravity_bridge.DEFAULT_WEB_FALLBACK_MODEL)) as mock_web:
+            res = execute_cli_with_fallback('echo "{prompt}"', "hello", profile_manager=pm, model_name="gemini-3.8-flash")
+            self.assertEqual(res.output, "Web Output")
+            self.assertEqual(res.effective_model, antigravity_bridge.DEFAULT_WEB_FALLBACK_MODEL)
+            mock_web.assert_called_once()
+
+        # When Web Extension is NOT connected -> Fails cleanly with all profiles exhausted
+        with patch.object(antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER, "is_profile_connected", return_value=False), \
+             patch.object(antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER, "get_connected_profiles", return_value=[]):
+            with self.assertRaises(RuntimeError) as ctx:
+                execute_cli_with_fallback('echo "{prompt}"', "hello", profile_manager=pm, model_name="gemini-3.8-flash")
+            self.assertIn("All agy profile execution attempts failed", str(ctx.exception))
+
+    def test_in_flight_cli_quota_exhausted_falls_back_to_web(self):
+        """Test that in-flight CLI quota error triggers immediate Web Extension fallback when Sonnet also in cooldown."""
+        pm = ProfileManager(profiles=["p1"], concurrency_per_profile=1)
+        # Pre-exhaust claude family so only Gemini was tried first
+        pm.mark_exhausted("p1", "Claude exhausted", model="claude-sonnet-4.6-thinking")
+
+        def mock_cli_quota(*args, **kwargs):
+            raise RuntimeError("RESOURCE_EXHAUSTED: 429 quota reached for gemini-3.8-flash")
+
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_cli_quota), \
+             patch.object(antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER, "is_profile_connected", return_value=True), \
+             patch.object(antigravity_bridge, "execute_web_command", return_value=antigravity_bridge.CLIExecutionResult("Recovered via Web", "p1", antigravity_bridge.DEFAULT_WEB_FALLBACK_MODEL)) as mock_web:
+            res = execute_cli_with_fallback('echo "{prompt}"', "hello", profile_manager=pm, model_name="gemini-3.8-flash")
+            self.assertEqual(res.output, "Recovered via Web")
+            self.assertEqual(res.effective_model, antigravity_bridge.DEFAULT_WEB_FALLBACK_MODEL)
+            mock_web.assert_called_once()
+
+    def test_get_ordered_profiles_prioritizes_cli_gemini_then_sonnet_then_web(self):
+        """Test profile ordering puts CLI Gemini > CLI Sonnet > Web Extension > Exhausted."""
+        with patch.object(antigravity_bridge, "get_profile_account_email", return_value="user@example.com"), \
+             patch.object(antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER, "is_profile_connected", return_value=True):
+            pm = ProfileManager(profiles=["p_web_only", "p_cli_gemini", "p_cli_sonnet"], concurrency_per_profile=1)
+            # p_cli_sonnet: Gemini in cooldown, Sonnet available
+            pm.mark_exhausted("p_cli_sonnet", "Gemini exhausted", model="gemini-3.8-flash")
+            # p_web_only: Both in cooldown, but Web connected
+            pm.mark_exhausted("p_web_only", "Gemini exhausted", model="gemini-3.8-flash")
+            pm.mark_exhausted("p_web_only", "Claude exhausted", model="claude-sonnet-4.6-thinking")
+
+            ordered = pm.get_ordered_profiles(model="gemini-3.8-flash")
+            self.assertEqual(ordered[0], "p_cli_gemini")
+            self.assertEqual(ordered[1], "p_cli_sonnet")
+            self.assertEqual(ordered[2], "p_web_only")
+
+    def test_channel_disabling_and_persistence(self):
+        """Test channel-specific disabling (cli, web) and backward compatibility."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "bridge_config.json")
+            with patch.object(antigravity_bridge, "get_canonical_antigravity_dir", return_value=tmpdir):
+                # Initially all enabled
+                self.assertTrue(antigravity_bridge.is_profile_cli_enabled("p_test"))
+                self.assertTrue(antigravity_bridge.is_profile_web_enabled("p_test"))
+
+                # Disable CLI only
+                antigravity_bridge.persist_channel_profile_state("p_test", channel="cli", disabled=True)
+                self.assertFalse(antigravity_bridge.is_profile_cli_enabled("p_test"))
+                self.assertTrue(antigravity_bridge.is_profile_web_enabled("p_test"))
+
+                # Re-enable CLI, disable Web
+                antigravity_bridge.persist_channel_profile_state("p_test", channel="cli", disabled=False)
+                antigravity_bridge.persist_channel_profile_state("p_test", channel="web", disabled=True)
+                self.assertTrue(antigravity_bridge.is_profile_cli_enabled("p_test"))
+                self.assertFalse(antigravity_bridge.is_profile_web_enabled("p_test"))
+
+                # Disable all
+                antigravity_bridge.persist_channel_profile_state("p_test", channel="all", disabled=True)
+                self.assertFalse(antigravity_bridge.is_profile_cli_enabled("p_test"))
+                self.assertFalse(antigravity_bridge.is_profile_web_enabled("p_test"))
+
+                # Verify file contains proper keys
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                self.assertIn("p_test", saved.get("cli_disabled_profiles", []))
+                self.assertIn("p_test", saved.get("web_disabled_profiles", []))
+                self.assertIn("p_test", saved.get("disabled_profiles", []))
+
+    def test_channel_filtering_in_profile_manager(self):
+        """Test that get_ordered_profiles respects channel filter (cli, web)."""
+        pm = ProfileManager(profiles=["p_cli_only", "p_web_only", "p_both", "p_none"])
+
+        def mock_cli_enabled(p):
+            return p in ("p_cli_only", "p_both")
+
+        def mock_web_enabled(p):
+            return p in ("p_web_only", "p_both")
+
+        with patch.object(antigravity_bridge, "is_profile_cli_enabled", side_effect=mock_cli_enabled), \
+             patch.object(antigravity_bridge, "is_profile_web_enabled", side_effect=mock_web_enabled), \
+             patch.object(antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER, "is_profile_connected", return_value=True), \
+             patch.object(antigravity_bridge, "get_profile_account_email", return_value="test@example.com"):
+
+            cli_ordered = pm.get_ordered_profiles(channel="cli")
+            self.assertIn("p_cli_only", cli_ordered)
+            self.assertIn("p_both", cli_ordered)
+            self.assertNotIn("p_web_only", cli_ordered)
+            self.assertNotIn("p_none", cli_ordered)
+
+            web_ordered = pm.get_ordered_profiles(channel="web")
+            self.assertIn("p_web_only", web_ordered)
+            self.assertIn("p_both", web_ordered)
+            self.assertNotIn("p_cli_only", web_ordered)
+            self.assertNotIn("p_none", web_ordered)
+
+    def test_web_client_manager_lifecycle(self):
+        """Test registration, job dispatch, delta handling, and unregistration in WebClientManager."""
+        mgr = antigravity_bridge.WebClientManager()
+        client = mgr.register_client(profile="test_prof", email="tester@gmail.com", client_id="c123")
+
+        self.assertTrue(mgr.is_profile_connected("test_prof"))
+        self.assertIn("test_prof", mgr.get_connected_profiles())
+
+        job = antigravity_bridge.WebJob(
+            job_id="job_abc",
+            profile="test_prof",
+            prompt="Hello Gemini",
+            model="antigravity",
+            stream=True
+        )
+
+        dispatched = mgr.dispatch_job(job)
+        self.assertTrue(dispatched)
+        msg = client.queue.get_nowait()
+        self.assertEqual(msg["event"], "job")
+        self.assertEqual(msg["data"]["jobId"], "job_abc")
+
+        # Delta streaming
+        mgr.handle_delta("job_abc", "Hello ")
+        mgr.handle_delta("job_abc", "World!")
+        self.assertEqual(job.delta_queue.get_nowait(), "Hello ")
+        self.assertEqual(job.delta_queue.get_nowait(), "World!")
+
+        # Done
+        mgr.handle_done("job_abc", "Hello World!")
+        self.assertTrue(job.done_event.is_set())
+        self.assertEqual(job.final_output, "Hello World!")
+
+        # Unregister
+        mgr.unregister_client("c123")
+        self.assertFalse(mgr.is_profile_connected("test_prof"))
+
+    def test_find_profile_by_email(self):
+        """Test auto-matching profile from Google account email."""
+        with patch.object(antigravity_bridge, "get_canonical_antigravity_dir") as mock_dir, \
+             patch("os.path.isdir", return_value=True), \
+             patch("os.listdir", return_value=["p1", "p2"]), \
+             patch.object(antigravity_bridge, "get_profile_account_email") as mock_email:
+
+            mock_dir.return_value = "/fake/antigravity"
+            mock_email.side_effect = lambda p: "alice@gmail.com" if p == "p1" else "bob@gmail.com"
+
+            matched = antigravity_bridge.find_profile_by_email("alice@gmail.com")
+            self.assertEqual(matched, "p1")
+
+            matched_bob = antigravity_bridge.find_profile_by_email("BOB@gmail.com")
+            self.assertEqual(matched_bob, "p2")
+
+            self.assertIsNone(antigravity_bridge.find_profile_by_email("charlie@gmail.com"))
 
 
 if __name__ == "__main__":

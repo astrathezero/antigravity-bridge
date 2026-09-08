@@ -51,7 +51,9 @@
   - [3. OpenAI Chat Completions (`POST /v1/chat/completions`)](#3-openai-chat-completions-post-v1chatcompletions)
   - [4. Anthropic Messages (`POST /v1/messages`)](#4-anthropic-messages-post-v1messages)
   - [5. Image Generation (`POST /v1/images/generations`)](#5-image-generation-post-v1imagesgenerations)
-  - [6. Profile Control APIs (`/v1/profiles/*`)](#6-profile-control-apis-v1profiles)
+  - [6. Profile & Channel Control APIs (`/v1/profiles/*` & `/extension/*`)](#6-profile--channel-control-apis-v1profiles--extension)
+- [🌐 Chrome Extension & Browser Web Fallback (noVNC Setup)](#-chrome-extension--browser-web-fallback-novnc-setup)
+- [🧪 Interactive Live Testing (`test_bridge.py`)](#-interactive-live-testing-test_bridgepy)
 - [⚙️ Configuration & Environment Variables](#️-configuration--environment-variables)
 - [🤖 Hermes Agent Integration (`config.yaml`)](#-hermes-agent-integration-configyaml)
 - [🦞 OpenClaw Integration (`openclaw.json`)](#-openclaw-integration-openclawjson)
@@ -65,7 +67,7 @@
 
 ## 🌟 Architecture & Overview
 
-Antigravity Bridge acts as a unified HTTP gateway between your applications (Hermes Agent, OpenCode, Claude Code, Python/Node.js SDKs, Webhooks) and local `antigravity`/`agy` CLI subprocesses:
+Antigravity Bridge acts as a unified HTTP gateway between your applications (Hermes Agent, OpenCode, Claude Code, Python/Node.js SDKs, Webhooks) and local `antigravity`/`agy` CLI subprocesses with seamless Web browser extension fallback:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -79,19 +81,23 @@ Antigravity Bridge acts as a unified HTTP gateway between your applications (Her
 │  ├── Dual API Translators (OpenAI v1 & Anthropic Messages)             │
 │  ├── Multi-Concurrent Profile Pool & Dynamic Lease Allocator           │
 │  ├── Smart Quota Detector (Auto-Calculates Reset Timers & Rotates)     │
+│  ├── 3-Tier Multi-Engine Dynamic Fallback:                            │
+│  │   ├── Tier 1: CLI Gemini 3.8 Flash (Thinking / Reasoning)          │
+│  │   ├── Tier 2: CLI Anthropic Sonnet 4.6 (Thinking Fallback)         │
+│  │   └── Tier 3: Web Extension Bridge (gemini.google.com Browser)      │
 │  ├── Dynamic Timeout Scaling (Up to 2h) & Large Prompt Support         │
 │  ├── Context Compactor & SSE Keep-Alive Heartbeat Generator            │
 │  ├── Background OAuth Auto-Refresh Daemon (Every 55m)                  │
 │  └── Google Imagen 3 & Gemini Image Router                             │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Isolated Subprocess Execution
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│         Isolated Runtime Sandboxes (~/.config/antigravity/sandboxes/)   │
-│  ├── Sandbox [Profile 1] (Zero DB Lock) ──► Google Gemini API (Stream) │
-│  ├── Sandbox [Profile 2] (Zero DB Lock) ──► Google Gemini API (Stream) │
-│  └── Sandbox [Profile N] (Zero DB Lock) ──► Google Gemini API (Stream) │
-└────────────────────────────────────────────────────────────────────────┘
+└─────────────────┬──────────────────────────────────┬───────────────────┘
+                  │ Subprocess CLI                   │ WebSocket Bridge
+                  ▼                                  ▼
+┌──────────────────────────────────────┐  ┌──────────────────────────────┐
+│  Isolated Runtime Sandboxes (CLI)    │  │  Browser Sessions (noVNC/Web)│
+│  (~/.config/antigravity/sandboxes/)  │  │  (gemini.google.com Tabs)    │
+│  ├── Sandbox [Profile 1]             │  │  ├── Tab [Profile 1]         │
+│  └── Sandbox [Profile N]             │  │  └── Tab [Profile N]         │
+└──────────────────────────────────────┘  └──────────────────────────────┘
 ```
 
 ---
@@ -208,6 +214,7 @@ curl http://127.0.0.1:8000/health
 
 | Model ID (`model`) | Backend CLI Mapping | Reasoning Effort | Description | Max Context |
 | :--- | :--- | :---: | :--- | :---: |
+| **`gemini-3.8-flash-thinking`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (High Reasoning Effort / Flash Thinking) | 1,000,000 |
 | **`gemini-3.8-flash-high`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (High Reasoning Effort) | 1,000,000 |
 | **`gemini-3.8-flash-medium`** | `--model gemini-3.8-flash` | `medium` | Gemini 3.8 Flash (Medium Reasoning Effort) | 1,000,000 |
 | **`gemini-3.8-flash-low`** | `--model gemini-3.8-flash` | `low` | Gemini 3.8 Flash (Low Reasoning Effort) | 1,000,000 |
@@ -223,7 +230,7 @@ curl http://127.0.0.1:8000/health
 | **`gemini-3.1-pro-high`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (High Reasoning Effort) | 2,000,000 |
 | **`gemini-3.1-pro-low`** | `--model gemini-3.1-pro` | `low` | Gemini 3.1 Pro (Low Reasoning Effort) | 2,000,000 |
 | **`gemini-3.1-pro`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (Standard) | 2,000,000 |
-| **`claude-sonnet-4.6-thinking`** | `--model claude-sonnet-4.6` | `thinking` | Claude Sonnet 4.6 (Extended Thinking) | 200,000 |
+| **`claude-sonnet-4.6-thinking`** | `--model claude-sonnet-4.6` | `thinking` | Claude Sonnet 4.6 (Extended Thinking / Tier 2 Fallback) | 200,000 |
 | **`claude-sonnet-4.6`** | `--model claude-sonnet-4.6` | - | Claude Sonnet 4.6 | 200,000 |
 | **`claude-opus-4.6-thinking`** | `--model claude-opus-4.6` | `thinking` | Claude Opus 4.6 (Extended Thinking) | 200,000 |
 | **`claude-opus-4.6`** | `--model claude-opus-4.6` | - | Claude Opus 4.6 | 200,000 |
@@ -232,6 +239,8 @@ curl http://127.0.0.1:8000/health
 | **`imagen-3.0-generate-002`** | Google Imagen 3 API | - | High-Quality Image Generation (`/v1/images/generations`) | - |
 | **`imagen-3.0-fast-generate-001`**| Google Imagen 3 Fast API | - | Fast Image Generation (`/v1/images/generations`) | - |
 | **`gemini-3.1-flash-image`** | Gemini Image Router | - | Fast Gemini Image Generation | - |
+| **`gemini-2.0-flash-thinking`** | Gemini Web Extension | `high` | Gemini Web Extension Flash Thinking (Fallback Tier 3) | 1,000,000 |
+| **`gemini-web`** | Gemini Web Extension | `high` | Dedicated Web Browser Extension Channel | 1,000,000 |
 | **`antigravity`** / **`agy`** | Default CLI backend | - | Default fallback model routing | 1,000,000 |
 
 ---
@@ -242,12 +251,13 @@ The CLI provides built-in subcommands to manage multiple Google profiles:
 
 | Command | Shortcut | Description |
 | :--- | :--- | :--- |
-| `python3 antigravity_bridge.py profile list` | `profiles` | Display table of profiles, Google emails, in-flight leases, cooldowns, and quota |
+| `python3 antigravity_bridge.py profile list` | `profiles` | Display table of profiles, Google emails, in-flight leases, cooldowns, and CLI/Web channel states |
 | `python3 antigravity_bridge.py profile login <name>` | `login <name>` | Interactively authenticate and register a new Google profile |
 | `python3 antigravity_bridge.py profile test [name]` | - | Actively probe quota availability and model responsiveness |
 | `python3 antigravity_bridge.py profile set <p1,p2>` | `profile order` | Dynamically set profile rotation pool and priority order |
-| `python3 antigravity_bridge.py profile disable <name>` | - | Persistently disable a profile from receiving requests (persists across restarts) |
-| `python3 antigravity_bridge.py profile enable <name>` | - | Re-enable a previously disabled profile |
+| `python3 antigravity_bridge.py profile disable <name> [--channel cli\|web\|all]` | - | Persistently disable a profile on CLI, Web, or all channels (persists across restarts) |
+| `python3 antigravity_bridge.py profile enable <name> [--channel cli\|web\|all]` | - | Re-enable a profile on CLI, Web, or all channels |
+| `python3 antigravity_bridge.py profile toggle <name> <cli\|web> [on\|off]` | - | Quickly toggle CLI or Web channel on or off for a profile |
 | `python3 antigravity_bridge.py profile reset [name]` | - | Reset cooldown timers and clear exhausted flags |
 | `python3 antigravity_bridge.py profile refresh [name]` | - | Force OAuth token refresh directly with Google |
 | `python3 antigravity_bridge.py profile sync <user@vps>` | - | Sync all profiles to a remote VPS over compressed SSH |
@@ -346,13 +356,103 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: app
   }'
 ```
 
-### 6. Profile Control APIs (`/v1/profiles/*`)
-- `GET /v1/profiles` — List all profile metrics.
+### 6. Profile & Channel Control APIs (`/v1/profiles/*` & `/extension/*`)
+- `GET /v1/profiles` — List all profile metrics, channel states, and quota cooldowns.
+- `POST /v1/profiles/toggle` — Toggle a profile channel (`{"profile": "p1", "channel": "web", "enabled": false}`).
+- `POST /v1/profiles/disable` — Disable a profile (`{"profile": "p1", "channel": "cli|web|all"}`).
+- `POST /v1/profiles/enable` — Enable a profile (`{"profile": "p1", "channel": "cli|web|all"}`).
 - `POST /v1/profiles/reset` — Reset cooldowns (`{"profile": "profile_1"}`).
 - `POST /v1/profiles/check` — Trigger active quota probe (`{"model": "gemini-3.7-flash"}`).
 - `POST /v1/profiles/config` — Live hot-reload profile rotation (`{"profiles": ["p1", "p2"]}`).
-- `POST /v1/profiles/disable` — Temporarily disable profile (`{"profile": "p1"}`).
-- `POST /v1/profiles/enable` — Re-enable profile (`{"profile": "p1"}`).
+- `GET /extension/status` — Inspect connected Chrome Extension clients and active sessions.
+
+---
+
+## 🌐 Chrome Extension & Browser Web Fallback (noVNC Setup)
+
+Antigravity Bridge includes a powerful **Web Browser Extension Bridge** that routes prompts directly to active `gemini.google.com` sessions inside Google Chrome or Chromium.
+
+### 🌟 3-Tier Multi-Engine Dynamic Fallback
+When a request is received with `channel="auto"` (the default):
+1. **Tier 1 (CLI Gemini):** Attempt execution via Antigravity CLI using `gemini-3.8-flash-thinking`.
+2. **Tier 2 (CLI Sonnet):** If all Gemini accounts are in quota cooldown, automatically fall back to `claude-sonnet-4.6-thinking` via CLI.
+3. **Tier 3 (Web Extension):** If both Gemini and Claude are in cooldown on the CLI, seamlessly route the prompt to connected Chrome Extension tabs on `gemini.google.com`!
+
+### ✨ Extension Capabilities
+- **Smart Model Picker:** The extension automatically scans the dropdown on `gemini.google.com` and selects **3.8 Flash Thinking**, **2.0 Flash Thinking**, or the best available reasoning model.
+- **Thinking Process Extraction:** Automatically parses `<think>...</think>` blocks from the browser DOM so reasoning tokens are returned cleanly.
+- **Continuous Keep-Alive Engine:** Uses Chrome Alarms API (`chrome.alarms`), persistent WebSocket heartbeats, and simulated interactions to prevent background tabs from being suspended or throttled.
+- **Profile-to-Tab Matching:** Automatically extracts the logged-in Google email from the page and maps it to the corresponding Antigravity profile.
+- **Per-Channel Toggling:** Granularly enable or disable CLI or Web channels per profile (`profile disable <p> --channel web` or `profile toggle <p> web off`).
+
+### 📦 Loading the Extension in Desktop Chrome
+1. Open Google Chrome and navigate to `chrome://extensions/`.
+2. Enable **"Developer mode"** in the top-right corner.
+3. Click **"Load unpacked"** and select the [`extension/`](extension/) directory from this repository.
+4. Open a browser tab to [https://gemini.google.com](https://gemini.google.com) and log in with your Google Account.
+5. Click the Antigravity Extension icon in the toolbar. It will connect to `ws://127.0.0.1:8000/ws` and show a green `CONNECTED` status.
+
+### 🐳 Headless VPS Deployment with noVNC (Docker)
+For headless Linux servers or VPS environments without a display monitor, the [`deploy/`](deploy/) directory provides a complete Docker & noVNC environment:
+
+```bash
+cd deploy/
+docker compose up -d --build
+```
+- **Access noVNC Desktop:** Connect via SSH tunnel:
+  ```bash
+  ssh -L 6080:127.0.0.1:6080 -L 8000:127.0.0.1:8000 user@your-server-ip
+  ```
+  Then open `http://127.0.0.1:6080` in your browser.
+- Log in to your Google accounts inside the noVNC Chromium browser once; sessions stay alive indefinitely!
+
+---
+
+## 🧪 Interactive Live Testing (`test_bridge.py`)
+
+Antigravity Bridge includes a zero-dependency CLI test suite [`test_bridge.py`](test_bridge.py) to test health, models, web extension connection, chat completions, and real-time streaming tokens.
+
+### 🎮 Interactive Mode (Menu 0-9)
+```bash
+python3 test_bridge.py
+```
+Displays an interactive menu to test any component on demand:
+- `1. 🩺 Full System Health & Quota Overview`
+- `2. 🤖 List Registered Models`
+- `3. 🔌 Check Browser Web Extension Status`
+- `4. ⚡ Test Chat Completion (gemini-3.8-flash-thinking)`
+- `5. 🌊 Test Chat Streaming (SSE Real-time Tokens)`
+- `6. 🌐 Test Web Extension Channel (channel='web')`
+- `7. 🖥️  Test CLI Channel (channel='cli')`
+- `8. 🅰️  Test Anthropic Messages Endpoint (/v1/messages)`
+- `9. 🚀 Run ALL Tests Sequentially`
+
+### ⚡ One-Liner Commands
+```bash
+# Check server health and all profile cooldowns:
+python3 test_bridge.py --health
+
+# Inspect available models:
+python3 test_bridge.py --models
+
+# Verify Chrome Extension status:
+python3 test_bridge.py --extension
+
+# Test chat completion with Flash Thinking:
+python3 test_bridge.py --chat "Explain quantum entanglement in 1 sentence."
+
+# Test real-time SSE token streaming:
+python3 test_bridge.py --chat "Count 1 to 5" --stream
+
+# Force test through Web Extension Channel:
+python3 test_bridge.py --chat "Hello" --channel web
+
+# Test Anthropic /v1/messages compatibility:
+python3 test_bridge.py --anthropic
+
+# Run all automated tests:
+python3 test_bridge.py --all
+```
 
 ---
 
@@ -598,6 +698,81 @@ When processing very large prompts (e.g. multi-file codebase analysis or deep re
 | **URL Query Parameter** | `POST http://127.0.0.1:8000/v1/chat/completions?timeout=30m` |
 | **Model Name Suffix** | `model: "gemini-3.7-flash-high:timeout=30m"` or `model: "gemini-3.7-flash-high:30m"` |
 | **In-Prompt Directive** | `[antigravity:timeout=30m]` embedded at the top of your prompt or system instruction |
+
+---
+
+## 🌐 Web Extension Bridge (`gemini.google.com`)
+
+Antigravity Bridge includes a Chrome Extension (Manifest V3) that allows routing requests directly through real, logged-in browser tabs on `https://gemini.google.com/`.
+
+### Why use the Web Extension?
+- **Web Session Routing**: Utilize features and quotas available through your Google web interface.
+- **Multi-Profile Auto-Pairing**: When you open Gemini in Chromium, the extension detects your active Google Account email from the avatar/DOM and automatically maps it to the matching Antigravity profile (`google_accounts.json`).
+- **Granular Channel Controls**: Selectively choose whether each profile handles requests via CLI (`agy`), Web Extension, or both.
+- **Offscreen Keepalive**: Prevents Chrome from terminating background service workers even when tabs are idle.
+
+### Installing the Extension Locally
+1. In Chrome / Chromium, navigate to `chrome://extensions`.
+2. Enable **Developer mode** (toggle in top right).
+3. Click **Load unpacked** and select the `extension/` folder in this repository.
+4. Open `https://gemini.google.com/app` and verify you are logged in.
+5. Click the Antigravity Extension icon in the toolbar. It should show **🟢 Connected** to `http://127.0.0.1:8000`.
+
+---
+
+## 🐳 Headless Deployment with Docker & noVNC (`deploy/`)
+
+To run Antigravity Bridge 24/7 on a remote Linux server or VPS without keeping your laptop open:
+
+```bash
+cd deploy/
+docker compose up -d --build
+```
+
+- **Web Desktop (noVNC)**: Accessible on `http://127.0.0.1:6080` (via SSH tunnel: `ssh -L 6080:127.0.0.1:6080 -L 8000:127.0.0.1:8000 user@server`).
+- **API Endpoint**: `http://127.0.0.1:8000`.
+- **Persistent Cookies**: Chrome login sessions persist inside `deploy/chrome-data/`.
+- Full details in [deploy/README.md](deploy/README.md).
+
+---
+
+## 🔀 Multi-Channel Profile Control (CLI vs Web)
+
+You can selectively configure which channel each profile is allowed to execute:
+
+```bash
+# Disable Web channel for profile 'p1' (CLI remains active)
+python3 antigravity_bridge.py profile disable p1 --channel web
+
+# Disable CLI for profile 'p2' (Web extension remains active)
+python3 antigravity_bridge.py profile disable p2 --channel cli
+
+# Disable both channels
+python3 antigravity_bridge.py profile disable p1 --channel all
+
+# Re-enable Web channel for profile 'p1'
+python3 antigravity_bridge.py profile enable p1 --channel web
+
+# View profile status with CLI & Web channel indicators
+python3 antigravity_bridge.py profile list
+```
+
+When sending API completion requests, you can optionally configure or force a specific channel:
+```json
+{
+  "model": "antigravity",
+  "channel": "auto",
+  "messages": [{"role": "user", "content": "Hello!"}]
+}
+```
+Supported values for `channel`:
+- **`"auto"` (Default 3-Tier Fallback)**:
+  1. **Primary**: CLI execution via standard `agy` CLI (Gemini model family).
+  2. **Tier 1 Fallback**: CLI execution switches dynamically to Claude Sonnet (`claude-sonnet-4.6-thinking`) when Gemini hits quota limits / cooldown.
+  3. **Tier 2 Fallback**: Web Extension (`gemini.google.com`) when **BOTH** Gemini and Sonnet reach quota limits on CLI.
+  4. **Tier 3 Safety Net**: If all candidate profiles fail on CLI, falls back to any connected Web Extension before erroring out.
+- **`"cli"`**: Forces CLI execution only (`agy`). Never routes to Web Extension even if CLI hits quota limits.
+- **`"web"`** (or any model ending in `-web`): Forces Web Extension execution directly via `gemini.google.com`.
 
 ---
 

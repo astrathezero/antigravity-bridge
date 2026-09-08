@@ -39,11 +39,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import queue
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 
 def load_dotenv(paths: Optional[List[str]] = None) -> None:
@@ -114,10 +115,12 @@ DEFAULT_QUOTA_CACHE_FILE = os.environ.get("ANTIGRAVITY_QUOTA_CACHE_FILE", os.pat
 DEFAULT_QUOTA_WINDOW_SECONDS = 10800.0  # 3-hour sliding window for Google Gemini quota
 DEFAULT_FLASH_QUOTA_CAPACITY = 50       # Baseline 50 requests capacity per 3h window for Flash
 DEFAULT_SONNET_FALLBACK_MODEL = os.environ.get("ANTIGRAVITY_SONNET_FALLBACK_MODEL", "claude-sonnet-4-6")
+DEFAULT_WEB_FALLBACK_MODEL = os.environ.get("ANTIGRAVITY_WEB_FALLBACK_MODEL", "gemini-3.8-flash-thinking")
 ANTIGRAVITY_MODEL_FALLBACK_ENABLED = os.environ.get("ANTIGRAVITY_MODEL_FALLBACK_ENABLED", "true").lower() in ("1", "true", "yes")
 
 SUPPORTED_MODELS = {
     "gemini-3.8-flash": ("gemini-3.8-flash", "high"),
+    "gemini-3.8-flash-thinking": ("gemini-3.8-flash", "high"),
     "gemini-3.8-flash-high": ("gemini-3.8-flash", "high"),
     "gemini-3.8-flash-medium": ("gemini-3.8-flash", "medium"),
     "gemini-3.8-flash-low": ("gemini-3.8-flash", "low"),
@@ -151,9 +154,26 @@ SUPPORTED_MODELS = {
     "gpt-oss-120b": ("gpt-oss-120b", None),
     "imagen-3.0-generate-002": ("ag/gemini-3.1-flash-image", None),
     "imagen-3.0-fast-generate-001": ("ag/gemini-3.1-flash-image", None),
+    # Gemini Web Extension Models (Flash Thinking / Reasoning)
+    "gemini-3.8-flash-thinking-web": ("gemini-3.8-flash-thinking", "high"),
+    "gemini-2.0-flash-thinking": ("gemini-2.0-flash-thinking", "high"),
+    "gemini-2.0-flash-thinking-exp": ("gemini-2.0-flash-thinking-exp", "high"),
+    "gemini-flash-thinking": ("gemini-3.8-flash-thinking", "high"),
+    "gemini-2.0-flash": ("gemini-2.0-flash", "high"),
+    "gemini-web": ("gemini-3.8-flash-thinking", "high"),
+    "gemini-web-thinking": ("gemini-3.8-flash-thinking", "high"),
 }
 
 MODEL_CONTEXT_LIMITS = {
+    # Gemini Web Extension Models (Flash Thinking)
+    "gemini-3.8-flash-thinking": 1000000,
+    "gemini-3.8-flash-thinking-web": 1000000,
+    "gemini-2.0-flash-thinking": 1000000,
+    "gemini-2.0-flash-thinking-exp": 1000000,
+    "gemini-flash-thinking": 1000000,
+    "gemini-2.0-flash": 1000000,
+    "gemini-web": 1000000,
+    "gemini-web-thinking": 1000000,
     # Gemini Flash Models (1M tokens)
     "gemini-3.8-flash": 1000000,
     "gemini-3.8-flash-high": 1000000,
@@ -1034,10 +1054,12 @@ def is_quota_or_rate_limit_error(error_msg: str) -> bool:
 
 
 def get_model_family(model_name: Optional[str]) -> str:
-    """Return model family: 'gemini', 'claude', 'gpt-oss', or 'other'."""
+    """Return model family: 'web', 'gemini', 'claude', 'gpt-oss', or 'other'."""
     if not model_name:
         return "gemini"
     m = model_name.lower().strip()
+    if "-web" in m or m.endswith("web") or "gemini-web" in m or m == "web":
+        return "web"
     if "claude" in m or "sonnet" in m or "opus" in m:
         return "claude"
     if "gpt-oss" in m:
@@ -1149,7 +1171,7 @@ def format_cooldown_duration(seconds: float) -> str:
 
 
 def get_disabled_profiles() -> Set[str]:
-    """Get set of profiles configured to be permanently disabled."""
+    """Get set of profiles configured to be permanently disabled across all channels."""
     disabled: Set[str] = set()
     env_val = os.environ.get("ANTIGRAVITY_DISABLED_PROFILES", "").strip()
     if env_val:
@@ -1167,13 +1189,107 @@ def get_disabled_profiles() -> Set[str]:
                     disabled.update(str(p).strip() for p in raw if p)
                 elif isinstance(raw, str):
                     disabled.update(p.strip() for p in raw.split(",") if p.strip())
+                # Check per-profile overrides
+                p_cfg = cfg.get("profiles", {})
+                if isinstance(p_cfg, dict):
+                    for prof_name, p_info in p_cfg.items():
+                        if isinstance(p_info, dict):
+                            if p_info.get("disabled") is True or (p_info.get("cli") is False and p_info.get("web") is False):
+                                disabled.add(str(prof_name).strip())
         except Exception:
             pass
     return disabled
 
 
-def persist_disabled_profile(profile: str, disabled: bool = True) -> None:
-    """Persist or remove a profile from ~/.config/antigravity/bridge_config.json disabled_profiles list."""
+def get_cli_disabled_profiles() -> Set[str]:
+    """Get set of profiles configured to be disabled specifically for CLI execution."""
+    disabled: Set[str] = set()
+    env_val = os.environ.get("ANTIGRAVITY_CLI_DISABLED_PROFILES", "").strip()
+    if env_val:
+        disabled.update(p.strip() for p in env_val.split(",") if p.strip())
+
+    cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                raw = cfg.get("cli_disabled_profiles")
+                if isinstance(raw, list):
+                    disabled.update(str(p).strip() for p in raw if p)
+                elif isinstance(raw, str):
+                    disabled.update(p.strip() for p in raw.split(",") if p.strip())
+                p_cfg = cfg.get("profiles", {})
+                if isinstance(p_cfg, dict):
+                    for prof_name, p_info in p_cfg.items():
+                        if isinstance(p_info, dict) and p_info.get("cli") is False:
+                            disabled.add(str(prof_name).strip())
+        except Exception:
+            pass
+    return disabled
+
+
+def get_web_disabled_profiles() -> Set[str]:
+    """Get set of profiles configured to be disabled specifically for Web extension execution."""
+    disabled: Set[str] = set()
+    env_val = os.environ.get("ANTIGRAVITY_WEB_DISABLED_PROFILES", "").strip()
+    if env_val:
+        disabled.update(p.strip() for p in env_val.split(",") if p.strip())
+
+    cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                raw = cfg.get("web_disabled_profiles")
+                if isinstance(raw, list):
+                    disabled.update(str(p).strip() for p in raw if p)
+                elif isinstance(raw, str):
+                    disabled.update(p.strip() for p in raw.split(",") if p.strip())
+                p_cfg = cfg.get("profiles", {})
+                if isinstance(p_cfg, dict):
+                    for prof_name, p_info in p_cfg.items():
+                        if isinstance(p_info, dict) and p_info.get("web") is False:
+                            disabled.add(str(prof_name).strip())
+        except Exception:
+            pass
+    return disabled
+
+
+def is_profile_cli_enabled(profile: Optional[str]) -> bool:
+    """Return True if profile is permitted to execute via CLI (agy)."""
+    key = profile or "default"
+    if key in get_disabled_profiles():
+        return False
+    if key in get_cli_disabled_profiles():
+        return False
+    return True
+
+
+def is_profile_web_enabled(profile: Optional[str]) -> bool:
+    """Return True if profile is permitted to execute via Web extension (gemini.google.com)."""
+    key = profile or "default"
+    if key in get_disabled_profiles():
+        return False
+    if key in get_web_disabled_profiles():
+        return False
+    return True
+
+
+def get_profile_channel_status(profile: Optional[str]) -> Dict[str, bool]:
+    """Return channel capabilities dict for a profile: {'cli': bool, 'web': bool, 'disabled': bool}."""
+    key = profile or "default"
+    cli_on = is_profile_cli_enabled(key)
+    web_on = is_profile_web_enabled(key)
+    all_off = (key in get_disabled_profiles()) or (not cli_on and not web_on)
+    return {
+        "cli": cli_on,
+        "web": web_on,
+        "disabled": all_off,
+    }
+
+
+def persist_channel_profile_state(profile: str, channel: str = "all", disabled: bool = True) -> None:
+    """Persist or update profile enable/disable state for 'cli', 'web', or 'all' channels in bridge_config.json."""
     if not profile:
         return
     cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
@@ -1188,24 +1304,60 @@ def persist_disabled_profile(profile: str, disabled: bool = True) -> None:
         if not isinstance(data, dict):
             data = {}
 
-        dis_list = data.get("disabled_profiles")
-        if dis_list is None:
-            dis_list = data.get("disabled", [])
-        if not isinstance(dis_list, list):
-            dis_list = [str(dis_list)] if dis_list else []
-        dis_set = set(str(p).strip() for p in dis_list if p)
+        p_name = profile.strip()
+        ch = (channel or "all").lower().strip()
 
-        if disabled:
-            dis_set.add(profile.strip())
-        else:
-            dis_set.discard(profile.strip())
+        def _update_list(field_name: str, add: bool) -> None:
+            raw_list = data.get(field_name, [])
+            if not isinstance(raw_list, list):
+                raw_list = [str(raw_list)] if raw_list else []
+            s = set(str(p).strip() for p in raw_list if p)
+            if add:
+                s.add(p_name)
+            else:
+                s.discard(p_name)
+            data[field_name] = sorted(list(s))
 
-        data["disabled_profiles"] = sorted(list(dis_set))
+        if "profiles" not in data or not isinstance(data["profiles"], dict):
+            data["profiles"] = {}
+        if p_name not in data["profiles"] or not isinstance(data["profiles"][p_name], dict):
+            data["profiles"][p_name] = {}
+
+        if ch in ("all", "*"):
+            _update_list("disabled_profiles", disabled)
+            _update_list("cli_disabled_profiles", disabled)
+            _update_list("web_disabled_profiles", disabled)
+            if not disabled:
+                data["profiles"][p_name]["cli"] = True
+                data["profiles"][p_name]["web"] = True
+                data["profiles"][p_name]["disabled"] = False
+            else:
+                data["profiles"][p_name]["cli"] = False
+                data["profiles"][p_name]["web"] = False
+                data["profiles"][p_name]["disabled"] = True
+        elif ch == "cli":
+            _update_list("cli_disabled_profiles", disabled)
+            data["profiles"][p_name]["cli"] = not disabled
+            if not disabled:
+                _update_list("disabled_profiles", False)
+                data["profiles"][p_name]["disabled"] = False
+        elif ch == "web":
+            _update_list("web_disabled_profiles", disabled)
+            data["profiles"][p_name]["web"] = not disabled
+            if not disabled:
+                _update_list("disabled_profiles", False)
+                data["profiles"][p_name]["disabled"] = False
+
         os.makedirs(os.path.dirname(cfg_file), exist_ok=True)
         with open(cfg_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as exc:
-        logger.warning("Failed to persist disabled profile '%s' to %s: %s", profile, cfg_file, exc)
+        logger.warning("Failed to persist channel profile state for '%s' (ch=%s, disabled=%s): %s", profile, channel, disabled, exc)
+
+
+def persist_disabled_profile(profile: str, disabled: bool = True) -> None:
+    """Persist or remove a profile from bridge_config.json disabled_profiles list."""
+    persist_channel_profile_state(profile, channel="all", disabled=disabled)
 
 
 class ProfileSandboxBusyError(RuntimeError):
@@ -1323,6 +1475,171 @@ class SandboxDirectoryLock:
         if self._acquired_thread_lock:
             self._t_lock.release()
             self._acquired_thread_lock = False
+
+
+class WebJob:
+    """Represents an execution job dispatched to an active Chrome Extension session on gemini.google.com."""
+    def __init__(
+        self,
+        job_id: str,
+        profile: str,
+        prompt: str,
+        model: str,
+        stream: bool = True,
+        timeout: float = 180.0,
+    ):
+        self.job_id = job_id
+        self.profile = profile
+        self.prompt = prompt
+        self.model = model
+        self.stream = stream
+        self.timeout = timeout
+        self.created_at = time.time()
+        self.last_activity = time.time()
+        self.delta_queue: queue.Queue[Optional[str]] = queue.Queue()
+        self.done_event = threading.Event()
+        self.final_output = ""
+        self.error: Optional[str] = None
+        self.effective_model = model or "gemini-web"
+
+
+class WebClient:
+    """Represents a connected Chrome Extension tab/worker for a given profile."""
+    def __init__(self, client_id: str, profile: str, email: str = ""):
+        self.client_id = client_id
+        self.profile = profile
+        self.email = email
+        self.connected_at = time.time()
+        self.last_heartbeat = time.time()
+        self.queue: queue.Queue[Dict[str, Any]] = queue.Queue()
+        self.is_alive = True
+
+
+class WebClientManager:
+    """Thread-safe manager for Web Extension worker connections and job dispatching."""
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.clients: Dict[str, WebClient] = {}
+        self.profile_to_client_ids: Dict[str, Set[str]] = {}
+        self.jobs: Dict[str, WebJob] = {}
+
+    def register_client(self, profile: str, email: str = "", client_id: Optional[str] = None) -> WebClient:
+        with self.lock:
+            cid = client_id or f"web_{uuid.uuid4().hex[:8]}"
+            prof = profile or "default"
+            client = WebClient(client_id=cid, profile=prof, email=email)
+            self.clients[cid] = client
+            if prof not in self.profile_to_client_ids:
+                self.profile_to_client_ids[prof] = set()
+            self.profile_to_client_ids[prof].add(cid)
+            logger.info("[WEB EXTENSION] Registered client '%s' for profile '%s' (email=%s)", cid, prof, email)
+            return client
+
+    def unregister_client(self, client_id: str) -> None:
+        with self.lock:
+            client = self.clients.pop(client_id, None)
+            if client:
+                client.is_alive = False
+                cids = self.profile_to_client_ids.get(client.profile, set())
+                cids.discard(client_id)
+                if not cids:
+                    self.profile_to_client_ids.pop(client.profile, None)
+                logger.info("[WEB EXTENSION] Unregistered client '%s' for profile '%s'", client_id, client.profile)
+
+    def is_profile_connected(self, profile: Optional[str]) -> bool:
+        if not profile:
+            return False
+        with self.lock:
+            cids = self.profile_to_client_ids.get(profile, set())
+            return len(cids) > 0
+
+    def get_connected_profiles(self) -> List[str]:
+        with self.lock:
+            return sorted(list(self.profile_to_client_ids.keys()))
+
+    def get_client_for_profile(self, profile: str) -> Optional[WebClient]:
+        with self.lock:
+            cids = self.profile_to_client_ids.get(profile, set())
+            for cid in list(cids):
+                client = self.clients.get(cid)
+                if client and client.is_alive:
+                    return client
+            return None
+
+    def dispatch_job(self, job: WebJob) -> bool:
+        with self.lock:
+            client = self.get_client_for_profile(job.profile)
+            if not client:
+                logger.warning("[WEB EXTENSION] No active extension client connected for profile '%s'", job.profile)
+                return False
+            self.jobs[job.job_id] = job
+            client.queue.put({
+                "event": "job",
+                "data": {
+                    "jobId": job.job_id,
+                    "profile": job.profile,
+                    "prompt": job.prompt,
+                    "model": job.model,
+                    "stream": job.stream,
+                    "timeout": job.timeout,
+                }
+            })
+            logger.info("[WEB EXTENSION] Dispatched job '%s' to client '%s' (profile=%s)", job.job_id, client.client_id, job.profile)
+            return True
+
+    def handle_delta(self, job_id: str, delta: str) -> bool:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                return False
+            job.last_activity = time.time()
+            job.final_output += delta
+            job.delta_queue.put(delta)
+            return True
+
+    def handle_done(self, job_id: str, full_output: Optional[str] = None) -> bool:
+        with self.lock:
+            job = self.jobs.pop(job_id, None)
+            if not job:
+                return False
+            if full_output is not None and full_output:
+                job.final_output = full_output
+            job.delta_queue.put(None)
+            job.done_event.set()
+            logger.info("[WEB EXTENSION] Completed job '%s' (profile=%s, output_len=%d)", job_id, job.profile, len(job.final_output))
+            return True
+
+    def handle_error(self, job_id: str, error_msg: str) -> bool:
+        with self.lock:
+            job = self.jobs.pop(job_id, None)
+            if not job:
+                return False
+            job.error = error_msg
+            job.delta_queue.put(None)
+            job.done_event.set()
+            logger.warning("[WEB EXTENSION] Job '%s' failed (profile=%s): %s", job_id, job.profile, error_msg)
+            return True
+
+    def get_status_summary(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "connected_clients_count": len(self.clients),
+                "connected_profiles": self.get_connected_profiles(),
+                "active_jobs_count": len(self.jobs),
+                "clients": [
+                    {
+                        "client_id": c.client_id,
+                        "profile": c.profile,
+                        "email": c.email,
+                        "connected_at": c.connected_at,
+                        "idle_seconds": round(time.time() - c.last_heartbeat, 1),
+                    }
+                    for c in self.clients.values()
+                ]
+            }
+
+
+GLOBAL_WEB_CLIENT_MANAGER = WebClientManager()
 
 
 class ProfileManager:
@@ -1511,12 +1828,15 @@ class ProfileManager:
         return now < exhausted_until
 
     def is_executable(self, profile: Optional[str], model: Optional[str] = None) -> bool:
-        """Check if a profile can execute requests for the given model (either directly or via fallback)."""
+        """Check if a profile can execute requests for the given model (either directly, via Sonnet fallback, or via Web extension)."""
         key = profile or "default"
         info = self.state.get(key, {})
         if info.get("status") == "DISABLED":
             return False
         now = time.time()
+        # If Web extension is connected and enabled, profile is executable via Web fallback
+        if self.is_web_executable(profile, model=model):
+            return True
         if not model:
             return now >= info.get("exhausted_until", 0)
         fam = get_model_family(model)
@@ -1538,6 +1858,37 @@ class ProfileManager:
         gemini_until = info.get("family_cooldowns", {}).get("gemini", 0)
         claude_until = info.get("family_cooldowns", {}).get("claude", 0)
         return (now < gemini_until) and (now >= claude_until)
+
+    def is_cli_executable(self, profile: Optional[str], model: Optional[str] = None) -> bool:
+        """Check if a profile is allowed for CLI execution and can execute requests."""
+        if not is_profile_cli_enabled(profile):
+            return False
+        key = profile or "default"
+        info = self.state.get(key, {})
+        if info.get("status") == "DISABLED":
+            return False
+        now = time.time()
+        if not model:
+            return now >= info.get("exhausted_until", 0)
+        fam = get_model_family(model)
+        if fam == "gemini" and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
+            gemini_until = info.get("family_cooldowns", {}).get("gemini", 0)
+            claude_until = info.get("family_cooldowns", {}).get("claude", 0)
+            return (now >= gemini_until) or (now >= claude_until)
+        return not self.is_in_cooldown(profile, model=model)
+
+    def is_web_executable(self, profile: Optional[str], model: Optional[str] = None) -> bool:
+        """Check if a profile is allowed for Web extension execution, connected, and not in cooldown."""
+        if not is_profile_web_enabled(profile):
+            return False
+        if not GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(profile):
+            return False
+        key = profile or "default"
+        info = self.state.get(key, {})
+        if info.get("status") == "DISABLED":
+            return False
+        web_model = "gemini-web" if (not model or "web" not in model) else model
+        return not self.is_in_cooldown(profile, model=web_model)
 
     def set_last_execution_model(self, profile: Optional[str], model: str) -> None:
         """Record the model last successfully executed by this profile."""
@@ -1749,27 +2100,12 @@ class ProfileManager:
                     self.state[k]["window_start"] = int(now)
             self.save_cache()
 
-    def get_ordered_profiles(self, model: Optional[str] = None) -> List[Optional[str]]:
-        """Return candidate profiles ordered by availability, model capability, and concurrency:
-        If model is in Gemini family and fallback is enabled:
-          1. Gemini-ready & IDLE profiles (in_flight == 0, not in Gemini cooldown), rotated round-robin.
-          2. Gemini-ready profiles with free capacity (in_flight < concurrency_per_profile).
-          3. Sonnet-fallback ready & IDLE profiles (in Gemini cooldown, but NOT in Claude cooldown), rotated round-robin.
-          4. Sonnet-fallback ready profiles with free capacity.
-          5. Saturated / busy profiles.
-          6. Unauthenticated profiles.
-          7. Fully exhausted profiles (sorted by earliest reset).
-        Otherwise:
-          1. Ready & IDLE profiles (in_flight == 0).
-          2. Ready profiles with free capacity.
-          3. Recovering profiles with free capacity.
-          4. Busy profiles.
-          5. Unauthenticated profiles.
-          6. Exhausted profiles.
-        """
+    def get_ordered_profiles(self, model: Optional[str] = None, channel: str = "auto") -> List[Optional[str]]:
+        """Return candidate profiles ordered by availability, model capability, channel capability, and concurrency."""
         now = time.time()
         fam = get_model_family(model) if model else None
         use_fallback_routing = (fam == "gemini") and ANTIGRAVITY_MODEL_FALLBACK_ENABLED
+        req_ch = (channel or "auto").lower().strip()
 
         with self.lock:
             profiles = list(self._profiles)
@@ -1777,9 +2113,12 @@ class ProfileManager:
             ready_avail: List[Optional[str]] = []
             sonnet_idle: List[Optional[str]] = []
             sonnet_avail: List[Optional[str]] = []
+            web_idle: List[Optional[str]] = []
+            web_avail: List[Optional[str]] = []
             recovering_idle: List[Optional[str]] = []
             ready_busy: List[Optional[str]] = []
             sonnet_busy: List[Optional[str]] = []
+            web_busy: List[Optional[str]] = []
             recovering_busy: List[Optional[str]] = []
             exhausted: List[Tuple[float, Optional[str]]] = []
             unauthenticated: List[Optional[str]] = []
@@ -1791,20 +2130,82 @@ class ProfileManager:
                 if status == "DISABLED":
                     continue
 
+                if req_ch == "cli" and not is_profile_cli_enabled(p):
+                    continue
+                if req_ch == "web" and (not is_profile_web_enabled(p) or not GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(p)):
+                    continue
+                if req_ch == "auto" and not is_profile_cli_enabled(p) and not is_profile_web_enabled(p):
+                    continue
+
                 f_cds = info.get("family_cooldowns", {})
                 gemini_cd = f_cds.get("gemini", 0)
                 claude_cd = f_cds.get("claude", 0)
                 ex_until = info.get("exhausted_until", 0)
 
+                # Route explicit web channel requests directly
+                if req_ch == "web":
+                    if self.is_web_executable(p, model=model):
+                        in_fl = self.in_flight.get(key, 0)
+                        is_locked = is_profile_sandbox_locked(p)
+                        is_busy = (in_fl >= self.concurrency_per_profile) or is_locked
+                        if in_fl == 0 and not is_locked:
+                            web_idle.append(p)
+                        elif not is_busy:
+                            web_avail.append(p)
+                        else:
+                            web_busy.append(p)
+                    else:
+                        exhausted.append((ex_until or (now + 300), p))
+                    continue
+
+                # Auto channel where CLI channel is explicitly disabled: check web
+                if req_ch == "auto" and not is_profile_cli_enabled(p):
+                    if self.is_web_executable(p, model=model):
+                        in_fl = self.in_flight.get(key, 0)
+                        is_locked = is_profile_sandbox_locked(p)
+                        is_busy = (in_fl >= self.concurrency_per_profile) or is_locked
+                        if in_fl == 0 and not is_locked:
+                            web_idle.append(p)
+                        elif not is_busy:
+                            web_avail.append(p)
+                        else:
+                            web_busy.append(p)
+                    else:
+                        exhausted.append((ex_until or (now + 300), p))
+                    continue
+
                 if use_fallback_routing:
                     is_gemini_down = (now < gemini_cd) or (status == "EXHAUSTED" and gemini_cd == 0 and now < ex_until)
                     is_claude_down = (now < claude_cd)
                     if is_gemini_down and is_claude_down:
+                        # Both Gemini & Claude down on CLI: check if Web fallback is available
+                        if req_ch in ("auto", "web") and self.is_web_executable(p, model=model):
+                            in_fl = self.in_flight.get(key, 0)
+                            is_locked = is_profile_sandbox_locked(p)
+                            is_busy = (in_fl >= self.concurrency_per_profile) or is_locked
+                            if in_fl == 0 and not is_locked:
+                                web_idle.append(p)
+                            elif not is_busy:
+                                web_avail.append(p)
+                            else:
+                                web_busy.append(p)
+                            continue
                         earliest_res = min(gemini_cd, claude_cd) if (gemini_cd and claude_cd) else max(gemini_cd, claude_cd, ex_until)
                         exhausted.append((earliest_res, p))
                         continue
                 else:
                     if ex_until > 0 and now < ex_until:
+                        if req_ch in ("auto", "web") and self.is_web_executable(p, model=model):
+                            in_fl = self.in_flight.get(key, 0)
+                            is_locked = is_profile_sandbox_locked(p)
+                            is_busy = (in_fl >= self.concurrency_per_profile) or is_locked
+                            if in_fl == 0 and not is_locked:
+                                web_idle.append(p)
+                            elif not is_busy:
+                                web_avail.append(p)
+                            else:
+                                web_busy.append(p)
+                            continue
                         exhausted.append((ex_until, p))
                         continue
 
@@ -1860,8 +2261,14 @@ class ProfileManager:
                 s_idx = self.current_idx % len(sonnet_idle)
                 sonnet_idle = sonnet_idle[s_idx:] + sonnet_idle[:s_idx]
 
+            # Round-robin among web_idle profiles
+            if web_idle:
+                w_idx = self.current_idx % len(web_idle)
+                web_idle = web_idle[w_idx:] + web_idle[:w_idx]
+
             ready_avail.sort(key=lambda p: self.in_flight.get(p or "default", 0))
             sonnet_avail.sort(key=lambda p: self.in_flight.get(p or "default", 0))
+            web_avail.sort(key=lambda p: self.in_flight.get(p or "default", 0))
 
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
@@ -1871,9 +2278,12 @@ class ProfileManager:
                 + ready_avail
                 + sonnet_idle
                 + sonnet_avail
+                + web_idle
+                + web_avail
                 + recovering_idle
                 + ready_busy
                 + sonnet_busy
+                + web_busy
                 + recovering_busy
                 + unauthenticated
                 + exhausted_profiles
@@ -2065,6 +2475,14 @@ class ProfileManager:
                         reqs = info.get("window_requests", 0)
                         quota_pct = max(5, int((1.0 - min(1.0, reqs / float(DEFAULT_FLASH_QUOTA_CAPACITY))) * 100))
                 info["estimated_quota_percent"] = quota_pct
+                info["cli_enabled"] = is_profile_cli_enabled(p)
+                info["web_enabled"] = is_profile_web_enabled(p)
+                info["web_connected"] = GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(p)
+                info["account_email"] = get_profile_account_email(p)
+                info["capabilities"] = {
+                    "cli": is_profile_cli_enabled(p),
+                    "web": is_profile_web_enabled(p),
+                }
                 res[key] = info
             return res
 
@@ -3234,6 +3652,60 @@ class CLIExecutionResult(tuple):
         self.effective_model = effective_model or "default"
 
 
+def execute_web_command(
+    prompt_text: str,
+    profile: Optional[str] = None,
+    model_name: Optional[str] = None,
+    timeout: float = DEFAULT_PROFILE_TIMEOUT,
+    output_callback: Optional[Callable[[str], None]] = None,
+) -> CLIExecutionResult:
+    """Execute prompt via connected Chrome extension on gemini.google.com for the target profile."""
+    prof = profile or "default"
+    if not is_profile_web_enabled(prof):
+        raise RuntimeError(f"Profile '{prof}' has Web channel disabled in configuration")
+    if not GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(prof):
+        raise RuntimeError(f"No active Chrome extension connected for profile '{prof}'")
+
+    job_id = f"webjob_{uuid.uuid4().hex[:10]}"
+    job = WebJob(
+        job_id=job_id,
+        profile=prof,
+        prompt=prompt_text,
+        model=model_name or "gemini-web",
+        stream=output_callback is not None,
+        timeout=timeout,
+    )
+    if not GLOBAL_WEB_CLIENT_MANAGER.dispatch_job(job):
+        raise RuntimeError(f"Failed to dispatch job to Chrome extension for profile '{prof}'")
+
+    logger.info("Dispatched Web extension job %s (profile=%s, model=%s, timeout=%.1fs)", job_id, prof, model_name or "gemini-web", timeout)
+    start_time = time.time()
+    accumulated: List[str] = []
+
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed > timeout:
+            GLOBAL_WEB_CLIENT_MANAGER.handle_error(job_id, f"Web execution timeout after {timeout:.1f}s")
+            raise TimeoutError(f"Web execution timed out after {timeout:.1f}s (profile={prof})")
+
+        try:
+            delta = job.delta_queue.get(timeout=1.0)
+            if delta is None:  # Sentinel: finished or error
+                break
+            accumulated.append(delta)
+            if output_callback:
+                output_callback(delta)
+        except queue.Empty:
+            if job.done_event.is_set():
+                break
+
+    if job.error:
+        raise RuntimeError(f"Web Extension Execution Error: {job.error}")
+
+    result_text = "".join(accumulated) or job.final_output
+    return CLIExecutionResult(result_text, prof, effective_model=model_name or "gemini-web")
+
+
 def execute_cli_with_fallback(
     cmd_template: str,
     prompt_text: str,
@@ -3245,13 +3717,15 @@ def execute_cli_with_fallback(
     preferred_profile: Optional[str] = None,
     stall_timeout: Optional[float] = None,
     output_callback: Optional[Callable[[str], None]] = None,
+    channel: str = "auto",
 ) -> Tuple[str, Optional[str]]:
-    """Execute CLI command trying profiles dynamically in parallel-safe worker pool until one succeeds or total timeout budget is reached."""
+    """Execute command trying profiles dynamically in parallel-safe worker pool across CLI/Web channels until one succeeds."""
     mgr = profile_manager or GLOBAL_PROFILE_MANAGER
     if profiles is not None:
         mgr.set_profiles(profiles)
 
-    candidate_profiles = mgr.get_ordered_profiles(model=model_name)
+    req_ch = (channel or "auto").lower().strip()
+    candidate_profiles = mgr.get_ordered_profiles(model=model_name, channel=req_ch)
     if preferred_profile and preferred_profile in candidate_profiles:
         if not mgr.is_profile_busy(preferred_profile) and mgr.is_executable(preferred_profile, model=model_name):
             candidate_profiles = [preferred_profile] + [p for p in candidate_profiles if p != preferred_profile]
@@ -3297,39 +3771,106 @@ def execute_cli_with_fallback(
         in_flight_count = mgr.get_in_flight(profile)
         attempt_timeout = max(1.0, min(timeout, remaining_budget))
 
+        # Check Web execution eligibility
+        use_web = False
+        if req_ch == "web":
+            use_web = True
+        elif req_ch == "auto" and model_name and ("-web" in model_name or model_name == "gemini-web"):
+            use_web = True
+        elif req_ch == "auto" and not is_profile_cli_enabled(profile):
+            if mgr.is_web_executable(profile, model=model_name):
+                use_web = True
+            else:
+                logger.warning("Skipping profile '%s': CLI channel disabled and Web not executable", profile_key)
+                errors.append(f"Profile '{profile_key}': CLI channel disabled and Web not executable")
+                mgr.release_profile(profile)
+                continue
+
         # Determine effective model for this profile (Dynamic Model Fallback)
         effective_model = model_name
         is_fallback_active = False
 
-        if model_name and get_model_family(model_name) == "gemini" and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
-            if mgr.is_family_in_cooldown(profile, "gemini"):
-                if not mgr.is_family_in_cooldown(profile, "claude"):
-                    effective_model = DEFAULT_SONNET_FALLBACK_MODEL
-                    is_fallback_active = True
-                    gemini_rem = mgr.get_family_cooldown_remaining(profile, "gemini")
+        if not use_web:
+            if model_name and get_model_family(model_name) == "gemini" and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
+                if mgr.is_family_in_cooldown(profile, "gemini"):
+                    if not mgr.is_family_in_cooldown(profile, "claude"):
+                        # Tier 1 Fallback: Sonnet via CLI
+                        effective_model = DEFAULT_SONNET_FALLBACK_MODEL
+                        is_fallback_active = True
+                        gemini_rem = mgr.get_family_cooldown_remaining(profile, "gemini")
+                        logger.info(
+                            "[DYNAMIC FALLBACK TIER 1] Profile '%s' in Gemini cooldown (reset in %s) -> Switching CLI model to %s",
+                            profile_key,
+                            format_cooldown_duration(gemini_rem),
+                            effective_model,
+                        )
+                    else:
+                        # Tier 2 Fallback: Both Gemini and Claude in cooldown on CLI -> Check Web extension!
+                        if req_ch == "auto" and mgr.is_web_executable(profile, model=model_name):
+                            use_web = True
+                            effective_model = DEFAULT_WEB_FALLBACK_MODEL
+                            logger.info(
+                                "[DYNAMIC FALLBACK TIER 2] Profile '%s' exhausted for both Gemini and Claude on CLI -> Falling back to Web Extension (%s)",
+                                profile_key,
+                                effective_model,
+                            )
+                        else:
+                            logger.warning(
+                                "Skipping fallback profile in cooldown for both Gemini and Claude: %s",
+                                profile_key,
+                            )
+                            errors.append(f"Profile '{profile_key}' exhausted for both Gemini and Claude on CLI. Skipping.")
+                            mgr.release_profile(profile)
+                            continue
+            elif mgr.is_in_cooldown(profile, model=model_name):
+                if req_ch == "auto" and mgr.is_web_executable(profile, model=model_name):
+                    use_web = True
+                    effective_model = DEFAULT_WEB_FALLBACK_MODEL
                     logger.info(
-                        "[DYNAMIC FALLBACK] Profile '%s' in Gemini cooldown (reset in %s) -> Switching model to %s",
+                        "[DYNAMIC FALLBACK] Profile '%s' in CLI cooldown for %s -> Falling back to Web Extension (%s)",
                         profile_key,
-                        format_cooldown_duration(gemini_rem),
+                        model_name or "default",
                         effective_model,
                     )
                 else:
                     logger.warning(
-                        "Skipping fallback profile in cooldown for both Gemini and Claude: %s",
+                        "Skipping fallback profile in cooldown: %s (model=%s, in_flight=%d, timeout=%.1fs)",
                         profile_key,
+                        model_name or "default",
+                        in_flight_count,
+                        attempt_timeout,
                     )
-                    errors.append(f"Profile '{profile_key}' exhausted for both Gemini and Claude. Skipping.")
+                    errors.append(f"Profile '{profile_key}' is in cooldown (exhausted). Skipping.")
                     mgr.release_profile(profile)
                     continue
-        elif mgr.is_in_cooldown(profile, model=model_name):
-            logger.warning(
-                "Skipping fallback profile in cooldown: %s (model=%s, in_flight=%d, timeout=%.1fs)",
+
+        if use_web:
+            logger.info(
+                "Attempting Web Extension execution with profile: %s (model=%s, timeout=%.1fs)",
                 profile_key,
-                model_name or "default",
-                in_flight_count,
+                effective_model or "gemini-web",
                 attempt_timeout,
             )
-            errors.append(f"Profile '{profile_key}' is in cooldown (exhausted). Skipping.")
+            try:
+                web_result = execute_web_command(
+                    prompt_text=prompt_text,
+                    profile=profile,
+                    model_name=effective_model or DEFAULT_WEB_FALLBACK_MODEL,
+                    timeout=attempt_timeout,
+                    output_callback=output_callback,
+                )
+                mgr.mark_success(profile, model="gemini-web")
+                mgr.set_last_execution_model(profile, effective_model or DEFAULT_WEB_FALLBACK_MODEL)
+                return web_result
+            except Exception as web_exc:
+                logger.warning("Web Extension execution failed for profile '%s': %s", profile_key, web_exc)
+                errors.append(f"Web Profile '{profile_key}': {web_exc}")
+                mgr.release_profile(profile)
+                continue
+
+        if not is_profile_cli_enabled(profile):
+            logger.warning("Skipping CLI execution for profile '%s' (CLI channel disabled)", profile_key)
+            errors.append(f"Profile '{profile_key}': CLI channel disabled")
             mgr.release_profile(profile)
             continue
 
@@ -3383,6 +3924,30 @@ def execute_cli_with_fallback(
                 mgr.mark_exhausted(profile, err_str, cooldown_seconds=3600.0, model=effective_model)
             elif is_quota_or_rate_limit_error(err_str):
                 mgr.mark_exhausted(profile, err_str, model=effective_model)
+                # If Claude/Sonnet is in cooldown (or was the model that just hit quota limit),
+                # and req_ch == "auto", attempt immediate Tier 2 Web Extension fallback!
+                if req_ch == "auto" and mgr.is_web_executable(profile, model=model_name):
+                    fam = get_model_family(effective_model) if effective_model else None
+                    if fam == "claude" or mgr.is_family_in_cooldown(profile, "claude"):
+                        logger.info(
+                            "[IN-FLIGHT FALLBACK TIER 2] Profile '%s' hit CLI quota on %s (Claude also in cooldown). Attempting immediate Web Extension fallback...",
+                            profile_key,
+                            effective_model,
+                        )
+                        try:
+                            web_result = execute_web_command(
+                                prompt_text=prompt_text,
+                                profile=profile,
+                                model_name=DEFAULT_WEB_FALLBACK_MODEL,
+                                timeout=attempt_timeout,
+                                output_callback=output_callback,
+                            )
+                            mgr.mark_success(profile, model="gemini-web")
+                            mgr.set_last_execution_model(profile, DEFAULT_WEB_FALLBACK_MODEL)
+                            return web_result
+                        except Exception as w_exc:
+                            logger.warning("Immediate Web fallback failed for profile '%s': %s", profile_key, w_exc)
+                            errors.append(f"Profile '{profile_key}' (Web fallback): {w_exc}")
             elif "stalled" in err_str.lower():
                 logger.warning("[FALLBACK] Profile '%s' execution stalled/hung. Routing to alternative profile immediately.", profile_key)
                 mgr.mark_error(profile, err_str)
@@ -3391,6 +3956,32 @@ def execute_cli_with_fallback(
             errors.append(f"Profile '{profile_key}': {exc}")
         finally:
             mgr.release_profile(profile)
+
+    # Final Safety Net: If all candidate profile attempts failed on CLI, and req_ch == "auto",
+    # attempt execution on any connected Web Extension client before failing completely!
+    if req_ch == "auto":
+        connected_profiles = [p for p in GLOBAL_WEB_CLIENT_MANAGER.get_connected_profiles() if is_profile_web_enabled(p)]
+        for web_prof in connected_profiles:
+            if web_prof in tried_profiles and not mgr.is_web_executable(web_prof, model=model_name):
+                continue
+            logger.info(
+                "[GLOBAL WEB SAFETY NET] All CLI attempts exhausted. Falling back to connected Web Extension on profile '%s'",
+                web_prof or "default",
+            )
+            try:
+                web_result = execute_web_command(
+                    prompt_text=prompt_text,
+                    profile=web_prof,
+                    model_name=DEFAULT_WEB_FALLBACK_MODEL,
+                    timeout=min(timeout, total_timeout),
+                    output_callback=output_callback,
+                )
+                mgr.mark_success(web_prof, model="gemini-web")
+                mgr.set_last_execution_model(web_prof, DEFAULT_WEB_FALLBACK_MODEL)
+                return web_result
+            except Exception as net_exc:
+                logger.warning("Global Web Safety Net failed on profile '%s': %s", web_prof or "default", net_exc)
+                errors.append(f"Web Safety Net Profile '{web_prof or 'default'}': {net_exc}")
 
     raise RuntimeError(f"All agy profile execution attempts failed. Details: {'; '.join(errors)}")
 
@@ -4282,6 +4873,50 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     "object": "list",
                     "data": models_list,
                 })
+            if path in ("/extension/events", "/api/web/events", "/events"):
+                query = urllib.parse.urlparse(self.path).query
+                params = urllib.parse.parse_qs(query)
+                prof = params.get("profile", [None])[0] or "default"
+                acct_email = params.get("email", [""])[0]
+                if (not prof or prof == "default") and acct_email:
+                    matched_prof = find_profile_by_email(acct_email)
+                    if matched_prof:
+                        prof = matched_prof
+                        logger.info("[WEB EXTENSION] Auto-matched profile '%s' for Google account '%s'", prof, acct_email)
+
+                client = GLOBAL_WEB_CLIENT_MANAGER.register_client(profile=prof, email=acct_email)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("X-Accel-Buffering", "no")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.flush()
+
+                init_data = json.dumps({"status": "connected", "clientId": client.client_id, "profile": prof, "email": acct_email})
+                self.wfile.write(f"event: connected\ndata: {init_data}\n\n".encode("utf-8"))
+                self.wfile.flush()
+
+                try:
+                    while client.is_alive:
+                        try:
+                            msg = client.queue.get(timeout=10.0)
+                            ev_name = msg.get("event", "job")
+                            ev_data = json.dumps(msg.get("data", {}))
+                            self.wfile.write(f"event: {ev_name}\ndata: {ev_data}\n\n".encode("utf-8"))
+                            self.wfile.flush()
+                        except queue.Empty:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    GLOBAL_WEB_CLIENT_MANAGER.unregister_client(client.client_id)
+                return
+
+            if path in ("/extension/status", "/api/web/status"):
+                self._send_json_response(GLOBAL_WEB_CLIENT_MANAGER.get_status_summary())
                 return
 
             self._send_json_response({"error": "Not Found"}, status_code=404)
@@ -4303,14 +4938,20 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             is_profiles_config = path in ("/v1/profiles/config", "/profiles/config", "/v1/config", "/config")
             is_profiles_disable = path in ("/v1/profiles/disable", "/profiles/disable")
             is_profiles_enable = path in ("/v1/profiles/enable", "/profiles/enable")
+            is_profiles_toggle = path in ("/v1/profiles/toggle", "/profiles/toggle")
             is_keys_create = path in ("/v1/keys/create", "/keys/create", "/v1/api-keys/create", "/api-keys/create")
             is_keys_revoke = path in ("/v1/keys/revoke", "/keys/revoke", "/v1/api-keys/revoke", "/api-keys/revoke")
+            is_ext_delta = path in ("/extension/delta", "/api/web/delta")
+            is_ext_done = path in ("/extension/done", "/api/web/done")
+            is_ext_error = path in ("/extension/error", "/api/web/error")
 
-            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check or is_profiles_config or is_profiles_disable or is_profiles_enable or is_keys_create or is_keys_revoke):
+            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check or is_profiles_config or is_profiles_disable or is_profiles_enable or is_profiles_toggle or is_keys_create or is_keys_revoke or is_ext_delta or is_ext_done or is_ext_error):
                 self._send_json_response({"error": "Not Found"}, status_code=404)
                 return
 
-            if not self._authorized():
+            is_loopback = getattr(self, "client_address", ("",))[0] in ("127.0.0.1", "::1", "localhost")
+            is_ext_req = is_ext_delta or is_ext_done or is_ext_error
+            if not (is_ext_req and is_loopback) and not self._authorized():
                 self._send_json_response(
                     {
                         "error": {
@@ -4443,11 +5084,15 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             if is_profiles_disable:
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
                 target_p = req_json.get("profile")
+                ch = req_json.get("channel", "all")
                 if target_p:
-                    pm.mark_disabled(target_p)
+                    if ch in ("cli", "web"):
+                        persist_channel_profile_state(str(target_p), channel=ch, disabled=True)
+                    else:
+                        pm.mark_disabled(target_p)
                     self._send_json_response({
                         "status": "ok",
-                        "message": f"Profile '{target_p}' is now DISABLED",
+                        "message": f"Profile '{target_p}' is now DISABLED (channel={ch})",
                         "profiles": pm.get_status_summary(),
                     })
                 else:
@@ -4457,15 +5102,64 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             if is_profiles_enable:
                 pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
                 target_p = req_json.get("profile")
+                ch = req_json.get("channel", "all")
                 if target_p:
-                    pm.enable(target_p)
+                    if ch in ("cli", "web"):
+                        persist_channel_profile_state(str(target_p), channel=ch, disabled=False)
+                    else:
+                        pm.enable(target_p)
                     self._send_json_response({
                         "status": "ok",
-                        "message": f"Profile '{target_p}' is now ENABLED",
+                        "message": f"Profile '{target_p}' is now ENABLED (channel={ch})",
                         "profiles": pm.get_status_summary(),
                     })
                 else:
                     self._send_json_response({"error": "Missing 'profile' in request body"}, status_code=400)
+                return
+
+            if is_profiles_toggle:
+                pm = getattr(self.server, "profile_manager", None) or GLOBAL_PROFILE_MANAGER
+                target_p = req_json.get("profile")
+                if not target_p:
+                    self._send_json_response({"error": "Missing 'profile' in request body"}, status_code=400)
+                    return
+                ch = req_json.get("channel", "all")
+                enabled = bool(req_json.get("enabled", True))
+                persist_channel_profile_state(str(target_p), channel=ch, disabled=not enabled)
+                if not enabled and ch in ("all", "*"):
+                    pm.mark_disabled(str(target_p))
+                elif enabled and ch in ("all", "*"):
+                    pm.enable(str(target_p))
+                self._send_json_response({
+                    "status": "ok",
+                    "profile": target_p,
+                    "channel": ch,
+                    "enabled": enabled,
+                    "cli_enabled": is_profile_cli_enabled(target_p),
+                    "web_enabled": is_profile_web_enabled(target_p),
+                    "profiles": pm.get_status_summary(),
+                })
+                return
+
+            if is_ext_delta:
+                job_id = req_json.get("jobId") or req_json.get("job_id")
+                delta = req_json.get("delta", "")
+                success = GLOBAL_WEB_CLIENT_MANAGER.handle_delta(str(job_id), str(delta))
+                self._send_json_response({"status": "ok" if success else "unknown_job"})
+                return
+
+            if is_ext_done:
+                job_id = req_json.get("jobId") or req_json.get("job_id")
+                full_text = req_json.get("text") or req_json.get("output")
+                success = GLOBAL_WEB_CLIENT_MANAGER.handle_done(str(job_id), full_text)
+                self._send_json_response({"status": "ok" if success else "unknown_job"})
+                return
+
+            if is_ext_error:
+                job_id = req_json.get("jobId") or req_json.get("job_id")
+                err_msg = req_json.get("error", "Unknown browser error")
+                success = GLOBAL_WEB_CLIENT_MANAGER.handle_error(str(job_id), str(err_msg))
+                self._send_json_response({"status": "ok" if success else "unknown_job"})
                 return
 
             if is_profiles_reset:
@@ -4772,6 +5466,11 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 or self.headers.get("X-Profile")
                 or (req_json.get("profile") if isinstance(req_json.get("profile"), str) else None)
             )
+            req_channel = (
+                self.headers.get("X-Bridge-Channel")
+                or self.headers.get("X-Channel")
+                or (req_json.get("channel") if isinstance(req_json.get("channel"), str) else "auto")
+            )
 
             try:
                 output_text, used_profile = execute_cli_with_fallback(
@@ -4784,6 +5483,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     profile_manager=profile_manager,
                     preferred_profile=req_profile,
                     stall_timeout=stall_timeout,
+                    channel=req_channel,
                 )
                 actual_model = getattr(output_text, "effective_model", None) or profile_manager.get_last_execution_model(used_profile) or model
                 logger.info(
@@ -5100,6 +5800,29 @@ def get_profile_account_email(profile: Optional[str]) -> str:
     return "Not Logged In"
 
 
+def find_profile_by_email(email: Optional[str]) -> Optional[str]:
+    """Find a profile name whose google_accounts.json active email matches given email."""
+    if not email:
+        return None
+    target = email.strip().lower()
+    config_base = get_canonical_antigravity_dir()
+    profiles_dir = os.path.join(config_base, "profiles")
+    candidates = []
+    if os.path.isdir(profiles_dir):
+        try:
+            candidates = [d for d in os.listdir(profiles_dir) if os.path.isdir(os.path.join(profiles_dir, d)) and not d.startswith(".")]
+        except Exception:
+            pass
+    for cand in candidates:
+        cand_email = get_profile_account_email(cand)
+        if cand_email and cand_email.strip().lower() == target:
+            return cand
+    default_email = get_profile_account_email("default")
+    if default_email and default_email.strip().lower() == target:
+        return "default"
+    return None
+
+
 def handle_profile_cli(argv: List[str]) -> int:
     """CLI subcommand handler for managing Antigravity login profiles."""
     if argv and argv[0] in ("-h", "--help", "help"):
@@ -5164,9 +5887,9 @@ Examples:
             all_profiles = get_available_profiles()
             summary = pm.get_status_summary()
 
-        print("\n" + "=" * 135)
-        print(f"{'Profile Name':<18} {'Google Account Email':<30} {'Status':<10} {'Concurrency':<14} {'Gemini Quota':<20} {'Model Mode':<24} {'Success'}")
-        print("=" * 135)
+        print("\n" + "=" * 148)
+        print(f"{'Profile Name':<18} {'Google Account Email':<28} {'CLI':<8} {'Web':<14} {'Status':<10} {'Concurrency':<14} {'Gemini Quota':<18} {'Model Mode':<22} {'Success'}")
+        print("=" * 148)
         gemini_ready_ct = 0
         sonnet_fallback_ct = 0
         disabled_ct = 0
@@ -5184,6 +5907,18 @@ Examples:
             succ = info.get("success_count", 0)
             q_pct = f"{info.get('estimated_quota_percent', 100)}%"
 
+            cli_on = info.get("cli_enabled", is_profile_cli_enabled(p))
+            web_on = info.get("web_enabled", is_profile_web_enabled(p))
+            web_conn = info.get("web_connected", GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(p))
+
+            cli_display = "🟢 On" if cli_on else "🔴 Off"
+            if not web_on:
+                web_display = "🔴 Off"
+            elif web_conn:
+                web_display = "🟢 Connected"
+            else:
+                web_display = "⚪ Standby"
+
             if status == "DISABLED":
                 disabled_ct += 1
                 gem_display = "DISABLED"
@@ -5200,8 +5935,8 @@ Examples:
                 gem_display = f"🟢 Ready ({q_pct})"
                 mode_display = "🟢 Gemini 3.8"
 
-            print(f"{name:<18} {email:<30} {status:<10} {concurrency_display:<14} {gem_display:<20} {mode_display:<24} {succ}")
-        print("=" * 135)
+            print(f"{name:<18} {email:<28} {cli_display:<8} {web_display:<14} {status:<10} {concurrency_display:<14} {gem_display:<18} {mode_display:<22} {succ}")
+        print("=" * 148)
         print(f"📊 Pool Status: 🟢 {gemini_ready_ct} Gemini Ready • 🟣 {sonnet_fallback_ct} Sonnet Fallback Active • ⚪ {disabled_ct} Disabled (Total: {len(all_profiles)} Profiles)\n")
         return 0
 
@@ -5458,14 +6193,27 @@ Examples:
         return 0
 
     elif sub in ("disable", "pause", "block"):
-        if len(argv) < 2:
-            print("[Error] Please specify profile name: python3 antigravity_bridge.py profile disable <profile_name>")
+        channel = "all"
+        cleaned_args = list(argv[1:])
+        if "--channel" in cleaned_args:
+            c_idx = cleaned_args.index("--channel")
+            if c_idx + 1 < len(cleaned_args):
+                channel = cleaned_args[c_idx + 1].lower().strip()
+                del cleaned_args[c_idx:c_idx + 2]
+        elif "-c" in cleaned_args:
+            c_idx = cleaned_args.index("-c")
+            if c_idx + 1 < len(cleaned_args):
+                channel = cleaned_args[c_idx + 1].lower().strip()
+                del cleaned_args[c_idx:c_idx + 2]
+
+        if not cleaned_args:
+            print("[Error] Please specify profile name: python3 antigravity_bridge.py profile disable <profile_name> [--channel cli|web|all]")
             return 1
-        name = argv[1].strip()
+        name = cleaned_args[0].strip()
         server_updated = False
         port = 8000
         try:
-            req_data = json.dumps({"profile": name}).encode("utf-8")
+            req_data = json.dumps({"profile": name, "channel": channel}).encode("utf-8")
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/v1/profiles/disable",
                 data=req_data,
@@ -5478,23 +6226,39 @@ Examples:
         except Exception:
             pass
 
+        persist_channel_profile_state(name, channel=channel, disabled=True)
         pm = GLOBAL_PROFILE_MANAGER
-        pm.mark_disabled(name)
+        if channel in ("all", "*"):
+            pm.mark_disabled(name)
+        ch_label = f" (channel: {channel})" if channel != "all" else ""
         if server_updated:
-            print(f"[SUCCESS] Profile '{name}' is now DISABLED on live server and saved persistently to config.")
+            print(f"[SUCCESS] Profile '{name}' is now DISABLED{ch_label} on live server and saved persistently to config.")
         else:
-            print(f"[SUCCESS] Profile '{name}' is now DISABLED (persisted to config, will remain disabled even after service restarts).")
+            print(f"[SUCCESS] Profile '{name}' is now DISABLED{ch_label} (persisted to config, will remain disabled even after service restarts).")
         return 0
 
     elif sub in ("enable", "unpause", "resume"):
-        if len(argv) < 2:
-            print("[Error] Please specify profile name: python3 antigravity_bridge.py profile enable <profile_name>")
+        channel = "all"
+        cleaned_args = list(argv[1:])
+        if "--channel" in cleaned_args:
+            c_idx = cleaned_args.index("--channel")
+            if c_idx + 1 < len(cleaned_args):
+                channel = cleaned_args[c_idx + 1].lower().strip()
+                del cleaned_args[c_idx:c_idx + 2]
+        elif "-c" in cleaned_args:
+            c_idx = cleaned_args.index("-c")
+            if c_idx + 1 < len(cleaned_args):
+                channel = cleaned_args[c_idx + 1].lower().strip()
+                del cleaned_args[c_idx:c_idx + 2]
+
+        if not cleaned_args:
+            print("[Error] Please specify profile name: python3 antigravity_bridge.py profile enable <profile_name> [--channel cli|web|all]")
             return 1
-        name = argv[1].strip()
+        name = cleaned_args[0].strip()
         server_updated = False
         port = 8000
         try:
-            req_data = json.dumps({"profile": name}).encode("utf-8")
+            req_data = json.dumps({"profile": name, "channel": channel}).encode("utf-8")
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/v1/profiles/enable",
                 data=req_data,
@@ -5507,12 +6271,15 @@ Examples:
         except Exception:
             pass
 
+        persist_channel_profile_state(name, channel=channel, disabled=False)
         pm = GLOBAL_PROFILE_MANAGER
-        pm.enable(name)
+        if channel in ("all", "*"):
+            pm.enable(name)
+        ch_label = f" (channel: {channel})" if channel != "all" else ""
         if server_updated:
-            print(f"[SUCCESS] Profile '{name}' is now ENABLED on live server and saved persistently to config.")
+            print(f"[SUCCESS] Profile '{name}' is now ENABLED{ch_label} on live server and saved persistently to config.")
         else:
-            print(f"[SUCCESS] Profile '{name}' is now ENABLED (status reset to OK).")
+            print(f"[SUCCESS] Profile '{name}' is now ENABLED{ch_label} (status reset to OK).")
         return 0
 
     elif sub in ("test", "check", "probe"):

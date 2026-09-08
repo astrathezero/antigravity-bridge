@@ -51,7 +51,9 @@
   - [3. ส่งคำขอ OpenAI Chat Completions (`POST /v1/chat/completions`)](#3-ส่งคำขอ-openai-chat-completions-post-v1chatcompletions)
   - [4. ส่งคำขอ Anthropic Messages (`POST /v1/messages`)](#4-ส่งคำขอ-anthropic-messages-post-v1messages)
   - [5. สั่งสร้างรูปภาพ (`POST /v1/images/generations`)](#5-สั่งสร้างรูปภาพ-post-v1imagesgenerations)
-  - [6. API จัดการสถานะโปรไฟล์แบบเรียลไทม์ (`/v1/profiles/*`)](#6-api-จัดการสถานะโปรไฟล์แบบเรียลไทม์-v1profiles)
+  - [6. API จัดการสถานะโปรไฟล์และช่องทางเชื่อมต่อ (`/v1/profiles/*` & `/extension/*`)](#6-api-จัดการสถานะโปรไฟล์และช่องทางเชื่อมต่อ-v1profiles--extension)
+- [🌐 การใช้งาน Chrome Extension และ Browser Web Fallback (พร้อม noVNC)](#-การใช้งาน-chrome-extension-และ-browser-web-fallback-พร้อม-novnc)
+- [🧪 การทดสอบระบบด้วยตัวเองผ่าน Interactive CLI (`test_bridge.py`)](#-การทดสอบระบบด้วยตัวเองผ่าน-interactive-cli-test_bridgepy)
 - [⚙️ การตั้งค่าและตัวแปรสภาพแวดล้อม (Environment Variables)](#️-การตั้งค่าและตัวแปรสภาพแวดล้อม-environment-variables)
 - [🤖 การเชื่อมต่อกับ Hermes Agent (`config.yaml`)](#-การเชื่อมต่อกับ-hermes-agent-configyaml)
 - [🦞 การเชื่อมต่อกับ OpenClaw (`openclaw.json`)](#-การเชื่อมต่อกับ-openclaw-openclawjson)
@@ -65,7 +67,7 @@
 
 ## 🌟 สถาปัตยกรรมและการทำงาน (Overview & Architecture)
 
-Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตัวกลางในการรับคำขอมาตรฐานจาก Client ภายนอก แล้วกระจายไปยังโปรเซสย่อยของ `antigravity` / `agy` CLI ภายในเครื่อง:
+Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตัวกลางในการรับคำขอมาตรฐานจาก Client ภายนอก แล้วกระจายงานไปยังโปรเซสย่อยของ `antigravity` / `agy` CLI หรือส่งต่อไปยัง Browser Extension บนเว็บ `gemini.google.com` แบบ 3-Tier Fallback:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -79,19 +81,23 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
 │  ├── Dual API Translators (OpenAI v1 & Anthropic Messages)             │
 │  ├── Multi-Concurrent Profile Pool & Dynamic Lease Allocator           │
 │  ├── Smart Quota Detector (คำนวณ Cooldown อัตโนมัติ & สลับ Profile)    │
+│  ├── 3-Tier Multi-Engine Dynamic Fallback:                            │
+│  │   ├── Tier 1: CLI Gemini 3.8 Flash (Thinking / Reasoning ระดับสูง)  │
+│  │   ├── Tier 2: CLI Anthropic Sonnet 4.6 (สำรอง Extended Thinking)    │
+│  │   └── Tier 3: Web Extension Bridge (gemini.google.com ในเบราว์เซอร์)│
 │  ├── Dynamic Timeout Scaling (สูงสุด 2 ชม.) & รองรับ Prompt ขนาดใหญ่   │
 │  ├── Context Compactor & SSE Keep-Alive Heartbeat Generator            │
 │  ├── Background OAuth Auto-Refresh Daemon (รีเฟรชทุก 55 นาที)          │
 │  └── Google Imagen 3 & Gemini Image Router                             │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ แยก Sandbox ย่อยรายโปรไฟล์
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│         Isolated Runtime Sandboxes (~/.config/antigravity/sandboxes/)   │
-│  ├── Sandbox [Profile 1] (ไร้ปัญหา DB Lock) ──► Google Gemini API      │
-│  ├── Sandbox [Profile 2] (ไร้ปัญหา DB Lock) ──► Google Gemini API      │
-│  └── Sandbox [Profile N] (ไร้ปัญหา DB Lock) ──► Google Gemini API      │
-└────────────────────────────────────────────────────────────────────────┘
+└─────────────────┬──────────────────────────────────┬───────────────────┘
+                  │ Subprocess CLI                   │ WebSocket Bridge
+                  ▼                                  ▼
+┌──────────────────────────────────────┐  ┌──────────────────────────────┐
+│  Isolated Runtime Sandboxes (CLI)    │  │  Browser Sessions (noVNC/Web)│
+│  (~/.config/antigravity/sandboxes/)  │  │  (แท็บ gemini.google.com)    │
+│  ├── Sandbox [Profile 1]             │  │  ├── แท็บ [Profile 1]        │
+│  └── Sandbox [Profile N]             │  │  └── แท็บ [Profile N]        │
+└──────────────────────────────────────┘  └──────────────────────────────┘
 ```
 
 ---
@@ -208,6 +214,7 @@ curl http://127.0.0.1:8000/health
 
 | Model ID (`model`) | การแมปคำสั่ง CLI | ระดับ Reasoning | คำอธิบาย | ขนาด Context |
 | :--- | :--- | :---: | :--- | :---: |
+| **`gemini-3.8-flash-thinking`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับสูง / Flash Thinking ตัวหลัก) | 1,000,000 |
 | **`gemini-3.8-flash-high`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับสูง) | 1,000,000 |
 | **`gemini-3.8-flash-medium`** | `--model gemini-3.8-flash` | `medium` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับกลาง) | 1,000,000 |
 | **`gemini-3.8-flash-low`** | `--model gemini-3.8-flash` | `low` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับเร็ว) | 1,000,000 |
@@ -223,7 +230,7 @@ curl http://127.0.0.1:8000/health
 | **`gemini-3.1-pro-high`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (โมเดลเรือธงคิดวิเคราะห์สูง) | 2,000,000 |
 | **`gemini-3.1-pro-low`** | `--model gemini-3.1-pro` | `low` | Gemini 3.1 Pro (โมเดลเรือธงคิดวิเคราะห์เร็ว) | 2,000,000 |
 | **`gemini-3.1-pro`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (ค่ามาตรฐาน) | 2,000,000 |
-| **`claude-sonnet-4.6-thinking`** | `--model claude-sonnet-4.6` | `thinking` | Claude Sonnet 4.6 (เปิดระบบ Extended Thinking) | 200,000 |
+| **`claude-sonnet-4.6-thinking`** | `--model claude-sonnet-4.6` | `thinking` | Claude Sonnet 4.6 (Extended Thinking / Tier 2 Fallback) | 200,000 |
 | **`claude-sonnet-4.6`** | `--model claude-sonnet-4.6` | - | Claude Sonnet 4.6 (มาตรฐาน) | 200,000 |
 | **`claude-opus-4.6-thinking`** | `--model claude-opus-4.6` | `thinking` | Claude Opus 4.6 (เปิดระบบ Extended Thinking) | 200,000 |
 | **`claude-opus-4.6`** | `--model claude-opus-4.6` | - | Claude Opus 4.6 (มาตรฐาน) | 200,000 |
@@ -232,6 +239,8 @@ curl http://127.0.0.1:8000/health
 | **`imagen-3.0-generate-002`** | Google Imagen 3 API | - | สร้างรูปภาพคุณภาพสูง (`/v1/images/generations`) | - |
 | **`imagen-3.0-fast-generate-001`**| Google Imagen 3 Fast API | - | สร้างรูปภาพความเร็วสูง (`/v1/images/generations`) | - |
 | **`gemini-3.1-flash-image`** | Gemini Image Router | - | สร้างรูปภาพรวดเร็วผ่าน Gemini Router | - |
+| **`gemini-2.0-flash-thinking`** | Gemini Web Extension | `high` | Gemini Web Extension Flash Thinking (Fallback Tier 3) | 1,000,000 |
+| **`gemini-web`** | Gemini Web Extension | `high` | ช่องทางเชื่อมต่อ Web Browser Extension โดยเฉพาะ | 1,000,000 |
 | **`antigravity`** / **`agy`** | Default CLI backend | - | โมเดลสำรองอัตโนมัติ | 1,000,000 |
 
 ---
@@ -242,12 +251,13 @@ curl http://127.0.0.1:8000/health
 
 | คำสั่ง | คำสั่งลัด | คำอธิบายการทำงาน |
 | :--- | :--- | :--- |
-| `python3 antigravity_bridge.py profile list` | `profiles` | แสดงตารางโปรไฟล์ อีเมล บัญชี สถานะ Cooldown โควตา และจำนวนคิว |
+| `python3 antigravity_bridge.py profile list` | `profiles` | แสดงตารางโปรไฟล์ อีเมล บัญชี สถานะ Cooldown โควตา จำนวนคิว และสถานะช่องทาง CLI / Web |
 | `python3 antigravity_bridge.py profile login <ชื่อ>` | `login <ชื่อ>` | ล็อกอินและเพิ่มโปรไฟล์บัญชี Google ใหม่ |
 | `python3 antigravity_bridge.py profile test [ชื่อ]` | - | ส่งคำขอทดสอบความพร้อมของโควตาและการตอบสนองของโมเดล |
 | `python3 antigravity_bridge.py profile set <p1,p2>` | `profile order` | ปรับเปลี่ยนลำดับการสลับโปรไฟล์แบบ Live ทันที |
-| `python3 antigravity_bridge.py profile disable <ชื่อ>` | - | ปิดการใช้งานโปรไฟล์แบบถาวร (คงสถานะปิดไว้แม้รีสตาร์ท Service จนกว่าจะเปิดใหม่) |
-| `python3 antigravity_bridge.py profile enable <ชื่อ>` | - | เปิดใช้งานโปรไฟล์ที่เคยปิดไว้กลับคืนมา |
+| `python3 antigravity_bridge.py profile disable <ชื่อ> [--channel cli\|web\|all]` | - | ปิดการใช้งานโปรไฟล์แบบถาวรสำหรับช่องทาง CLI, Web หรือทั้งหมด |
+| `python3 antigravity_bridge.py profile enable <ชื่อ> [--channel cli\|web\|all]` | - | เปิดใช้งานโปรไฟล์กลับคืนมาสำหรับช่องทาง CLI, Web หรือทั้งหมด |
+| `python3 antigravity_bridge.py profile toggle <ชื่อ> <cli\|web> [on\|off]` | - | สลับเปิดหรือปิดช่องทาง CLI หรือ Web ของโปรไฟล์ได้อย่างรวดเร็ว |
 | `python3 antigravity_bridge.py profile reset [ชื่อ]` | - | รีเซ็ตสถานะ Cooldown และเคลียร์สถานะ Exhausted |
 | `python3 antigravity_bridge.py profile refresh [ชื่อ]` | - | บังคับรีเฟรช OAuth Token กับทาง Google โดยตรง |
 | `python3 antigravity_bridge.py profile sync <user@vps>` | - | คัดลอกโปรไฟล์ทั้งหมดไปยัง VPS ปลายทางผ่าน SSH |
@@ -346,13 +356,103 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: app
   }'
 ```
 
-### 6. API จัดการสถานะโปรไฟล์แบบเรียลไทม์ (`/v1/profiles/*`)
-- `GET /v1/profiles` — ดูสถานะและสถิติของทุกโปรไฟล์
+### 6. API จัดการสถานะโปรไฟล์และช่องทางเชื่อมต่อ (`/v1/profiles/*` & `/extension/*`)
+- `GET /v1/profiles` — ดูสถานะ สถิติ สถานะช่องทาง (CLI / Web) และ Cooldown ของทุกโปรไฟล์
+- `POST /v1/profiles/toggle` — สลับเปิด/ปิดช่องทางของโปรไฟล์ (`{"profile": "p1", "channel": "web", "enabled": false}`)
+- `POST /v1/profiles/disable` — สั่งปิดโปรไฟล์สำหรับช่องทางที่ระบุ (`{"profile": "p1", "channel": "cli|web|all"}`)
+- `POST /v1/profiles/enable` — สั่งเปิดใช้งานโปรไฟล์สำหรับช่องทางที่ระบุ (`{"profile": "p1", "channel": "cli|web|all"}`)
 - `POST /v1/profiles/reset` — สั่งปลดล็อค Cooldown (`{"profile": "profile_1"}`)
 - `POST /v1/profiles/check` — สั่งทดสอบโควตาสด (`{"model": "gemini-3.7-flash"}`)
 - `POST /v1/profiles/config` — อัปเดตรายชื่อโปรไฟล์ที่ทำงานอยู่โดยไม่ต้องรีสตาร์ท (`{"profiles": ["p1", "p2"]}`)
-- `POST /v1/profiles/disable` — สั่งปิดโปรไฟล์ชั่วคราว (`{"profile": "p1"}`)
-- `POST /v1/profiles/enable` — สั่งเปิดใช้งานโปรไฟล์ (`{"profile": "p1"}`)
+- `GET /extension/status` — ตรวจสอบสถานะการเชื่อมต่อของ Chrome Extension และ Web Clients ที่กำลังเชื่อมต่ออยู่
+
+---
+
+## 🌐 การใช้งาน Chrome Extension และ Browser Web Fallback (พร้อม noVNC)
+
+Antigravity Bridge มาพร้อมส่วนเสริม **Web Browser Extension Bridge** สำหรับส่ง Prompt ตรงเข้าหน้าเว็บ `gemini.google.com` ใน Google Chrome หรือ Chromium ได้แบบอัตโนมัติ
+
+### 🌟 ระบบสลับโมเดลอัตโนมัติ 3 ชั้น (3-Tier Dynamic Fallback)
+เมื่อมีคำขอส่งเข้ามาด้วย `channel="auto"` (ค่าเริ่มต้น):
+1. **Tier 1 (CLI Gemini):** รันผ่าน Antigravity CLI ด้วยโมเดล `gemini-3.8-flash-thinking`
+2. **Tier 2 (CLI Sonnet):** หากบัญชี Gemini โควตาเต็ม จะสลับไปใช้ `claude-sonnet-4.6-thinking` ผ่าน CLI ทันที
+3. **Tier 3 (Web Extension):** หากทั้ง Gemini และ Claude ใน CLI โควตาเต็มพร้อมกัน Bridge จะส่งคำขอต่อไปยังแท็บ Chrome Extension บน `gemini.google.com` โดยอัตโนมัติ ไม่ให้การทำงานสะดุด!
+
+### ✨ ความสามารถเด่นของ Extension
+- **Smart Model Picker:** สแกน Dropdown บนหน้าเว็บ `gemini.google.com` แล้วเลือกโมเดล **3.8 Flash Thinking**, **2.0 Flash Thinking**, หรือโมเดล Reasoning ที่ดีที่สุดให้อัตโนมัติ
+- **Thinking Process Extraction:** แยกกระบวนการคิด `<think>...</think>` จาก DOM บนหน้าเว็บ ส่งกลับมาในรูปแบบข้อความที่มีระเบียบ
+- **Continuous Keep-Alive Engine:** ใช้ Chrome Alarms API (`chrome.alarms`), WebSocket Heartbeat, และการจำลอง Interaction เพื่อป้องกันแท็บเบราว์เซอร์เข้าสู่โหมด Sleep หรือถูกจำกัดทรัพยากร
+- **Profile-to-Tab Matching:** ตรวจจับอีเมลบัญชี Google ที่ล็อกอินอยู่บนหน้าเว็บ และจับคู่เข้ากับโปรไฟล์ของ Bridge ได้อย่างถูกต้อง
+- **Per-Channel Toggling:** สามารถเลือกเปิด/ปิดเฉพาะช่องทาง CLI หรือ Web รายโปรไฟล์ได้อย่างอิสระ (`profile disable <p> --channel web` หรือ `profile toggle <p> web off`)
+
+### 📦 วิธีติดตั้ง Extension บน Google Chrome ในเครื่อง
+1. เปิด Google Chrome ไปที่ `chrome://extensions/`
+2. เปิดสวิตช์ **"Developer mode"** (มุมขวาบน)
+3. กดปุ่ม **"Load unpacked"** แล้วเลือกโฟลเดอร์ [`extension/`](extension/) จาก Repository นี้
+4. เปิดแท็บเบราว์เซอร์ไปที่ [https://gemini.google.com](https://gemini.google.com) และล็อกอินด้วยบัญชี Google
+5. คลิกที่ไอคอนของ Antigravity Extension บนแถบเครื่องมือ จะเห็นสถานะเปลี่ยนเป็นสีเขียว `CONNECTED` (เชื่อมต่อกับ `ws://127.0.0.1:8000/ws`)
+
+### 🐳 การติดตั้งบน Linux Server / VPS ไร้หน้าจอด้วย noVNC (Docker)
+สำหรับเซิร์ฟเวอร์ Linux หรือ VPS ที่ไม่มีหน้าจอแสดงผล สามารถใช้งานชุด Docker สำเร็จรูปในโฟลเดอร์ [`deploy/`](deploy/):
+
+```bash
+cd deploy/
+docker compose up -d --build
+```
+- **เปิดหน้าต่าง noVNC Desktop:** ทำการ Forward Port ผ่าน SSH Tunnel:
+  ```bash
+  ssh -L 6080:127.0.0.1:6080 -L 8000:127.0.0.1:8000 user@your-server-ip
+  ```
+  จากนั้นเปิดเบราว์เซอร์ไปที่ `http://127.0.0.1:6080`
+- ล็อกอินบัญชี Google บน Chromium ภายในหน้าต่าง noVNC เพียงครั้งเดียว ระบบจะทำงานต่อเนื่อง 24/7 ตลอดเวลา
+
+---
+
+## 🧪 การทดสอบระบบด้วยตัวเองผ่าน Interactive CLI (`test_bridge.py`)
+
+มีชุดทดสอบ [`test_bridge.py`](test_bridge.py) ที่เขียนด้วย Pure Python Standard Library 100% ไม่ต้องติดตั้งไลบรารีภายนอกเพิ่มเติม:
+
+### 🎮 เมนูทดสอบแบบ Interactive (กดเลือก 0-9)
+```bash
+python3 test_bridge.py
+```
+จะแสดงเมนูสำหรับการทดสอบฟังก์ชันต่างๆ อย่างครบถ้วน:
+- `1. 🩺 ตรวจสอบสุขภาพระบบ & Quota ภาพรวม (Health Check)`
+- `2. 🤖 ตรวจสอบรายชื่อโมเดลทั้งหมดที่รองรับ`
+- `3. 🔌 ตรวจสอบสถานะการเชื่อมต่อของ Web Extension`
+- `4. ⚡ ทดสอบ Chat Completion (gemini-3.8-flash-thinking)`
+- `5. 🌊 ทดสอบ Real-time Token Streaming (SSE)`
+- `6. 🌐 ทดสอบส่งงานผ่าน Web Extension Channel โดยตรง`
+- `7. 🖥️  ทดสอบส่งงานผ่าน CLI Channel โดยตรง`
+- `8. 🅰️  ทดสอบ Endpoint ของ Anthropic Messages (/v1/messages)`
+- `9. 🚀 รันชุดทดสอบทั้งหมดตามลำดับ`
+
+### ⚡ คำสั่งทดสอบลัดแบบ One-Liner
+```bash
+# ตรวจสอบ Health และ Cooldown ของทุก Profile:
+python3 test_bridge.py --health
+
+# ตรวจสอบรายชื่อโมเดล:
+python3 test_bridge.py --models
+
+# ตรวจสอบสถานะ Chrome Extension:
+python3 test_bridge.py --extension
+
+# ทดสอบ Chat พร้อม Flash Thinking:
+python3 test_bridge.py --chat "อธิบาย Quantum Computing สั้นๆ ใน 1 ประโยค"
+
+# ทดสอบ Streaming ตอบกลับแบบเรียลไทม์:
+python3 test_bridge.py --chat "นับ 1 ถึง 5" --stream
+
+# บังคับทดสอบผ่านช่องทาง Web Extension:
+python3 test_bridge.py --chat "สวัสดี" --channel web
+
+# ทดสอบความเข้ากันได้กับ Anthropic /v1/messages:
+python3 test_bridge.py --anthropic
+
+# รันชุดตรวจสอบทั้งหมด:
+python3 test_bridge.py --all
+```
 
 ---
 
@@ -598,6 +698,81 @@ print(response.choices[0].message.content)
 | **URL Query Parameter** | `POST http://127.0.0.1:8000/v1/chat/completions?timeout=30m` |
 | **ต่อท้ายชื่อ Model** | `model: "gemini-3.7-flash-high:timeout=30m"` หรือ `model: "gemini-3.7-flash-high:30m"` |
 | **ใส่ Directive ใน Prompt** | ใส่ `[antigravity:timeout=30m]` ไว้บรรทัดแรกของ Prompt หรือ System Message |
+
+---
+
+## 🌐 สะพานเชื่อมต่อผ่าน Chrome Extension (`gemini.google.com`)
+
+Antigravity Bridge มาพร้อมส่วนขยายเบราว์เซอร์ **Chrome Extension (Manifest V3)** ในโฟลเดอร์ `extension/` เพื่อส่งคำขอและสตรีมข้อความตอบกลับผ่านแท็บที่ล็อกอินอยู่บน `https://gemini.google.com/` ได้โดยตรง
+
+### จุดเด่นของ Web Extension Bridge
+- **ยิงตรงผ่านหน้าเว็บจริง**: ใช้โควตาและฟีเจอร์ของหน้าเว็บ Gemini โดยไม่ต้องผ่าน CLI
+- **จับคู่โปรไฟล์อัตโนมัติ (Auto-Pairing)**: เมื่อเปิดหน้า Gemini ส่วนขยายจะตรวจจับอีเมลบัญชี Google ที่ล็อกอินอยู่และจับคู่เข้ากับโปรไฟล์ใน Antigravity Bridge (`google_accounts.json`) ให้อัตโนมัติ
+- **แยกควบคุมช่องทางรายโปรไฟล์**: เลือกเปิด/ปิดให้แต่ละโปรไฟล์รับงานผ่านช่องทาง CLI (`agy`), Web Extension หรือทั้งคู่ได้อย่างอิสระ
+- **Offscreen Keepalive**: ป้องกัน Chromium ปิด Background Service Worker เมื่อแท็บอยู่นิ่ง
+
+### วิธีการติดตั้ง Extension ใช้งานในเครื่อง
+1. เปิด Google Chrome หรือ Chromium แล้วเข้าไปที่ `chrome://extensions`
+2. เปิดสวิตช์ **Developer mode** (มุมขวาบน)
+3. กดปุ่ม **Load unpacked** แล้วเลือกโฟลเดอร์ `extension/` จากโปรเจกต์นี้
+4. เปิดหน้า `https://gemini.google.com/app` และล็อกอินบัญชี Google ให้เรียบร้อย
+5. กดที่ไอคอน Extension ในแถบเครื่องมือ จะเห็นสถานะแสดง **🟢 Connected** เชื่อมต่อกับ `http://127.0.0.1:8000`
+
+---
+
+## 🐳 การติดตั้งแบบ Headless บนเซิร์ฟเวอร์ด้วย Docker & noVNC (`deploy/`)
+
+สำหรับผู้ที่ต้องการรัน Antigravity Bridge บน Linux VPS / Cloud Server ตลอด 24 ชั่วโมง โดยไม่ต้องเปิดคอมพิวเตอร์ทิ้งไว้:
+
+```bash
+cd deploy/
+docker compose up -d --build
+```
+
+- **หน้าจอเดสก์ท็อปผ่านเว็บ (noVNC)**: เข้าใช้งานผ่าน `http://127.0.0.1:6080` (ผ่าน SSH Tunnel: `ssh -L 6080:127.0.0.1:6080 -L 8000:127.0.0.1:8000 user@server`)
+- **พอร์ต API Bridge**: `http://127.0.0.1:8000`
+- **บันทึกคุกกี้เซสชันถาวร**: เซสชันการล็อกอินจะถูกบันทึกไว้ใน `deploy/chrome-data/` ไม่สูญหายเมื่อรีสตาร์ท
+- ดูรายละเอียดขั้นตอนทั้งหมดได้ใน [deploy/README.md](deploy/README.md)
+
+---
+
+## 🔀 การจัดการช่องทางใช้งานของแต่ละโปรไฟล์ (CLI vs Web)
+
+คุณสามารถกำหนดแยกเฉพาะได้ว่าโปรไฟล์ใดให้ใช้งานผ่าน CLI หรือ Web Extension หรือปิดบางช่องทาง:
+
+```bash
+# ปิดการใช้งานช่องทาง Web สำหรับโปรไฟล์ 'p1' (CLI ยังทำงานตามปกติ)
+python3 antigravity_bridge.py profile disable p1 --channel web
+
+# ปิดการใช้งานช่องทาง CLI สำหรับโปรไฟล์ 'p2' (Web Extension ยังทำงานตามปกติ)
+python3 antigravity_bridge.py profile disable p2 --channel cli
+
+# ปิดการใช้งานทั้งสองช่องทางพร้อมกัน
+python3 antigravity_bridge.py profile disable p1 --channel all
+
+# เปิดใช้งานช่องทาง Web สำหรับโปรไฟล์ 'p1' กลับคืนมา
+python3 antigravity_bridge.py profile enable p1 --channel web
+
+# ดูสถานะโปรไฟล์พร้อมคอลัมน์แสดงช่องทาง CLI และ Web
+python3 antigravity_bridge.py profile list
+```
+
+และในการส่งคำขอ Completion ผ่าน API คุณสามารถเจาะจงเลือกช่องทางหรือให้ระบบจัดการ fallback อัตโนมัติได้ผ่านพารามิเตอร์ `channel`:
+```json
+{
+  "model": "antigravity",
+  "channel": "auto",
+  "messages": [{"role": "user", "content": "สวัสดี!"}]
+}
+```
+ค่าที่รองรับใน `channel`:
+- **`"auto"` (ค่าเริ่มต้น - ระบบ 3-Tier Fallback อัจฉริยะ)**:
+  1. **Primary (ช่องทางหลัก)**: ใช้งานผ่าน **`agy` CLI** เสมอ โดยใช้ตระกูลโมเดล Gemini ที่ร้องขอ (รวดเร็ว เสถียร รองรับ Tool Calling เต็มรูปแบบ)
+  2. **Tier 1 Dynamic Fallback**: หาก Gemini บน CLI ติดโควต้าลิมิต (Cooldown) ระบบจะสลับไปใช้ **Claude Sonnet (`claude-sonnet-4.6-thinking`) บน CLI** ให้อัตโนมัติ
+  3. **Tier 2 Fallback**: หากทั้ง **Gemini และ Sonnet บน CLI ติดโควต้าลิมิตทั้งคู่** ระบบจะ fallback ไปหา **Web Extension (`gemini.google.com`)** สำหรับโปรไฟล์นั้นทันที
+  4. **Tier 3 Global Safety Net**: หากทุก Profile บน CLI ติดลิมิตหรือล้มเหลวหมด ระบบจะดึง Web Extension ที่ต่ออยู่มารับงานต่อทันที ป้องกันข้อผิดพลาด API หยุดทำงาน
+- **`"cli"`**: บังคับใช้งานผ่าน `agy` CLI เท่านั้น (ไม่มีการสลับไป Web แม้ CLI จะติดโควต้า)
+- **`"web"`** (หรือระบุโมเดลที่ลงท้ายด้วย `-web` เช่น `gemini-web`): บังคับส่งคำสั่งไปยังหน้าเว็บ `gemini.google.com` ผ่าน Chrome Extension โดยตรง
 
 ---
 

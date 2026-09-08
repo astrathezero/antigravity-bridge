@@ -1,0 +1,27 @@
+services:
+  antigravity-bridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: antigravity-bridge:latest
+    container_name: antigravity-bridge
+    restart: unless-stopped
+    ports:
+      # noVNC web desktop interface (bound to 127.0.0.1 by default for security)
+      - "127.0.0.1:6080:6080"
+      # Antigravity Bridge API (OpenAI & Anthropic Claude endpoints)
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Persistent Chromium browser profile storing login sessions
+      - ./chrome-data:/app/chrome-data
+      # Chrome Extension files
+      - ../extension:/app/extension:ro
+      # Bridge core server script
+      - ../antigravity_bridge.py:/app/antigravity_bridge.py:ro
+      # Bridge configuration file
+      - ../bridge_config.json:/app/bridge_config.json
+      # Host Gemini profiles directory (optional, for CLI profiles)
+      - ~/.gemini:/root/.gemini
+    environment:
+      - noVNC_PASSWORD=${noVNC_PASSWORD:-}
+      - PYTHONUNBUFFERED=1
