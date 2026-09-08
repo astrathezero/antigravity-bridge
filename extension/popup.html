@@ -280,15 +280,14 @@
   </div>
 
   <div class="card">
-    <div class="card-title">Profile & Google Account</div>
-    <div class="info-row">
-      <span class="info-label">Active Gemini Email:</span>
-      <span id="detectedEmail" class="info-value">Detecting...</span>
+    <div class="card-title">Active Gemini Sessions (Multi-Login)</div>
+    <div id="activeSessionsContainer" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
+      <span style="color: var(--text-muted); font-size: 11px;">Scanning open tabs...</span>
     </div>
     <div class="field" style="margin-top: 8px;">
-      <label for="profileSelect">Target Bridge Profile</label>
+      <label for="profileSelect">Target Bridge Profile (Optional Override)</label>
       <select id="profileSelect">
-        <option value="">(Auto-match by Google Email)</option>
+        <option value="">(Auto-match all tabs by Google Email)</option>
       </select>
     </div>
   </div>

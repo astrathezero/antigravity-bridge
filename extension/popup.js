@@ -68,17 +68,35 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (status.connected) {
       statusBadge.className = 'status-badge status-connected';
-      statusText.textContent = 'Connected';
+      const profCount = status.connectedProfiles?.length || 0;
+      statusText.textContent = profCount > 1 ? `Connected (${profCount} accounts)` : 'Connected';
     } else {
       statusBadge.className = 'status-badge status-disconnected';
       statusText.textContent = status.lastError ? 'Error' : 'Disconnected';
     }
 
     bridgeUrlInput.value = status.bridgeUrl || 'http://127.0.0.1:8000';
-    detectedEmailEl.textContent = status.activeEmail || 'Not Detected';
     webChannelToggle.checked = status.webEnabled !== false;
     if (webModelSelect && status.preferredWebModel) {
       webModelSelect.value = status.preferredWebModel;
+    }
+
+    // Render active sessions
+    const sessionsContainer = document.getElementById('activeSessionsContainer');
+    if (sessionsContainer) {
+      if (status.activeSessions && status.activeSessions.length > 0) {
+        sessionsContainer.innerHTML = status.activeSessions.map(s => `
+          <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(15,23,42,0.5); padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border);">
+            <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
+              <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: ${s.connected ? '#10b981' : '#f59e0b'}; box-shadow: 0 0 4px ${s.connected ? '#10b981' : '#f59e0b'};"></span>
+              <span style="font-weight: 500; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px;" title="${s.email}">${s.email}</span>
+            </div>
+            <span style="font-size: 10px; color: var(--accent-blue); background: rgba(56,189,248,0.1); padding: 2px 5px; border-radius: 4px;">${s.profile}</span>
+          </div>
+        `).join('');
+      } else {
+        sessionsContainer.innerHTML = '<span style="color: var(--text-muted); font-size: 11px;">No open Gemini tabs found. Open gemini.google.com to connect.</span>';
+      }
     }
 
     loadProfiles(bridgeUrlInput.value, status.assignedProfile);

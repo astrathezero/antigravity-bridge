@@ -17,22 +17,38 @@
 
   // 1. Detect Logged-in Google Account Email
   function detectAccountEmail() {
+    const emailRegex = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/;
+
     const selectors = [
       'a[aria-label*="@"]',
       'button[aria-label*="@"]',
       'img[alt*="@"]',
+      'a[href*="accounts.google.com"]',
+      'a[href*="SignOutOptions"]',
       '[data-profile-email]',
+      '[data-user-email]',
       '[aria-label*="Google Account"]',
-      '[aria-label*="บัญชี Google"]'
+      '[aria-label*="บัญชี Google"]',
+      'header [aria-label*="@"]',
+      '.gb_d [aria-label*="@"]',
+      '.gb_Fa [aria-label*="@"]',
+      'div[aria-label*="@"]',
+      'span[aria-label*="@"]'
     ];
-
-    const emailRegex = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/;
 
     for (const sel of selectors) {
       try {
         const elements = document.querySelectorAll(sel);
         for (const el of elements) {
-          const text = (el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('data-profile-email') || el.innerText || '');
+          const text = (
+            el.getAttribute('aria-label') ||
+            el.getAttribute('alt') ||
+            el.getAttribute('title') ||
+            el.getAttribute('data-profile-email') ||
+            el.getAttribute('data-user-email') ||
+            el.innerText ||
+            ''
+          );
           const match = text.match(emailRegex);
           if (match && match[1]) {
             return match[1].toLowerCase();
@@ -43,20 +59,37 @@
 
     const metaUser = document.querySelector('meta[name="user-email"]');
     if (metaUser && metaUser.content) {
-      return metaUser.content.toLowerCase();
+      const match = metaUser.content.match(emailRegex);
+      if (match && match[1]) return match[1].toLowerCase();
     }
+
+    try {
+      if (window.WIZ_global_data) {
+        const str = JSON.stringify(window.WIZ_global_data);
+        const match = str.match(emailRegex);
+        if (match && match[1]) return match[1].toLowerCase();
+      }
+    } catch {}
+
+    try {
+      const header = document.querySelector('header, [role="banner"], .gb_rd, .gb_d');
+      if (header) {
+        const match = (header.innerHTML || '').match(emailRegex);
+        if (match && match[1]) return match[1].toLowerCase();
+      }
+    } catch {}
 
     return '';
   }
 
-  // Periodic account email announcement
+  // Periodic account email announcement every 4 seconds
   setInterval(() => {
     if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
     const email = detectAccountEmail();
     if (email) {
       window.postMessage({ type: 'AG_DETECTED_EMAIL', email }, '*');
     }
-  }, 10000);
+  }, 4000);
 
   // 2. Locate the prompt input element
   function findInputElement() {
