@@ -1527,10 +1527,20 @@ class WebClientManager:
         with self.lock:
             cid = client_id or f"web_{uuid.uuid4().hex[:8]}"
             prof = profile or "default"
+            # Proactively retire older zombie clients for this profile so jobs are never sent to stale SSE queues
+            for old_cid in list(self.profile_to_client_ids.get(prof, set())):
+                old_client = self.clients.get(old_cid)
+                if old_client:
+                    old_client.is_alive = False
+                    try:
+                        old_client.queue.put_nowait({"event": "close", "data": {}})
+                    except Exception:
+                        pass
+                self.clients.pop(old_cid, None)
+            self.profile_to_client_ids[prof] = set()
+
             client = WebClient(client_id=cid, profile=prof, email=email)
             self.clients[cid] = client
-            if prof not in self.profile_to_client_ids:
-                self.profile_to_client_ids[prof] = set()
             self.profile_to_client_ids[prof].add(cid)
             logger.info("[WEB EXTENSION] Registered client '%s' for profile '%s' (email=%s)", cid, prof, email)
             return client
@@ -1545,6 +1555,28 @@ class WebClientManager:
                 if not cids:
                     self.profile_to_client_ids.pop(client.profile, None)
                 logger.info("[WEB EXTENSION] Unregistered client '%s' for profile '%s'", client_id, client.profile)
+                # Clean up or re-dispatch in-flight jobs for this client/profile
+                for jid, job in list(self.jobs.items()):
+                    if job.profile == client.profile:
+                        other = self.get_client_for_profile(job.profile)
+                        if other:
+                            logger.info("[WEB EXTENSION] Re-dispatching in-flight job '%s' to client '%s'", jid, other.client_id)
+                            other.queue.put({
+                                "event": "job",
+                                "data": {
+                                    "jobId": job.job_id,
+                                    "profile": job.profile,
+                                    "prompt": job.prompt,
+                                    "model": job.model,
+                                    "stream": job.stream,
+                                    "timeout": job.timeout,
+                                }
+                            })
+                        else:
+                            job.error = f"Web extension client '{client_id}' disconnected while job was running"
+                            job.delta_queue.put(None)
+                            job.done_event.set()
+                            self.jobs.pop(jid, None)
 
     def is_profile_connected(self, profile: Optional[str]) -> bool:
         if not profile:
@@ -1560,11 +1592,16 @@ class WebClientManager:
     def get_client_for_profile(self, profile: str) -> Optional[WebClient]:
         with self.lock:
             cids = self.profile_to_client_ids.get(profile, set())
+            valid_clients = []
             for cid in list(cids):
                 client = self.clients.get(cid)
                 if client and client.is_alive:
-                    return client
-            return None
+                    valid_clients.append(client)
+            if not valid_clients:
+                return None
+            # Return the most recently active/connected client
+            valid_clients.sort(key=lambda c: max(c.connected_at, c.last_heartbeat), reverse=True)
+            return valid_clients[0]
 
     def dispatch_job(self, job: WebJob) -> bool:
         with self.lock:
@@ -1883,10 +1920,6 @@ class ProfileManager:
             return False
         if not GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(profile):
             return False
-        key = profile or "default"
-        info = self.state.get(key, {})
-        if info.get("status") == "DISABLED":
-            return False
         web_model = "gemini-web" if (not model or "web" not in model) else model
         return not self.is_in_cooldown(profile, model=web_model)
 
@@ -2109,6 +2142,10 @@ class ProfileManager:
 
         with self.lock:
             profiles = list(self._profiles)
+            if req_ch == "web":
+                for wp in GLOBAL_WEB_CLIENT_MANAGER.get_connected_profiles():
+                    if wp and wp not in profiles and is_profile_web_enabled(wp):
+                        profiles.append(wp)
             ready_idle: List[Optional[str]] = []
             ready_avail: List[Optional[str]] = []
             sonnet_idle: List[Optional[str]] = []
@@ -2128,7 +2165,10 @@ class ProfileManager:
                 info = self.state.get(key, {})
                 status = info.get("status", "OK")
                 if status == "DISABLED":
-                    continue
+                    if req_ch == "web" and is_profile_web_enabled(p) and GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(p):
+                        pass
+                    else:
+                        continue
 
                 if req_ch == "cli" and not is_profile_cli_enabled(p):
                     continue
@@ -4903,14 +4943,29 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         try:
                             msg = client.queue.get(timeout=10.0)
                             ev_name = msg.get("event", "job")
+                            if ev_name == "close":
+                                break
                             ev_data = json.dumps(msg.get("data", {}))
                             self.wfile.write(f"event: {ev_name}\ndata: {ev_data}\n\n".encode("utf-8"))
                             self.wfile.flush()
                         except queue.Empty:
                             self.wfile.write(b": keepalive\n\n")
                             self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
+                except (BrokenPipeError, ConnectionResetError, Exception) as write_exc:
+                    if 'msg' in locals() and isinstance(msg, dict) and msg.get("event") == "job":
+                        job_id = msg.get("data", {}).get("jobId")
+                        if job_id and job_id in GLOBAL_WEB_CLIENT_MANAGER.jobs:
+                            logger.warning("[WEB EXTENSION] Failed writing job '%s' to client '%s': %s", job_id, client.client_id, write_exc)
+                            job = GLOBAL_WEB_CLIENT_MANAGER.jobs.get(job_id)
+                            if job:
+                                other = GLOBAL_WEB_CLIENT_MANAGER.get_client_for_profile(client.profile)
+                                if other and other.client_id != client.client_id:
+                                    other.queue.put(msg)
+                                else:
+                                    job.error = f"Client socket error sending job: {write_exc}"
+                                    job.delta_queue.put(None)
+                                    job.done_event.set()
+                                    GLOBAL_WEB_CLIENT_MANAGER.jobs.pop(job_id, None)
                 finally:
                     GLOBAL_WEB_CLIENT_MANAGER.unregister_client(client.client_id)
                 return

@@ -337,12 +337,15 @@
     // Set input content
     inputEl.focus();
     try {
-      // Clear existing content
       if (inputEl.isContentEditable) {
-        inputEl.innerHTML = '';
-        const p = document.createElement('p');
-        p.textContent = job.prompt;
-        inputEl.appendChild(p);
+        document.execCommand('selectAll', false, null);
+        const inserted = document.execCommand('insertText', false, job.prompt);
+        if (!inserted || !inputEl.innerText.trim()) {
+          inputEl.innerHTML = '';
+          const p = document.createElement('p');
+          p.textContent = job.prompt;
+          inputEl.appendChild(p);
+        }
       } else {
         inputEl.value = job.prompt;
       }
@@ -358,8 +361,8 @@
     await new Promise(r => setTimeout(r, 400));
 
     // Click send button
-    const sendBtn = findSendButton();
-    if (sendBtn) {
+    let sendBtn = findSendButton();
+    if (sendBtn && !sendBtn.disabled) {
       sendBtn.click();
     } else {
       // Fallback to Enter keydown
@@ -370,6 +373,11 @@
         which: 13,
         bubbles: true
       }));
+      await new Promise(r => setTimeout(r, 300));
+      sendBtn = findSendButton();
+      if (sendBtn && !sendBtn.disabled) {
+        sendBtn.click();
+      }
     }
 
     // Wait for generation to start and capture response

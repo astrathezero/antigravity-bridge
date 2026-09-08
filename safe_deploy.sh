@@ -104,7 +104,7 @@ cmd_test() {
 get_api_key() {
     python3 -c '
 import sys, os
-sys.path.insert(0, "/home/attasit/antigravity-bridge")
+sys.path.insert(0, "'"$SCRIPT_DIR"'")
 try:
     import antigravity_bridge
     keys = antigravity_bridge.get_configured_api_keys()
@@ -126,8 +126,7 @@ wait_for_health() {
 
     log_info "⏳ Waiting for Antigravity Bridge service to become healthy (timeout: ${timeout}s)..."
     for ((i=1; i<=timeout; i++)); do
-        local resp
-        resp=$(curl -s -o /dev/null -w "%{http_code}" "${auth_header[@]}" "$HEALTH_URL" 2>/dev/null || echo "000")
+        resp=$(curl -s -o /dev/null -w "%{http_code}" ${auth_header[@]+"${auth_header[@]}"} "$HEALTH_URL" 2>/dev/null || echo "000")
         if [ "$resp" = "200" ]; then
             log_ok "Service is UP and HEALTHY! (HTTP 200 after ${i}s)"
             return 0
@@ -137,6 +136,18 @@ wait_for_health() {
 
     log_err "Service failed to report healthy within ${timeout}s (HTTP code: $resp)"
     return 1
+}
+
+restart_bridge_process() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet antigravity-bridge.service 2>/dev/null; then
+        log_info "⚡ Restarting antigravity-bridge via systemctl..."
+        sudo systemctl restart antigravity-bridge.service || pkill -f "antigravity_bridge.py" || true
+    else
+        log_info "⚡ Restarting antigravity-bridge background process..."
+        pkill -f "antigravity_bridge.py" || true
+        sleep 1
+        nohup python3 "$LIVE_FILE" --host 0.0.0.0 --port 8000 --enable-cors >> "$SCRIPT_DIR/antigravity_bridge.log" 2>&1 &
+    fi
 }
 
 cmd_deploy() {
@@ -170,8 +181,7 @@ cmd_deploy() {
     cp "$staging" "$LIVE_FILE"
 
     # Step 4: Restart service
-    log_info "⚡ Restarting antigravity-bridge service (via systemd auto-restart on SIGTERM)..."
-    pkill -f "antigravity_bridge.py" || true
+    restart_bridge_process
     sleep 2
 
     # Step 5: Post-deployment health verification
@@ -181,12 +191,12 @@ cmd_deploy() {
     else
         log_err "🚨 CRITICAL: Post-deployment health check failed! INITIATING AUTO-ROLLBACK..."
         cp "$latest_bak" "$LIVE_FILE"
-        pkill -f "antigravity_bridge.py" || true
-        sleep 3
+        restart_bridge_process
+        sleep 2
         if wait_for_health; then
             log_warn "⚠️ Rollback to backup was successful. Service is restored with previous working version."
         else
-            log_err "❌ FATAL: Auto-rollback failed to restore health. Please check systemctl logs manually!"
+            log_err "❌ FATAL: Auto-rollback failed to restore health. Please check logs manually!"
         fi
         exit 1
     fi
@@ -202,8 +212,8 @@ cmd_rollback() {
 
     log_warn "Reverting $LIVE_FILE to $bak_file..."
     cp "$bak_file" "$LIVE_FILE"
-    pkill -f "antigravity_bridge.py" || true
-    sleep 3
+    restart_bridge_process
+    sleep 2
 
     if wait_for_health; then
         log_ok "Rollback completed and service is healthy."
@@ -215,7 +225,11 @@ cmd_rollback() {
 
 cmd_status() {
     log_info "📊 Current Service Status:"
-    systemctl status antigravity-bridge.service --no-pager | head -n 15 || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl status antigravity-bridge.service --no-pager 2>/dev/null | head -n 15 || true
+    else
+        pgrep -lf "antigravity_bridge.py" || echo "No active processes"
+    fi
     echo ""
     local api_key
     api_key=$(get_api_key)
@@ -224,7 +238,7 @@ cmd_status() {
         auth_header=(-H "Authorization: Bearer $api_key")
     fi
     log_info "🩺 Health Check Endpoint Output:"
-    curl -s "${auth_header[@]}" "$HEALTH_URL" | python3 -m json.tool | head -n 25 || true
+    curl -s ${auth_header[@]+"${auth_header[@]}"} "$HEALTH_URL" | python3 -m json.tool | head -n 25 || true
     echo ""
 }
 
