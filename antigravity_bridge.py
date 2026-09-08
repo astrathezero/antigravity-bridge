@@ -1652,8 +1652,22 @@ class WebClientManager:
             job = self.jobs.pop(job_id, None)
             if not job:
                 return False
-            if full_output is not None and full_output:
+            # job.final_output currently holds the concatenated deltas. The browser also sends
+            # its own final reading of the page, and the two legitimately disagree when Gemini
+            # re-renders mid-answer (collapsing the thoughts panel, re-rendering markdown):
+            # the stream can hold text the page has since dropped, and the final reading can
+            # hold text no delta could describe. Letting the browser's copy overwrite the
+            # stream unconditionally is how a complete answer got replaced by a stub, so keep
+            # whichever actually carries more text.
+            streamed_output = job.final_output
+            if full_output and len(full_output) >= len(streamed_output):
                 job.final_output = full_output
+            elif full_output:
+                logger.info(
+                    "[WEB EXTENSION] Job '%s': keeping streamed output (%d chars) over shorter "
+                    "browser final text (%d chars)",
+                    job_id, len(streamed_output), len(full_output),
+                )
             job.delta_queue.put(None)
             job.done_event.set()
             logger.info("[WEB EXTENSION] Completed job '%s' (profile=%s, output_len=%d)", job_id, job.profile, len(job.final_output))
@@ -3770,7 +3784,12 @@ def execute_web_command(
     if job.error:
         raise RuntimeError(f"Web Extension Execution Error: {job.error}")
 
-    result_text = job.final_output if (not output_callback and job.final_output) else ("".join(accumulated) or job.final_output)
+    # Same reconciliation as handle_done: the deltas we consumed here and the browser's final
+    # reading of the page can each be the more complete one. Return the longer rather than
+    # preferring one by streaming mode, so a mid-answer DOM re-render cannot truncate the
+    # result that reaches the API caller.
+    streamed_text = "".join(accumulated)
+    result_text = streamed_text if len(streamed_text) >= len(job.final_output) else job.final_output
     return CLIExecutionResult(result_text, prof, effective_model=model_name or "gemini-web", channel="web")
 
 

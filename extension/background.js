@@ -6,6 +6,12 @@ const DEFAULT_BRIDGE = 'http://127.0.0.1:8000';
 const RECONNECT_INTERVAL_MS = 3000;
 const CYCLE_MS = 4 * 60 * 1000; // proactively cycle connection before browser stream timeout
 const SCAN_INTERVAL_MS = 10000;
+// A connect attempt that has not settled within this window is treated as dead, so a hung
+// fetch can never latch isConnecting and block every future reconnect.
+const CONNECT_STALE_MS = 30000;
+// The bridge writes ": keepalive" every 10s, so a stream with no traffic for this long is dead
+// even though no error was raised.
+const HEARTBEAT_STALE_MS = 60000;
 
 // 1. Multi-Session State Store
 // Map<tabId, { tabId, url, email, profile, lastSeen }>
@@ -16,6 +22,29 @@ const profileConnections = new Map();
 
 // Map<jobId, { tabId, profile, startTime }>
 const activeJobs = new Map();
+
+// Learned mapping from a Google multi-login index (the N in gemini.google.com/u/N/) to the
+// email actually signed in at that index, observed from tabs as their account is detected.
+// Chrome gives no way to derive this, and it differs per browser profile, so it is learned at
+// runtime rather than hardcoded to one person's account layout.
+// Map<number, string>
+const emailByAccountIndex = new Map();
+
+function accountIndexFromUrl(url) {
+  const m = /\/u\/(\d+)\//.exec(url || '');
+  return m ? Number(m[1]) : null;
+}
+
+// The /u/N/ index whose signed-in email matches this profile, or null if never observed.
+function accountIndexForProfile(profile, email) {
+  const wanted = (email || '').toLowerCase().trim() ||
+    (cachedBridgeProfiles.find(p => p.name === profile)?.account_email || '').toLowerCase().trim();
+  if (!wanted) return null;
+  for (const [idx, mail] of emailByAccountIndex.entries()) {
+    if (mail === wanted) return idx;
+  }
+  return null;
+}
 
 // Cache of bridge profiles fetched from /v1/profiles
 let cachedBridgeProfiles = [];
@@ -60,7 +89,10 @@ async function getConfig() {
       bridgeUrl: res.bridgeUrl || DEFAULT_BRIDGE,
       assignedProfile: res.assignedProfile || '',
       webEnabled: res.webEnabled !== false,
-      canvasMode: res.canvasMode !== false,
+      // Default OFF. In Canvas mode Gemini writes the answer into the side panel and leaves
+      // only a one-line stub in the chat bubble, so any drift in the Canvas panel markup
+      // truncates every response. Opt in from the popup once extraction is confirmed working.
+      canvasMode: res.canvasMode === true,
       preferredWebModel: res.preferredWebModel || 'gemini-3.8-flash-thinking'
     };
   } catch {
@@ -68,7 +100,7 @@ async function getConfig() {
       bridgeUrl: DEFAULT_BRIDGE,
       assignedProfile: '',
       webEnabled: true,
-      canvasMode: true,
+      canvasMode: false,
       preferredWebModel: 'gemini-3.8-flash-thinking'
     };
   }
@@ -127,13 +159,19 @@ function resolveProfile(email, url) {
     if (partial) return partial.name;
   }
 
-  // 3. Heuristic match by URL (/u/1/ secondary account)
-  if (url && url.includes('/u/1/')) {
-    const u1Prof = cachedBridgeProfiles.find(p =>
-      (p.account_email && /somporn/i.test(p.account_email)) || /somporn/i.test(p.name)
-    );
-    if (u1Prof) return u1Prof.name;
-    return 'somporn';
+  // 3. Match by the Google account index in the URL (/u/N/), using the email we have
+  //    previously observed at that index in this browser. This replaces a hardcoded account
+  //    name that mapped every /u/1/ tab onto one specific person's profile, which silently
+  //    routed other users' jobs to the wrong Google account.
+  const idx = accountIndexFromUrl(url);
+  if (idx !== null) {
+    const knownEmail = emailByAccountIndex.get(idx);
+    if (knownEmail) {
+      const byIndex = cachedBridgeProfiles.find(p =>
+        p.account_email && p.account_email.toLowerCase().trim() === knownEmail
+      );
+      if (byIndex) return byIndex.name;
+    }
   }
 
   // 4. Default to username portion if email present
@@ -141,7 +179,9 @@ function resolveProfile(email, url) {
     return cleanEmail.split('@')[0];
   }
 
-  return 'default';
+  // No email detected yet. Returning a guess here would open an SSE for a profile this tab
+  // may not belong to, so report "unknown" and let the DETECTED_EMAIL message resolve it.
+  return '';
 }
 
 // 6. Multi-Profile SSE Connection Management
@@ -151,13 +191,17 @@ async function ensureConnectionForProfile(profile, email) {
   if (!cfg.webEnabled) return;
 
   const existing = profileConnections.get(profile);
+  // Both early-returns below are staleness-checked. Without that, a connection that dies
+  // without settling (hung fetch, or a stream that stops delivering without raising) leaves
+  // the flag set forever and every later scan tick returns here instead of reconnecting.
   if (existing && existing.isConnected) {
     if (email && !existing.email) existing.email = email;
-    return;
-  }
-  if (existing && existing.isConnecting) {
+    if (Date.now() - (existing.lastHeartbeat || 0) < HEARTBEAT_STALE_MS) return;
+    console.warn(`[Antigravity BG] [${profile}] SSE marked connected but silent for >${HEARTBEAT_STALE_MS / 1000}s — forcing reconnect.`);
+  } else if (existing && existing.isConnecting) {
     if (email && !existing.email) existing.email = email;
-    return;
+    if (Date.now() - (existing.connectStartedAt || 0) < CONNECT_STALE_MS) return;
+    console.warn(`[Antigravity BG] [${profile}] Connect attempt stalled for >${CONNECT_STALE_MS / 1000}s — forcing reconnect.`);
   }
 
   if (existing && existing.controller) {
@@ -177,6 +221,7 @@ async function ensureConnectionForProfile(profile, email) {
     clientId: '',
     isConnected: false,
     isConnecting: true,
+    connectStartedAt: Date.now(),
     lastHeartbeat: Date.now(),
     cycleTimer: null
   };
@@ -265,10 +310,19 @@ async function ensureConnectionForProfile(profile, email) {
     }
   } finally {
     conn.isConnected = false;
+    // Must be cleared here, not only on the success path: a fetch that throws (bridge
+    // restarting, connection refused) would otherwise leave isConnecting latched true and
+    // the early-return above would block every reconnect for the life of the worker.
+    conn.isConnecting = false;
     if (conn.cycleTimer) clearTimeout(conn.cycleTimer);
 
-    // Auto-reconnect if any tab is still open for this profile or if assignedProfile matches
+    // Auto-reconnect if any tab is still open for this profile or if assignedProfile matches.
     setTimeout(async () => {
+      // A stale connection can be aborted and replaced while its fetch is still unwinding.
+      // Only act if the map still holds THIS connection, otherwise this late cleanup would
+      // tear down the healthy replacement that took its place.
+      if (profileConnections.get(profile) !== conn) return;
+
       const currentCfg = await getConfig();
       const hasTab = Array.from(openGeminiTabs.values()).some(t => t.profile === profile);
       const isAssigned = currentCfg.assignedProfile === profile;
@@ -299,7 +353,7 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
   }
 
   if (job.canvas === undefined) {
-    job.canvas = cfg.canvasMode !== false;
+    job.canvas = cfg.canvasMode === true;
   }
 
   const targetProfile = job.profile || assignedProfile;
@@ -317,32 +371,40 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
     }
   }
 
-  // Step 2: Fallback matching across all open tabs by URL path
+  // The /u/N/ index this profile's Google account is signed in at, if we have ever seen it.
+  // Previously this was a hardcoded test for one specific account name, which mapped every
+  // /u/1/ tab onto one person and would hand another user's job to the wrong Google account.
+  const targetIndex = accountIndexForProfile(targetProfile, targetEmail);
+
+  // Step 2: Fallback matching across all open tabs by account index
   if (!targetTabId) {
     const allTabs = await chrome.tabs.query({ url: ['https://gemini.google.com/*', 'https://*.gemini.google.com/*'] });
-    const isU1 = /somporn/i.test(targetProfile) || /somporn/i.test(targetEmail);
+    const live = allTabs.filter(t => !t.discarded);
 
-    if (isU1) {
-      const u1Tab = allTabs.find(t => t.url && t.url.includes('/u/1/') && !t.discarded);
-      if (u1Tab) targetTabId = u1Tab.id;
-    } else {
-      const defTab = allTabs.find(t => t.url && !t.url.includes('/u/1/') && !t.discarded);
-      if (defTab) targetTabId = defTab.id;
+    if (targetIndex !== null) {
+      const match = live.find(t => accountIndexFromUrl(t.url) === targetIndex);
+      if (match) targetTabId = match.id;
     }
 
-    if (!targetTabId && allTabs.length > 0) {
-      const nonDiscarded = allTabs.find(t => !t.discarded);
-      targetTabId = (nonDiscarded || allTabs[0]).id;
+    // Never fall back to an arbitrary tab when we know which account we need but cannot find
+    // it — that would run the prompt under someone else's Google account. Only guess when the
+    // target account is genuinely unknown.
+    if (!targetTabId && targetIndex === null && live.length > 0) {
+      targetTabId = live[0].id;
+    }
+
+    if (!targetTabId && targetIndex !== null) {
+      console.warn(`[Antigravity BG] No open tab for account index ${targetIndex} (profile=${targetProfile}); opening one.`);
     }
   }
 
   // Step 3: Open tab if no tab exists
   if (!targetTabId) {
-    const isU1 = /somporn/i.test(targetProfile) || /somporn/i.test(targetEmail);
     const useCanvas = job.canvas !== false;
-    const targetUrl = isU1
-      ? (useCanvas ? 'https://gemini.google.com/u/1/canvas' : 'https://gemini.google.com/u/1/app')
-      : (useCanvas ? 'https://gemini.google.com/canvas' : 'https://gemini.google.com/app');
+    const prefix = targetIndex !== null && targetIndex > 0
+      ? `https://gemini.google.com/u/${targetIndex}`
+      : 'https://gemini.google.com';
+    const targetUrl = `${prefix}${useCanvas ? '/canvas' : '/app'}`;
     const newTab = await chrome.tabs.create({ url: targetUrl, active: false });
     targetTabId = newTab.id;
     await new Promise(r => setTimeout(r, 4000));
@@ -423,23 +485,34 @@ async function scanOpenTabs() {
       void chrome.runtime.lastError;
     });
 
-    // If tab is not yet tracked, provide initial fallback entry
+    // Track the tab, but do not guess who is signed into it. This used to assume one of two
+    // hardcoded accounts based on the URL, which registered every unknown tab under one
+    // person's profile and opened an SSE connection for an account that tab may not hold.
+    // The tab stays unresolved until its content script reports the real address, and a job
+    // is only ever routed to a tab whose account we actually know.
     if (!openGeminiTabs.has(tab.id)) {
-      const isU1 = tab.url && tab.url.includes('/u/1/');
-      const fallbackProf = isU1 ? 'somporn' : 'attasitgits';
-      const fallbackEmail = isU1 ? 'sompornjitdee80@gmail.com' : 'attasitgits@gmail.com';
       openGeminiTabs.set(tab.id, {
         tabId: tab.id,
         url: tab.url,
-        email: fallbackEmail,
-        profile: fallbackProf,
+        email: '',
+        profile: '',
+        firstSeen: Date.now(),
         lastSeen: Date.now()
       });
-      ensureConnectionForProfile(fallbackProf, fallbackEmail);
     } else {
       const existingTab = openGeminiTabs.get(tab.id);
       if (existingTab && existingTab.profile) {
         ensureConnectionForProfile(existingTab.profile, existingTab.email);
+      } else if (existingTab && !existingTab.warnedUnresolved &&
+                 Date.now() - (existingTab.firstSeen || 0) > 30000) {
+        // Account detection is the only thing that can resolve a tab now, so say clearly
+        // when it never succeeds instead of the tab sitting silently unconnected.
+        existingTab.warnedUnresolved = true;
+        console.warn(
+          `[Antigravity BG] Tab ${tab.id} has been open >30s without a detected Google ` +
+          `account, so no SSE connection was opened for it. Set an explicit profile in the ` +
+          `extension popup, or check the email selectors in page.js.`
+        );
       }
     }
   }
@@ -529,6 +602,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const email = (message.email || '').toLowerCase().trim();
 
     if (tabId && email) {
+      // Learn which /u/N/ index this account occupies in this browser, so jobs for it can be
+      // routed to the right tab (and the right tab opened) without hardcoding account names.
+      const idx = accountIndexFromUrl(tabUrl);
+      if (idx !== null && emailByAccountIndex.get(idx) !== email) {
+        emailByAccountIndex.set(idx, email);
+        console.log(`[Antigravity BG] Learned account index /u/${idx}/ -> ${email}`);
+      }
+
       const profile = resolveProfile(email, tabUrl);
       openGeminiTabs.set(tabId, {
         tabId,
@@ -537,8 +618,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         profile,
         lastSeen: Date.now()
       });
-      console.log(`[Antigravity BG] Registered tab ${tabId}: ${email} -> Profile: ${profile}`);
-      ensureConnectionForProfile(profile, email);
+      if (profile) {
+        console.log(`[Antigravity BG] Registered tab ${tabId}: ${email} -> Profile: ${profile}`);
+        ensureConnectionForProfile(profile, email);
+      } else {
+        console.warn(`[Antigravity BG] Tab ${tabId} (${email}) matches no bridge profile — not connecting.`);
+      }
     }
   } else if (message.type === 'GET_STATUS') {
     getConfig().then(cfg => {
@@ -564,7 +649,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         bridgeUrl: cfg.bridgeUrl,
         assignedProfile: cfg.assignedProfile,
         webEnabled: cfg.webEnabled,
-        canvasMode: cfg.canvasMode !== false,
+        canvasMode: cfg.canvasMode === true,
         preferredWebModel: cfg.preferredWebModel
       });
     });
@@ -574,7 +659,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       bridgeUrl: message.bridgeUrl,
       assignedProfile: message.assignedProfile,
       webEnabled: message.webEnabled !== false,
-      canvasMode: message.canvasMode !== false,
+      canvasMode: message.canvasMode === true,
       preferredWebModel: message.preferredWebModel || 'gemini-3.8-flash-thinking'
     }, () => {
       sendResponse({ success: true });

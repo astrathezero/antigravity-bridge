@@ -16,6 +16,29 @@
   let activeObserver = null;
   let activeJobId = null;
   let idleTimer = null;
+  let activePollInterval = null;
+  // Monotonic job counter. Every timer and callback belonging to a job checks its token
+  // against this, so a job that has been superseded stops touching shared state instead of
+  // racing the new one and reporting the wrong tab content under its own job id.
+  let jobSequence = 0;
+
+  // Tear down every timer/observer owned by the previous job. The poll interval used to be a
+  // closure-local const that nothing outside the job could reach, so a superseded job kept
+  // polling for the full timeout and read the *next* job's response element.
+  function cleanupActiveJob() {
+    if (activeObserver) {
+      try { activeObserver.disconnect(); } catch {}
+      activeObserver = null;
+    }
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (activePollInterval) {
+      clearInterval(activePollInterval);
+      activePollInterval = null;
+    }
+  }
 
   // 1. Detect Logged-in Google Account Email
   function detectAccountEmail() {
@@ -182,25 +205,117 @@
   }
 
   // 4. Check if Gemini is actively generating a response (Stop button present)
+  //
+  // Detection is best-effort — Google renames these labels and classes regularly. A `true`
+  // result is trustworthy (we found a real Stop button), but a `false` result is ambiguous:
+  // it means either "finished" or "we cannot see the button any more". Callers that treat
+  // `false` as "finished" MUST also check isGeneratingDetectionReliable(), otherwise a single
+  // renamed label makes every response finish instantly and come back empty or truncated.
+  const STOP_BUTTON_SELECTORS = [
+    'button.stop-button',
+    'button.stop',
+    'button[aria-label*="Stop response" i]',
+    'button[aria-label*="Stop generating" i]',
+    'button[aria-label="Stop" i]',
+    'button[aria-label*="หยุดการตอบกลับ" i]',
+    'button[aria-label*="หยุดสร้าง" i]',
+    'button[aria-label="หยุด" i]',
+    'button[data-test-id*="stop" i]',
+    'button[data-testid*="stop" i]',
+    'button:has(mat-icon[fonticon="stop"])',
+    'button:has([data-mat-icon-name="stop"])'
+  ];
+
+  const STOP_TOKENS = ['stop', 'หยุด', '停止', '중지', 'arrêter', 'detener', 'parar', 'anhalten'];
+
+  let stopButtonEverSeen = false;
+  let stopDetectionWarned = false;
+
+  function isElementVisible(el) {
+    if (!el) return false;
+    try {
+      return el.offsetParent !== null || el.getBoundingClientRect().width > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  function isLikelyStopButton(button) {
+    const ariaLabel = (button.getAttribute('aria-label') || '').toLowerCase();
+    const testId = (
+      button.getAttribute('data-test-id') ||
+      button.getAttribute('data-testid') ||
+      ''
+    ).toLowerCase();
+    const icon = button.querySelector('mat-icon, [data-mat-icon-name], [fonticon]');
+    const iconName = (
+      icon?.getAttribute('fonticon') ||
+      icon?.getAttribute('data-mat-icon-name') ||
+      icon?.textContent ||
+      ''
+    ).toLowerCase();
+
+    return STOP_TOKENS.some((token) =>
+      ariaLabel.includes(token) ||
+      testId.includes(token) ||
+      iconName.includes(token)
+    );
+  }
+
+  function findStopButton() {
+    const searchRoots = [
+      document.querySelector('input-container, .input-area, form.chat-input, .send-button-container'),
+      document.querySelector('chat-window, main, .chat-history, infinite-scroller'),
+      document.body
+    ].filter(Boolean);
+
+    for (const root of searchRoots) {
+      for (const sel of STOP_BUTTON_SELECTORS) {
+        try {
+          const btn = root.querySelector(sel);
+          if (isElementVisible(btn)) return btn;
+        } catch {}
+      }
+    }
+
+    // Fallback: token scan, scoped to the composer so unrelated buttons elsewhere in the page
+    // cannot false-positive. Biased towards reporting "generating" — a false positive only
+    // delays completion to the stall timeout, while a false negative truncates the answer.
+    const composer = document.querySelector('input-container, .input-area, form.chat-input, .send-button-container');
+    if (composer) {
+      try {
+        const btn = Array.from(composer.querySelectorAll('button'))
+          .find(b => isElementVisible(b) && isLikelyStopButton(b));
+        if (btn) return btn;
+      } catch {}
+    }
+
+    return null;
+  }
+
   function isGenerating() {
-    const inputArea = document.querySelector('input-container, rich-textarea, .input-area, form.chat-input, .send-button-container');
-    const stopInInput = inputArea?.querySelector(
-      'button[aria-label*="Stop response" i], button[aria-label*="หยุดการตอบกลับ" i], ' +
-      'button.stop-button, button[aria-label="Stop" i], button[aria-label="หยุด" i]'
-    );
-    if (stopInInput && (stopInInput.offsetParent !== null || stopInInput.getBoundingClientRect().width > 0)) {
+    const btn = findStopButton();
+    if (btn) {
+      stopButtonEverSeen = true;
       return true;
     }
-
-    const chatRoot = document.querySelector('chat-window, main, .chat-history, infinite-scroller') || document.body;
-    const stopBtn = chatRoot.querySelector(
-      'button.stop-button, button[aria-label="Stop response" i], button[aria-label="หยุดการตอบกลับ" i]'
-    );
-    if (stopBtn && (stopBtn.offsetParent !== null || stopBtn.getBoundingClientRect().width > 0)) {
-      return true;
-    }
-
     return false;
+  }
+
+  // True once a Stop button has actually been observed in this page session. Until then a
+  // `false` from isGenerating() carries no information and must not be used to end a job.
+  function isGeneratingDetectionReliable() {
+    return stopButtonEverSeen;
+  }
+
+  function warnStopDetectionOnce() {
+    if (stopDetectionWarned) return;
+    stopDetectionWarned = true;
+    console.warn(
+      '[Antigravity Page] Never saw a Gemini Stop button during this job — generation-state ' +
+      'detection is unreliable (Gemini DOM likely changed). Falling back to text-stall timing. ' +
+      'Update STOP_BUTTON_SELECTORS in page.js if responses look truncated.'
+    );
   }
 
   // 4.1 Check if Gemini has rendered final response action buttons (Copy / Feedback)
@@ -212,6 +327,23 @@
       'response-action-buttons, .response-container-footer, message-actions'
     );
     return Boolean(hasActions);
+  }
+
+  // Markers that identify a block as the user's own prompt rather than Gemini's answer.
+  const USER_QUERY_SELECTOR = 'user-query, .user-query, .query-text, .query-text-line, [data-test-id="user-query"]';
+
+  // A block is only a candidate answer container if it neither is nor contains a user query.
+  // This filter used to be applied to `.conversation-container` alone, so whenever an earlier
+  // selector matched first (`message-content` in particular, which Gemini also uses for the
+  // user's own bubble) the user's prompt could be picked as the "response" element. That
+  // element never mutates again, so the observer never fires and the job hangs until timeout.
+  function isAssistantBlock(el) {
+    if (!el) return false;
+    try {
+      if (el.matches(USER_QUERY_SELECTOR)) return false;
+      if (el.querySelector(USER_QUERY_SELECTOR)) return false;
+    } catch {}
+    return true;
   }
 
   // 5. Get all response blocks on the page
@@ -229,15 +361,8 @@
 
     for (const sel of selectors) {
       try {
-        const found = Array.from(document.querySelectorAll(sel));
-        if (found.length > 0) {
-          if (sel === '.conversation-container') {
-            const assistantOnly = found.filter(el => !el.querySelector('user-query, .user-query, .query-text, .query-text-line'));
-            if (assistantOnly.length > 0) return assistantOnly;
-          } else {
-            return found;
-          }
-        }
+        const found = Array.from(document.querySelectorAll(sel)).filter(isAssistantBlock);
+        if (found.length > 0) return found;
       } catch {}
     }
 
@@ -252,7 +377,7 @@
       for (const btn of actionButtons) {
         const container = btn.closest('model-response, response-container, .conversation-container, [data-test-id="model-response"]') ||
                           btn.parentElement?.parentElement?.parentElement;
-        if (container && !blocks.includes(container)) {
+        if (container && isAssistantBlock(container) && !blocks.includes(container)) {
           blocks.push(container);
         }
       }
@@ -334,25 +459,85 @@
   }
 
   // 6.3 Canvas Workspace Content Extraction
+  //
+  // In Canvas mode Gemini puts the substantive answer in the side panel and leaves only a
+  // one-line acknowledgement in the chat bubble ("I've created the document"). If none of
+  // these selectors match, the bridge silently returns that stub as the whole answer — which
+  // is what produced the 11-25 character responses in the bridge log. Gemini has shipped
+  // several names for this panel, so try all of them rather than one generation's markup.
+  const CANVAS_PANEL_SELECTORS = [
+    'canvas-workspace',
+    'canvas-editor',
+    'immersive-editor',
+    'code-immersive-panel',
+    'text-immersive-panel',
+    '.immersive-editor',
+    '[data-test-id*="immersive"]',
+    '[data-test-id*="canvas-content"]',
+    '.canvas-container',
+    '.canvas-document',
+    '.canvas-code',
+    '.workspace-content',
+    'mat-card.canvas-card',
+    '.canvas-body'
+  ];
+
+  let canvasMissWarned = false;
+
   function extractCanvasContent() {
     try {
-      const canvasPanels = document.querySelectorAll(
-        'canvas-workspace, canvas-editor, .canvas-container, [data-test-id*="canvas-content"], ' +
-        '.canvas-document, .canvas-code, .workspace-content, mat-card.canvas-card, .canvas-body'
-      );
+      const canvasPanels = document.querySelectorAll(CANVAS_PANEL_SELECTORS.join(', '));
       for (const panel of canvasPanels) {
-        if (panel && (panel.offsetParent !== null || panel.getBoundingClientRect().width > 0)) {
-          const codeEl = panel.querySelector('code, pre, .monaco-editor, textarea, .code-viewer');
-          if (codeEl) {
-            const codeText = (codeEl.innerText || codeEl.textContent || '').trim();
-            if (codeText.length > 20) return codeText;
-          }
-          const text = (panel.innerText || panel.textContent || '').trim();
-          if (text.length > 20) return text;
+        if (!isElementVisible(panel)) continue;
+        const codeEl = panel.querySelector('code, pre, .monaco-editor, .cm-content, textarea, .code-viewer');
+        if (codeEl) {
+          const codeText = (codeEl.innerText || codeEl.textContent || '').trim();
+          if (codeText.length > 20) return codeText;
         }
+        const text = (panel.innerText || panel.textContent || '').trim();
+        if (text.length > 20) return text;
       }
     } catch {}
     return '';
+  }
+
+  function commonPrefixLength(a, b) {
+    const max = Math.min(a.length, b.length);
+    let i = 0;
+    while (i < max && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+    return i;
+  }
+
+  // Decide what to report as the answer once a job ends.
+  //
+  // `streamed` is everything we sent as deltas; `onScreen` is the final reading of the page.
+  // They diverge whenever Gemini re-renders mid-answer, and neither is reliably the complete
+  // one: the screen drops the thoughts panel we already streamed, while the streamed copy
+  // misses text that only appeared after the re-render. The common case is exactly that —
+  // thinking collapses away as the answer lands — so re-attach the thinking we streamed to
+  // the answer that is actually on screen instead of discarding one of them.
+  function reconcileFinalText(streamed, onScreen) {
+    if (!onScreen) return streamed;
+    if (!streamed) return onScreen;
+    if (onScreen.startsWith(streamed)) return onScreen;
+
+    const think = /^<think>[\s\S]*?<\/think>\n\n/.exec(streamed);
+    if (think && !onScreen.startsWith('<think>')) {
+      return think[0] + onScreen;
+    }
+    return onScreen.length >= streamed.length ? onScreen : streamed;
+  }
+
+  // Canvas is open (a panel element exists) but nothing could be read out of it — the panel
+  // markup has changed. Say so once, loudly, instead of silently returning the chat stub.
+  function warnCanvasMissOnce() {
+    if (canvasMissWarned) return;
+    canvasMissWarned = true;
+    console.warn(
+      '[Antigravity Page] Canvas appears to be in use but no content could be extracted from ' +
+      'the Canvas panel. The answer will be truncated to whatever the chat bubble contains. ' +
+      'Update CANVAS_PANEL_SELECTORS in page.js, or disable Canvas mode in the extension popup.'
+    );
   }
 
   // 6.4 Canvas Mode Enforcement
@@ -404,7 +589,24 @@
     if (newChatBtn) {
       console.log('[Antigravity Page] Clicking New Chat button for fresh conversation.');
       newChatBtn.click();
-      await new Promise(r => setTimeout(r, 1500));
+      // Wait for the previous thread to actually be torn down rather than sleeping a fixed
+      // 1500ms. If the SPA is still mid-teardown when the caller snapshots the baseline, the
+      // baseline captures the *old* thread's blocks and no new block can ever exceed it.
+      const settleStart = Date.now();
+      let stableSince = 0;
+      let lastCount = -1;
+      while (Date.now() - settleStart < 8000) {
+        await new Promise(r => setTimeout(r, 200));
+        const count = getAllResponseBlocks().length;
+        if (count !== lastCount) {
+          lastCount = count;
+          stableSince = Date.now();
+          continue;
+        }
+        if (count === 0) break;                          // empty thread: ready immediately
+        if (Date.now() - stableSince > 1000) break;      // count settled; proceed with it
+      }
+      console.log(`[Antigravity Page] New chat settled after ${Date.now() - settleStart}ms (blocks=${lastCount}).`);
     } else {
       // Fallback: check if we're on a thread path and log a warning
       const pathParts = window.location.pathname.replace(/\/u\/\d+\//, '/').split('/').filter(Boolean);
@@ -574,18 +776,17 @@
   // 7. Execute Job
   async function executeJob(job) {
     const jobId = job.jobId || job.job_id;
+    const jobToken = ++jobSequence;
+    // True only while this job is still the newest one in this tab. Every timer and callback
+    // below checks it, so a superseded job goes quiet instead of reporting the next job's
+    // response under its own id.
+    const isCurrentJob = () => jobToken === jobSequence;
+
     activeJobId = jobId;
 
     console.log(`[Antigravity Page] Starting job ${jobId} (model=${job.model || 'default'}, canvas=${job.canvas})`);
 
-    if (activeObserver) {
-      activeObserver.disconnect();
-      activeObserver = null;
-    }
-    if (idleTimer) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
+    cleanupActiveJob();
 
     // 0. Ensure fresh chat if on locked thread
     try {
@@ -619,8 +820,12 @@
     }
 
     // 1. Snapshot response blocks BEFORE sending prompt
+    // Identity snapshot, not just a count. Counting alone breaks whenever the baseline is
+    // taken before the previous thread finishes tearing down: the old count stays higher than
+    // anything the new thread can reach, so "a new block appeared" never becomes true.
     const baselineBlocks = getAllResponseBlocks();
     const baselineCount = baselineBlocks.length;
+    const baselineSet = new WeakSet(baselineBlocks);
 
     // 2. Set input content
     inputEl.focus();
@@ -710,23 +915,25 @@
 
     // 4. Wait for generation to start and capture response container
     let targetResponseEl = null;
-    let fullText = '';
-    let emittedLength = 0;
     const startTime = Date.now();
     const timeoutMs = (job.timeout || 600) * 1000;
 
     while (!targetResponseEl && (Date.now() - startTime < 45000)) {
       await new Promise(r => setTimeout(r, 350));
+      if (!isCurrentJob()) return;
+
       const currentBlocks = getAllResponseBlocks();
-      if (currentBlocks.length > baselineCount) {
-        targetResponseEl = currentBlocks[currentBlocks.length - 1];
+
+      // Preferred signal: a block that was not present when we sent the prompt.
+      const fresh = currentBlocks.filter(el => !baselineSet.has(el));
+      if (fresh.length > 0) {
+        targetResponseEl = fresh[fresh.length - 1];
         break;
       }
-      if (isGenerating()) {
-        if (currentBlocks.length > 0) {
-          targetResponseEl = currentBlocks[currentBlocks.length - 1];
-          break;
-        }
+
+      if (isGenerating() && currentBlocks.length > 0) {
+        targetResponseEl = currentBlocks[currentBlocks.length - 1];
+        break;
       }
     }
 
@@ -737,69 +944,104 @@
       }
     }
 
-    if (!targetResponseEl) {
-      const mainChat = document.querySelector('chat-window, main, infinite-scroller, .chat-history');
-      if (mainChat) {
-        targetResponseEl = mainChat;
-      }
-    }
-
+    // Deliberately no "observe the whole chat window" fallback here. It used to assign
+    // `chat-window` / `main` as the response element, which made extractCleanText return the
+    // entire conversation — every previous turn plus the user's own prompt — and
+    // hasResponseFinished() was instantly true because some old turn still had a Copy button.
+    // That produced a confidently wrong answer. Failing loudly is better: the bridge can fall
+    // back to another profile or channel, and the error names what to fix.
     if (!targetResponseEl) {
       window.postMessage({
         type: 'AG_JOB_ERROR',
         jobId,
-        error: `Timeout waiting for Gemini response container to appear. (url=${window.location.pathname}, baseline=${baselineCount}, isGenerating=${isGenerating()})`
+        error: `Timeout waiting for Gemini response container to appear. ` +
+               `(url=${window.location.pathname}, baseline=${baselineCount}, ` +
+               `isGenerating=${isGenerating()}, stopDetectionReliable=${isGeneratingDetectionReliable()}). ` +
+               `The response container selectors in page.js are likely out of date.`
       }, '*');
+      activeJobId = null;
       return;
     }
 
     console.log(`[Antigravity Page] Attached observer to response container for job ${jobId}`);
 
     let lastTextChangeTime = Date.now();
+    // What we have actually streamed to the bridge. Tracking the string rather than only its
+    // length is what makes the slice below correct: the old code kept an integer offset and
+    // sliced whatever text was on screen at that offset, so as soon as the DOM re-rendered
+    // shorter (Gemini collapses the thoughts panel when the answer lands) every later slice
+    // cut into the middle of the answer and dropped a chunk.
+    let emittedText = '';
+    let lastExtraction = '';
+    let sawAnyText = false;
+    let sawRerender = false;
 
     const emitDeltas = () => {
-      const currentFullText = extractCleanText(targetResponseEl);
-      if (currentFullText.length > emittedLength) {
-        const delta = currentFullText.slice(emittedLength);
-        emittedLength = currentFullText.length;
-        fullText = currentFullText;
+      if (!isCurrentJob()) return;
+      const current = extractCleanText(targetResponseEl);
+
+      // Any change at all counts as activity, including the text getting shorter. The old
+      // code only refreshed this on growth, so a re-render froze the stall clock and the job
+      // ended via the 5s stall timer holding pre-re-render text.
+      if (current !== lastExtraction) {
+        lastExtraction = current;
         lastTextChangeTime = Date.now();
-        window.postMessage({
-          type: 'AG_JOB_DELTA',
-          jobId,
-          delta
-        }, '*');
       }
+
+      if (!current) return;
+      sawAnyText = true;
+
+      // `emittedText` is a high-water mark, never rewound. Gemini rewrites text in place as
+      // well as appending — the thoughts panel edits itself while it reasons, and markdown
+      // re-renders — so the screen regularly holds *less* than we have already streamed.
+      // Nothing new to say in that case; the authoritative text goes out with AG_JOB_DONE.
+      if (current.length <= emittedText.length) {
+        if (current !== emittedText) sawRerender = true;
+        return;
+      }
+
+      // There is more text on screen than we have sent. Resynchronise on the common prefix
+      // rather than slicing at the old offset: after an in-place edit the two strings diverge
+      // partway through, and slicing at the stale offset splices a chunk out of the answer.
+      const shared = commonPrefixLength(emittedText, current);
+      if (shared < emittedText.length) sawRerender = true;
+      const delta = current.slice(shared);
+      emittedText = current;
+      window.postMessage({ type: 'AG_JOB_DELTA', jobId, delta }, '*');
     };
 
     let isFinished = false;
     const finishJob = () => {
-      if (isFinished) return;
+      if (isFinished || !isCurrentJob()) return;
       isFinished = true;
-      if (activeObserver) {
-        activeObserver.disconnect();
-        activeObserver = null;
-      }
-      if (idleTimer) {
-        clearTimeout(idleTimer);
-        idleTimer = null;
-      }
-      clearInterval(pollInterval);
+      cleanupActiveJob();
       emitDeltas();
-      console.log(`[Antigravity Page] Job ${jobId} finished. Output length: ${fullText.length}`);
+
+      const finalExtraction = extractCleanText(targetResponseEl) || '';
+      const finalText = reconcileFinalText(emittedText, finalExtraction);
+
+      if (job.canvas !== false && finalText.length > 0 && finalText.length < 80 && !extractCanvasContent()) {
+        warnCanvasMissOnce();
+      }
+
+      console.log(
+        `[Antigravity Page] Job ${jobId} finished. streamed=${emittedText.length} ` +
+        `final=${finalExtraction.length} sent=${finalText.length} rerendered=${sawRerender}`
+      );
       window.postMessage({
         type: 'AG_JOB_DONE',
         jobId,
-        text: fullText,
+        text: finalText,
         finishReason: 'stop'
       }, '*');
       activeJobId = null;
     };
 
     activeObserver = new MutationObserver(() => {
+      if (!isCurrentJob()) return;
       emitDeltas();
 
-      if (hasResponseFinished(targetResponseEl) && emittedLength > 0) {
+      if (hasResponseFinished(targetResponseEl) && sawAnyText) {
         if (!idleTimer) {
           idleTimer = setTimeout(() => {
             finishJob();
@@ -808,7 +1050,13 @@
         return;
       }
 
-      if (!isGenerating()) {
+      // Two guards, both required. `sawAnyText` stops the empty response shell
+      // (avatar/skeleton/action-bar placeholders, rendered before the first token) from
+      // finishing the job with an empty string. isGeneratingDetectionReliable() stops a
+      // renamed Stop button from reading as "finished" on the very first mutation.
+      // The other three completion conditions in the poll below already carry the first
+      // guard; this branch was the only one missing it.
+      if (sawAnyText && isGeneratingDetectionReliable() && !isGenerating()) {
         if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(() => {
           if (!isGenerating()) {
@@ -825,34 +1073,64 @@
     });
 
     const pollInterval = setInterval(() => {
+      // Registered on the module so a superseding job can stop it; see cleanupActiveJob().
+      if (!isCurrentJob()) { clearInterval(pollInterval); return; }
       emitDeltas();
 
       const timeSinceChange = Date.now() - lastTextChangeTime;
 
       // Completion Condition 1: Action buttons have appeared (definitive indicator that Gemini finished)
-      if (hasResponseFinished(targetResponseEl) && emittedLength > 0 && timeSinceChange > 500) {
+      if (hasResponseFinished(targetResponseEl) && sawAnyText && timeSinceChange > 500) {
         clearInterval(pollInterval);
         finishJob();
         return;
       }
 
-      // Completion Condition 2: Not generating and no new text for 2.0s
-      if (emittedLength > 0 && !isGenerating() && timeSinceChange > 2000) {
+      // Completion Condition 2: Not generating and no new text for 2.0s.
+      // Only usable once a Stop button has actually been seen — otherwise `!isGenerating()`
+      // is true from the first tick and cuts the answer off after 2s. When detection is
+      // unreliable we skip this and let Condition 3 (pure text stall) finish the job.
+      if (sawAnyText && isGeneratingDetectionReliable() && !isGenerating() && timeSinceChange > 2000) {
         clearInterval(pollInterval);
         finishJob();
         return;
+      }
+      if (sawAnyText && !isGeneratingDetectionReliable()) {
+        warnStopDetectionOnce();
       }
 
       // Completion Condition 3: Absolute text stall (no change for 5s)
-      if (emittedLength > 0 && timeSinceChange > 5000) {
+      if (sawAnyText && timeSinceChange > 5000) {
         clearInterval(pollInterval);
         finishJob();
+        return;
+      }
+
+      // Failure Condition: Gemini has clearly finished (action buttons rendered) but the
+      // extractor never produced a single character. Previously this fell through the
+      // "not generating" branch and reported success with an empty string, which the bridge
+      // accepted as a valid completion. Report it as an error instead so the caller can fall
+      // back to another profile or channel rather than receiving a silent empty answer.
+      if (!sawAnyText && hasResponseFinished(targetResponseEl) && Date.now() - startTime > 15000) {
+        clearInterval(pollInterval);
+        cleanupActiveJob();
+        isFinished = true;
+        console.warn(`[Antigravity Page] Job ${jobId}: response appears complete but extraction returned no text.`);
+        window.postMessage({
+          type: 'AG_JOB_ERROR',
+          jobId,
+          error: `Gemini finished responding but no text could be extracted from the page ` +
+                 `(url=${window.location.pathname}, canvas=${job.canvas !== false}). ` +
+                 `The response DOM selectors in page.js are likely out of date.`
+        }, '*');
+        activeJobId = null;
         return;
       }
 
       if (Date.now() - startTime > timeoutMs) {
         clearInterval(pollInterval);
-        if (activeObserver) activeObserver.disconnect();
+        cleanupActiveJob();
+        isFinished = true;
         window.postMessage({
           type: 'AG_JOB_ERROR',
           jobId,
@@ -862,6 +1140,8 @@
         return;
       }
     }, 400);
+
+    activePollInterval = pollInterval;
   }
 
   // Listen for execution commands from content script

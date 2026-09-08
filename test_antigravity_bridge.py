@@ -1621,6 +1621,51 @@ class TestAntigravityBridge(unittest.TestCase):
         mgr.unregister_client("c123")
         self.assertFalse(mgr.is_profile_connected("test_prof"))
 
+    def _make_dispatched_job(self, mgr, job_id):
+        mgr.register_client(profile="p", email="p@gmail.com", client_id="c_" + job_id)
+        job = antigravity_bridge.WebJob(job_id=job_id, profile="p", prompt="hi", model="gemini-web")
+        mgr.dispatch_job(job)
+        return job
+
+    def test_handle_done_keeps_streamed_output_when_browser_text_is_shorter(self):
+        """A short final page reading must not overwrite a longer streamed answer.
+
+        Gemini re-renders mid-answer (the thoughts panel collapses, markdown re-renders), so
+        the browser's final reading of the page can hold less than the deltas already sent.
+        Letting it overwrite unconditionally is how a complete answer became a stub.
+        """
+        mgr = antigravity_bridge.WebClientManager()
+        job = self._make_dispatched_job(mgr, "job_short_final")
+
+        mgr.handle_delta("job_short_final", "A complete answer that streamed in full. ")
+        mgr.handle_delta("job_short_final", "With a second sentence.")
+        streamed = job.final_output
+
+        mgr.handle_done("job_short_final", "I've created the document.")
+
+        self.assertEqual(job.final_output, streamed)
+        self.assertIn("second sentence", job.final_output)
+
+    def test_handle_done_prefers_browser_text_when_it_is_more_complete(self):
+        """The browser's final reading wins when it actually carries more than the stream."""
+        mgr = antigravity_bridge.WebClientManager()
+        job = self._make_dispatched_job(mgr, "job_full_final")
+
+        mgr.handle_delta("job_full_final", "Partial ")
+        mgr.handle_done("job_full_final", "Partial answer plus everything added after the re-render.")
+
+        self.assertEqual(job.final_output, "Partial answer plus everything added after the re-render.")
+
+    def test_handle_done_without_browser_text_keeps_deltas(self):
+        """An empty/omitted final text must leave the streamed answer intact."""
+        mgr = antigravity_bridge.WebClientManager()
+        job = self._make_dispatched_job(mgr, "job_no_final")
+
+        mgr.handle_delta("job_no_final", "Streamed only.")
+        mgr.handle_done("job_no_final", "")
+
+        self.assertEqual(job.final_output, "Streamed only.")
+
     def test_find_profile_by_email(self):
         """Test auto-matching profile from Google account email."""
         with patch.object(antigravity_bridge, "get_canonical_antigravity_dir") as mock_dir, \
