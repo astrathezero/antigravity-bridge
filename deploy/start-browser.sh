@@ -1,6 +1,8 @@
 #!/bin/bash
-# start-browser.sh — launch multiple Chromium windows, one per Google account
-# Each window uses an isolated --user-data-dir so cookies/sessions don't mix
+# start-browser.sh
+# Single Chromium instance with Antigravity extension.
+# Opens multiple Gemini tabs (one per Google account) via Chrome multi-login.
+# Sessions are persisted in /app/chrome-data (mounted as Docker volume).
 set -e
 
 echo "[start-browser] waiting for Xvfb display :99..."
@@ -17,10 +19,13 @@ for i in {1..60}; do
     sleep 1
 done
 
-# Clear stale singleton locks
+# Clear stale singleton locks left by previous container stop/restart
 echo "[start-browser] clearing stale Chrome locks..."
-find /app/chrome-data -name 'Singleton*' -delete 2>/dev/null || true
-find /tmp -name '.org.chromium.Chromium.*' -delete 2>/dev/null || true
+rm -f /app/chrome-data/Singleton* \
+      /app/chrome-data/Default/Singleton* \
+      /app/chrome-data/Default/.org.chromium.Chromium.* \
+      /tmp/.org.chromium.Chromium.* \
+      /tmp/Singleton* 2>/dev/null || true
 
 # Detect Chromium binary
 BROWSER_BIN=""
@@ -32,12 +37,12 @@ if [ -z "$BROWSER_BIN" ]; then
     exit 1
 fi
 
-# How many Chrome windows to open (default 2, max 10)
+# How many Gemini tabs/accounts to open (default 2, max 10)
 CHROME_ACCOUNTS="${CHROME_ACCOUNTS:-2}"
 if [ "$CHROME_ACCOUNTS" -gt 10 ]; then CHROME_ACCOUNTS=10; fi
 
-# Build URL list (custom or auto-generated)
-IFS=',' read -ra URL_LIST <<< "${CHROME_URLS:-}"
+# Build Gemini URL list for each account slot
+# account 0 → /app, account 1 → /u/1/app, account 2 → /u/2/app, ...
 DEFAULT_URLS=(
     "https://gemini.google.com/app"
     "https://gemini.google.com/u/1/app"
@@ -51,44 +56,87 @@ DEFAULT_URLS=(
     "https://gemini.google.com/u/9/app"
 )
 
-COMMON_FLAGS=(
-    --no-sandbox
-    --disable-dev-shm-usage
-    --disable-gpu
-    --remote-debugging-port=9222
-    --load-extension=/app/extension
-    --no-first-run
-    --no-default-browser-check
-    --disable-background-timer-throttling
-    --disable-backgrounding-occluded-windows
-    --disable-renderer-backgrounding
-    --disable-features=TranslateUI
-    --window-size=1280,800
-)
+IFS=',' read -ra CUSTOM_URL_LIST <<< "${CHROME_URLS:-}"
 
-echo "[start-browser] launching $CHROME_ACCOUNTS Chromium window(s) with Antigravity extension..."
+# First URL to open at launch (the rest will be opened via CDP after Chrome starts)
+FIRST_URL="${CUSTOM_URL_LIST[0]:-${DEFAULT_URLS[0]}}"
 
-PIDS=()
-for i in $(seq 0 $((CHROME_ACCOUNTS - 1))); do
-    URL="${URL_LIST[$i]:-${DEFAULT_URLS[$i]}}"
-    PROFILE_DIR="/app/chrome-data/profile$i"
-    mkdir -p "$PROFILE_DIR"
+echo "[start-browser] launching $BROWSER_BIN (accounts=$CHROME_ACCOUNTS)..."
 
-    # Offset window position so windows don't overlap in noVNC
-    OFFSET_X=$((( i % 5 ) * 60))
-    OFFSET_Y=$(((i / 5 ) * 40))
+"$BROWSER_BIN" \
+    --no-sandbox \
+    --disable-dev-shm-usage \
+    --disable-gpu \
+    --remote-debugging-port=9222 \
+    --user-data-dir=/app/chrome-data \
+    --load-extension=/app/extension \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-background-timer-throttling \
+    --disable-backgrounding-occluded-windows \
+    --disable-renderer-backgrounding \
+    --disable-features=TranslateUI \
+    --window-size=1280,800 \
+    --start-maximized \
+    "$FIRST_URL" &
 
-    echo "[start-browser] window $i → $URL (profile$i)"
-    "$BROWSER_BIN" \
-        "${COMMON_FLAGS[@]}" \
-        --user-data-dir="$PROFILE_DIR" \
-        --window-position="$OFFSET_X,$OFFSET_Y" \
-        "$URL" &
-    PIDS+=($!)
-    sleep 1   # slight stagger to avoid race on X display
+BROWSER_PID=$!
+echo "[start-browser] Chrome PID: $BROWSER_PID"
+
+# Wait for Chrome to fully start and remote debugging to be available
+echo "[start-browser] waiting for Chrome remote debugging port 9222..."
+for i in {1..30}; do
+    if curl -sf http://127.0.0.1:9222/json/version > /dev/null 2>&1; then
+        echo "[start-browser] Chrome ready (remote debugging UP)"
+        break
+    fi
+    sleep 1
 done
 
-echo "[start-browser] all $CHROME_ACCOUNTS windows launched (PIDs: ${PIDS[*]})"
+# Open additional Gemini tabs for accounts 1..N via CDP
+if [ "$CHROME_ACCOUNTS" -gt 1 ]; then
+    echo "[start-browser] opening $((CHROME_ACCOUNTS - 1)) additional Gemini tab(s)..."
+    for i in $(seq 1 $((CHROME_ACCOUNTS - 1))); do
+        URL="${CUSTOM_URL_LIST[$i]:-${DEFAULT_URLS[$i]}}"
+        echo "[start-browser] opening tab $i → $URL"
+        curl -sf -X PUT "http://127.0.0.1:9222/json/new?${URL}" > /dev/null 2>&1 || \
+            echo "[start-browser] warning: could not open tab for $URL"
+        sleep 2
+    done
+    echo "[start-browser] all $CHROME_ACCOUNTS Gemini tabs opened"
+fi
 
-# Wait for all browser processes — supervisor will restart if they all exit
-wait "${PIDS[@]}"
+# Health-check loop: re-open any missing Gemini tabs every 5 minutes
+echo "[start-browser] starting tab health monitor..."
+(
+    while true; do
+        sleep 300
+        # Check if Chrome is still alive
+        kill -0 $BROWSER_PID 2>/dev/null || break
+
+        # Get current open Gemini URLs
+        OPEN_URLS=$(curl -sf http://127.0.0.1:9222/json/list 2>/dev/null | \
+            python3 -c "
+import json,sys
+try:
+    tabs=json.load(sys.stdin)
+    for t in tabs:
+        u=t.get('url','')
+        if 'gemini.google.com' in u: print(u)
+except: pass
+" 2>/dev/null || true)
+
+        # Re-open any missing accounts
+        for i in $(seq 0 $((CHROME_ACCOUNTS - 1))); do
+            URL="${CUSTOM_URL_LIST[$i]:-${DEFAULT_URLS[$i]}}"
+            BASE_PATH=$(echo "$URL" | sed 's|https://gemini.google.com||')
+            if ! echo "$OPEN_URLS" | grep -q "gemini.google.com${BASE_PATH}"; then
+                echo "[start-browser] health-check: re-opening missing tab → $URL"
+                curl -sf -X PUT "http://127.0.0.1:9222/json/new?${URL}" > /dev/null 2>&1 || true
+            fi
+        done
+    done
+) &
+
+echo "[start-browser] all done. waiting for Chrome to exit..."
+wait $BROWSER_PID
