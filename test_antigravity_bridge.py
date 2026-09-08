@@ -1386,6 +1386,56 @@ class TestAntigravityBridge(unittest.TestCase):
             self.assertEqual(pm.state["hung_profile"]["status"], "ERROR_COOLDOWN")
             self.assertTrue(pm.is_in_cooldown("hung_profile"))
 
+    def test_dynamic_fallback_routes_to_sonnet_when_gemini_in_cooldown(self):
+        """Test that a request for gemini-3.8-flash dynamically falls back to Claude Sonnet when profile has Gemini cooldown."""
+        pm = ProfileManager(profiles=["p_gemini_down"], concurrency_per_profile=1)
+        pm.mark_exhausted("p_gemini_down", "RESOURCE_EXHAUSTED: Individual quota reached. Resets in 88h.", model="gemini-3.8-flash")
+
+        self.assertTrue(pm.is_family_in_cooldown("p_gemini_down", "gemini"))
+        self.assertFalse(pm.is_family_in_cooldown("p_gemini_down", "claude"))
+        self.assertTrue(pm.is_sonnet_fallback_candidate("p_gemini_down"))
+        self.assertTrue(pm.is_executable("p_gemini_down", model="gemini-3.8-flash"))
+
+        executed_models = []
+        def mock_exec(cmd_tpl, prompt, timeout=180.0, profile=None, model_name=None, **kwargs):
+            executed_models.append(model_name)
+            return f"Response from {model_name}"
+
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            res = execute_cli_with_fallback('echo "{prompt}"', "Hello", profile_manager=pm, model_name="gemini-3.8-flash")
+            self.assertEqual(res.effective_model, antigravity_bridge.DEFAULT_SONNET_FALLBACK_MODEL)
+            self.assertEqual(executed_models, [antigravity_bridge.DEFAULT_SONNET_FALLBACK_MODEL])
+            self.assertEqual(res[1], "p_gemini_down")
+
+    def test_dynamic_fallback_restores_gemini_when_cooldown_expires(self):
+        """Test that once Gemini cooldown expires, requests return directly to Gemini."""
+        pm = ProfileManager(profiles=["p_restored"], concurrency_per_profile=1)
+        pm.mark_exhausted("p_restored", "Rate limit", cooldown_seconds=0.01, model="gemini-3.8-flash")
+        time.sleep(0.02)
+
+        self.assertFalse(pm.is_family_in_cooldown("p_restored", "gemini"))
+        self.assertFalse(pm.is_sonnet_fallback_candidate("p_restored"))
+
+        executed_models = []
+        def mock_exec(cmd_tpl, prompt, timeout=180.0, profile=None, model_name=None, **kwargs):
+            executed_models.append(model_name)
+            return f"Response from {model_name}"
+
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            res = execute_cli_with_fallback('echo "{prompt}"', "Hello", profile_manager=pm, model_name="gemini-3.8-flash")
+            self.assertEqual(res.effective_model, "gemini-3.8-flash")
+            self.assertEqual(executed_models, ["gemini-3.8-flash"])
+
+    def test_dynamic_fallback_prioritizes_gemini_over_fallback(self):
+        """Test that profiles with healthy Gemini are prioritized before falling back to Sonnet profiles."""
+        with patch.object(antigravity_bridge, "get_profile_account_email", return_value="user@example.com"):
+            pm = ProfileManager(profiles=["p_cooldown", "p_healthy"], concurrency_per_profile=1)
+            pm.mark_exhausted("p_cooldown", "Gemini quota exceeded", model="gemini-3.8-flash")
+
+            ordered = pm.get_ordered_profiles(model="gemini-3.8-flash")
+            self.assertEqual(ordered[0], "p_healthy")
+            self.assertEqual(ordered[1], "p_cooldown")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,9 +97,24 @@ DEFAULT_SHORT_PROMPT_TIMEOUT = float(os.environ.get("ANTIGRAVITY_SHORT_PROMPT_TI
 
 DEFAULT_IMAGE_ROUTER_URL = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_URL", "https://aiapirouter.mrserm.com/v1")
 DEFAULT_IMAGE_ROUTER_KEY = os.environ.get("ANTIGRAVITY_IMAGE_ROUTER_KEY", "sk-36a01df06cfa9e5f-5mbqa9-11db659b")
-DEFAULT_QUOTA_CACHE_FILE = os.path.expanduser("~/.config/antigravity/quota_cache.json")
+
+
+def get_canonical_antigravity_dir() -> str:
+    """Return canonical ~/.config/antigravity directory, avoiding nested sandbox paths."""
+    home = os.path.expanduser("~")
+    if "/sandboxes/" in home:
+        base_home = home.split("/.config/antigravity/sandboxes/")[0]
+        cand = os.path.join(base_home, ".config", "antigravity")
+        if os.path.exists(cand):
+            return cand
+    return os.path.expanduser("~/.config/antigravity")
+
+
+DEFAULT_QUOTA_CACHE_FILE = os.environ.get("ANTIGRAVITY_QUOTA_CACHE_FILE", os.path.join(get_canonical_antigravity_dir(), "quota_cache.json"))
 DEFAULT_QUOTA_WINDOW_SECONDS = 10800.0  # 3-hour sliding window for Google Gemini quota
 DEFAULT_FLASH_QUOTA_CAPACITY = 50       # Baseline 50 requests capacity per 3h window for Flash
+DEFAULT_SONNET_FALLBACK_MODEL = os.environ.get("ANTIGRAVITY_SONNET_FALLBACK_MODEL", "claude-sonnet-4-6")
+ANTIGRAVITY_MODEL_FALLBACK_ENABLED = os.environ.get("ANTIGRAVITY_MODEL_FALLBACK_ENABLED", "true").lower() in ("1", "true", "yes")
 
 SUPPORTED_MODELS = {
     "gemini-3.8-flash": ("gemini-3.8-flash", "high"),
@@ -124,8 +139,12 @@ SUPPORTED_MODELS = {
     "gemini-image": ("ag/gemini-3.1-flash-image", None),
     "imagen-3": ("ag/gemini-3.1-flash-image", None),
     "nano-banana": ("ag/gemini-3.1-flash-image", None),
+    "claude-sonnet-4-6": ("claude-sonnet-4-6", None),
+    "claude-sonnet-4-6-thinking": ("claude-sonnet-4-6", None),
     "claude-sonnet-4.6-thinking": ("claude-sonnet-4.6", None),
     "claude-sonnet-4.6": ("claude-sonnet-4.6", None),
+    "claude-opus-4-6": ("claude-opus-4-6-thinking", None),
+    "claude-opus-4-6-thinking": ("claude-opus-4-6-thinking", None),
     "claude-opus-4.6-thinking": ("claude-opus-4.6", None),
     "claude-opus-4.6": ("claude-opus-4.6", None),
     "gpt-oss-120b-medium": ("gpt-oss-120b", "medium"),
@@ -156,8 +175,12 @@ MODEL_CONTEXT_LIMITS = {
     "gemini-3.1-pro-low": 2000000,
     "gemini-3.1-pro": 2000000,
     # Anthropic Claude Models (200k tokens)
+    "claude-sonnet-4-6": 200000,
+    "claude-sonnet-4-6-thinking": 200000,
     "claude-sonnet-4.6-thinking": 200000,
     "claude-sonnet-4.6": 200000,
+    "claude-opus-4-6": 200000,
+    "claude-opus-4-6-thinking": 200000,
     "claude-opus-4.6-thinking": 200000,
     "claude-opus-4.6": 200000,
     # GPT-OSS 120B Models (128k tokens)
@@ -1010,6 +1033,20 @@ def is_quota_or_rate_limit_error(error_msg: str) -> bool:
     return False
 
 
+def get_model_family(model_name: Optional[str]) -> str:
+    """Return model family: 'gemini', 'claude', 'gpt-oss', or 'other'."""
+    if not model_name:
+        return "gemini"
+    m = model_name.lower().strip()
+    if "claude" in m or "sonnet" in m or "opus" in m:
+        return "claude"
+    if "gpt-oss" in m:
+        return "gpt-oss"
+    if "gemini" in m or "imagen" in m or "nano-banana" in m:
+        return "gemini"
+    return "other"
+
+
 def get_available_profiles() -> List[Optional[str]]:
     """Get list of available Antigravity / agy login profiles for fallback."""
     env_profiles = os.environ.get("ANTIGRAVITY_PROFILES", "").strip()
@@ -1018,7 +1055,8 @@ def get_available_profiles() -> List[Optional[str]]:
         if profiles:
             return profiles
 
-    cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+    config_base = get_canonical_antigravity_dir()
+    cfg_file = os.path.join(config_base, "bridge_config.json")
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -1029,7 +1067,7 @@ def get_available_profiles() -> List[Optional[str]]:
         except Exception:
             pass
 
-    profiles_dir = os.path.expanduser("~/.config/antigravity/profiles")
+    profiles_dir = os.path.join(config_base, "profiles")
     if os.path.exists(profiles_dir) and os.path.isdir(profiles_dir):
         found = [
             d for d in sorted(os.listdir(profiles_dir))
@@ -1117,7 +1155,7 @@ def get_disabled_profiles() -> Set[str]:
     if env_val:
         disabled.update(p.strip() for p in env_val.split(",") if p.strip())
 
-    cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+    cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -1138,7 +1176,7 @@ def persist_disabled_profile(profile: str, disabled: bool = True) -> None:
     """Persist or remove a profile from ~/.config/antigravity/bridge_config.json disabled_profiles list."""
     if not profile:
         return
-    cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+    cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
     try:
         data: Dict[str, Any] = {}
         if os.path.exists(cfg_file):
@@ -1312,9 +1350,10 @@ class ProfileManager:
                 parsed_concurrency,
             )
         self.concurrency_per_profile = 1
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
         self.current_idx = 0
+        self.last_execution_models: Dict[str, str] = {}
         self._profiles: List[Optional[str]] = profiles if profiles is not None else get_available_profiles()
         self.state: Dict[str, Dict[str, Any]] = {}
         self.in_flight: Dict[str, int] = {}
@@ -1334,6 +1373,10 @@ class ProfileManager:
                     self.state[key] = {
                         "status": "DISABLED" if is_dis else "OK",
                         "exhausted_until": int(time.time() + 315360000) if is_dis else 0,
+                        "family_cooldowns": {
+                            "gemini": int(time.time() + 315360000) if is_dis else 0,
+                            "claude": 0,
+                        },
                         "last_checked": 0,
                         "last_used": 0,
                         "last_reason": "Configured as permanently disabled" if is_dis else "",
@@ -1356,6 +1399,10 @@ class ProfileManager:
                     self.state[key] = {
                         "status": "DISABLED" if is_dis else "OK",
                         "exhausted_until": int(time.time() + 315360000) if is_dis else 0,
+                        "family_cooldowns": {
+                            "gemini": int(time.time() + 315360000) if is_dis else 0,
+                            "claude": 0,
+                        },
                         "last_checked": 0,
                         "last_used": 0,
                         "last_reason": "Configured as permanently disabled" if is_dis else "",
@@ -1376,6 +1423,7 @@ class ProfileManager:
                                     self.state[k] = {
                                         "status": "OK",
                                         "exhausted_until": 0,
+                                        "family_cooldowns": {"gemini": 0, "claude": 0},
                                         "last_checked": 0,
                                         "last_used": 0,
                                         "last_reason": "",
@@ -1385,6 +1433,20 @@ class ProfileManager:
                                         "window_start": 0,
                                     }
                                 self.state[k].update(v)
+                                # Migrate legacy single timestamp to family_cooldowns
+                                f_cds = self.state[k].get("family_cooldowns")
+                                ex_u = self.state[k].get("exhausted_until", 0)
+                                st = self.state[k].get("status", "OK")
+                                if not isinstance(f_cds, dict):
+                                    self.state[k]["family_cooldowns"] = {
+                                        "gemini": ex_u if st in ("EXHAUSTED", "RATE_LIMITED", "DISABLED") else 0,
+                                        "claude": 0,
+                                    }
+                                else:
+                                    self.state[k]["family_cooldowns"].setdefault("gemini", 0)
+                                    self.state[k]["family_cooldowns"].setdefault("claude", 0)
+                                    if self.state[k]["family_cooldowns"]["gemini"] == 0 and ex_u > time.time() and st in ("EXHAUSTED", "RATE_LIMITED"):
+                                        self.state[k]["family_cooldowns"]["gemini"] = ex_u
                 except Exception as exc:
                     logger.warning("Failed to load quota cache from %s: %s", self.cache_file, exc)
 
@@ -1412,12 +1474,82 @@ class ProfileManager:
         except Exception as exc:
             logger.warning("Failed to save quota cache to %s: %s", self.cache_file, exc)
 
-    def is_in_cooldown(self, profile: Optional[str]) -> bool:
-        """Check if a profile is currently in cooldown."""
+    def is_family_in_cooldown(self, profile: Optional[str], family: str) -> bool:
+        """Check if a specific model family is in cooldown for this profile."""
         key = profile or "default"
         info = self.state.get(key, {})
+        if info.get("status") == "DISABLED":
+            return True
+        now = time.time()
+        fam_until = info.get("family_cooldowns", {}).get(family, 0)
+        return now < fam_until
+
+    def get_family_cooldown_remaining(self, profile: Optional[str], family: str) -> int:
+        """Return remaining cooldown seconds for a specific model family."""
+        key = profile or "default"
+        info = self.state.get(key, {})
+        fam_until = info.get("family_cooldowns", {}).get(family, 0)
+        return max(0, int(fam_until - time.time()))
+
+    def is_in_cooldown(self, profile: Optional[str], model: Optional[str] = None) -> bool:
+        """Check if a profile is currently in cooldown.
+        If model is specified, checks family-specific cooldown; otherwise checks overall exhaustion."""
+        key = profile or "default"
+        info = self.state.get(key, {})
+        if info.get("status") == "DISABLED":
+            return True
+        now = time.time()
+        if model:
+            fam = get_model_family(model)
+            fam_until = info.get("family_cooldowns", {}).get(fam, 0)
+            if fam_until > now:
+                return True
+            if info.get("status") == "ERROR_COOLDOWN" and info.get("exhausted_until", 0) > now:
+                return True
+            return False
         exhausted_until = info.get("exhausted_until", 0)
-        return time.time() < exhausted_until
+        return now < exhausted_until
+
+    def is_executable(self, profile: Optional[str], model: Optional[str] = None) -> bool:
+        """Check if a profile can execute requests for the given model (either directly or via fallback)."""
+        key = profile or "default"
+        info = self.state.get(key, {})
+        if info.get("status") == "DISABLED":
+            return False
+        now = time.time()
+        if not model:
+            return now >= info.get("exhausted_until", 0)
+        fam = get_model_family(model)
+        if fam == "gemini" and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
+            gemini_until = info.get("family_cooldowns", {}).get("gemini", 0)
+            claude_until = info.get("family_cooldowns", {}).get("claude", 0)
+            return (now >= gemini_until) or (now >= claude_until)
+        return not self.is_in_cooldown(profile, model=model)
+
+    def is_sonnet_fallback_candidate(self, profile: Optional[str], requested_model: Optional[str] = None) -> bool:
+        """Check if a profile is in Gemini cooldown but ready to execute via Claude Sonnet fallback."""
+        if not ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
+            return False
+        key = profile or "default"
+        info = self.state.get(key, {})
+        if info.get("status") == "DISABLED":
+            return False
+        now = time.time()
+        gemini_until = info.get("family_cooldowns", {}).get("gemini", 0)
+        claude_until = info.get("family_cooldowns", {}).get("claude", 0)
+        return (now < gemini_until) and (now >= claude_until)
+
+    def set_last_execution_model(self, profile: Optional[str], model: str) -> None:
+        """Record the model last successfully executed by this profile."""
+        key = profile or "default"
+        with self.lock:
+            self.last_execution_models[key] = model
+
+    def get_last_execution_model(self, profile: Optional[str]) -> Optional[str]:
+        """Get the model last executed by this profile."""
+        key = profile or "default"
+        with self.lock:
+            return self.last_execution_models.get(key)
 
     def mark_exhausted(
         self,
@@ -1425,18 +1557,24 @@ class ProfileManager:
         reason: str,
         cooldown_seconds: Optional[float] = None,
         duration: Optional[float] = None,
+        model: Optional[str] = None,
     ) -> None:
-        """Mark a profile as exhausted and enter cooldown with exponential backoff or exact reset time."""
+        """Mark a profile as exhausted for a model family and enter cooldown with exponential backoff or exact reset time."""
         if cooldown_seconds is None and duration is not None:
             cooldown_seconds = duration
 
         key = profile or "default"
         now = time.time()
+        fam = get_model_family(model)
+        if fam == "gemini" and any(w in reason.lower() for w in ("claude", "sonnet", "anthropic")):
+            fam = "claude"
+
         with self.lock:
             if key not in self.state:
                 self.state[key] = {
                     "status": "OK",
                     "exhausted_until": 0,
+                    "family_cooldowns": {"gemini": 0, "claude": 0},
                     "last_checked": 0,
                     "last_used": 0,
                     "last_reason": "",
@@ -1456,16 +1594,20 @@ class ProfileManager:
             else:
                 duration = cooldown_seconds
 
+            until_ts = int(now + duration)
             self.state[key]["status"] = "EXHAUSTED"
-            self.state[key]["exhausted_until"] = int(now + duration)
+            f_cds = self.state[key].setdefault("family_cooldowns", {"gemini": 0, "claude": 0})
+            f_cds[fam] = until_ts
+            self.state[key]["exhausted_until"] = max(f_cds.values()) if f_cds else until_ts
             self.state[key]["last_checked"] = int(now)
             self.state[key]["last_reason"] = reason
             self.state[key]["window_requests"] = DEFAULT_FLASH_QUOTA_CAPACITY
             self.save_cache()
 
         logger.warning(
-            "[QUOTA EXHAUSTED] Profile '%s' marked EXHAUSTED for %ds (until %s). Reason: %s",
+            "[QUOTA EXHAUSTED] Profile '%s' (family=%s) marked EXHAUSTED for %ds (until %s). Reason: %s",
             key,
+            fam,
             int(duration),
             time.strftime("%H:%M:%S", time.localtime(now + duration)),
             reason[:120],
@@ -1480,6 +1622,7 @@ class ProfileManager:
                 self.state[key] = {
                     "status": "OK",
                     "exhausted_until": 0,
+                    "family_cooldowns": {"gemini": 0, "claude": 0},
                     "last_checked": 0,
                     "last_used": 0,
                     "last_reason": "",
@@ -1499,15 +1642,17 @@ class ProfileManager:
             self.state[key]["exhausted_until"] = int(now + duration)
             self.save_cache()
 
-    def mark_success(self, profile: Optional[str]) -> None:
+    def mark_success(self, profile: Optional[str], model: Optional[str] = None) -> None:
         """Mark profile execution success, update window counters and reset error count."""
         key = profile or "default"
         now = time.time()
+        fam = get_model_family(model) if model else None
         with self.lock:
             if key not in self.state:
                 self.state[key] = {
                     "status": "OK",
                     "exhausted_until": 0,
+                    "family_cooldowns": {"gemini": 0, "claude": 0},
                     "last_checked": 0,
                     "last_used": 0,
                     "last_reason": "",
@@ -1516,8 +1661,17 @@ class ProfileManager:
                     "window_requests": 0,
                     "window_start": 0,
                 }
-            self.state[key]["status"] = "OK"
-            self.state[key]["exhausted_until"] = 0
+            f_cds = self.state[key].setdefault("family_cooldowns", {"gemini": 0, "claude": 0})
+            if fam and fam in f_cds:
+                f_cds[fam] = 0
+
+            active_cds = [ts for ts in f_cds.values() if ts > now]
+            if not active_cds:
+                self.state[key]["status"] = "OK"
+                self.state[key]["exhausted_until"] = 0
+            else:
+                self.state[key]["exhausted_until"] = max(active_cds)
+
             self.state[key]["consecutive_errors"] = 0
             self.state[key]["success_count"] = self.state[key].get("success_count", 0) + 1
 
@@ -1545,6 +1699,7 @@ class ProfileManager:
                 self.state[key] = {
                     "status": "OK",
                     "exhausted_until": 0,
+                    "family_cooldowns": {"gemini": 0, "claude": 0},
                     "last_checked": 0,
                     "last_used": 0,
                     "last_reason": "",
@@ -1577,6 +1732,7 @@ class ProfileManager:
                 if key in self.state:
                     self.state[key]["status"] = "OK"
                     self.state[key]["exhausted_until"] = 0
+                    self.state[key]["family_cooldowns"] = {"gemini": 0, "claude": 0}
                     self.state[key]["consecutive_errors"] = 0
                     self.state[key]["window_requests"] = 0
                     self.state[key]["window_start"] = int(now)
@@ -1587,27 +1743,43 @@ class ProfileManager:
                         continue
                     self.state[k]["status"] = "OK"
                     self.state[k]["exhausted_until"] = 0
+                    self.state[k]["family_cooldowns"] = {"gemini": 0, "claude": 0}
                     self.state[k]["consecutive_errors"] = 0
                     self.state[k]["window_requests"] = 0
                     self.state[k]["window_start"] = int(now)
             self.save_cache()
 
-    def get_ordered_profiles(self) -> List[Optional[str]]:
-        """Return candidate profiles ordered by availability and concurrency:
-        1. Ready & completely IDLE profiles (in_flight == 0), rotated round-robin.
-        2. Ready profiles with free capacity (in_flight < concurrency_per_profile, least-loaded first).
-        3. Recovering profiles with free capacity (cooldown expired / idle first).
-        4. Saturated / busy profiles (in_flight >= concurrency_per_profile).
-        5. Unauthenticated profiles (last resort).
-        6. Exhausted profiles (sorted by earliest cooldown expiration).
+    def get_ordered_profiles(self, model: Optional[str] = None) -> List[Optional[str]]:
+        """Return candidate profiles ordered by availability, model capability, and concurrency:
+        If model is in Gemini family and fallback is enabled:
+          1. Gemini-ready & IDLE profiles (in_flight == 0, not in Gemini cooldown), rotated round-robin.
+          2. Gemini-ready profiles with free capacity (in_flight < concurrency_per_profile).
+          3. Sonnet-fallback ready & IDLE profiles (in Gemini cooldown, but NOT in Claude cooldown), rotated round-robin.
+          4. Sonnet-fallback ready profiles with free capacity.
+          5. Saturated / busy profiles.
+          6. Unauthenticated profiles.
+          7. Fully exhausted profiles (sorted by earliest reset).
+        Otherwise:
+          1. Ready & IDLE profiles (in_flight == 0).
+          2. Ready profiles with free capacity.
+          3. Recovering profiles with free capacity.
+          4. Busy profiles.
+          5. Unauthenticated profiles.
+          6. Exhausted profiles.
         """
         now = time.time()
+        fam = get_model_family(model) if model else None
+        use_fallback_routing = (fam == "gemini") and ANTIGRAVITY_MODEL_FALLBACK_ENABLED
+
         with self.lock:
             profiles = list(self._profiles)
             ready_idle: List[Optional[str]] = []
             ready_avail: List[Optional[str]] = []
-            ready_busy: List[Optional[str]] = []
+            sonnet_idle: List[Optional[str]] = []
+            sonnet_avail: List[Optional[str]] = []
             recovering_idle: List[Optional[str]] = []
+            ready_busy: List[Optional[str]] = []
+            sonnet_busy: List[Optional[str]] = []
             recovering_busy: List[Optional[str]] = []
             exhausted: List[Tuple[float, Optional[str]]] = []
             unauthenticated: List[Optional[str]] = []
@@ -1619,10 +1791,22 @@ class ProfileManager:
                 if status == "DISABLED":
                     continue
 
-                exhausted_until = info.get("exhausted_until", 0)
-                if exhausted_until > 0 and now < exhausted_until:
-                    exhausted.append((exhausted_until, p))
-                    continue
+                f_cds = info.get("family_cooldowns", {})
+                gemini_cd = f_cds.get("gemini", 0)
+                claude_cd = f_cds.get("claude", 0)
+                ex_until = info.get("exhausted_until", 0)
+
+                if use_fallback_routing:
+                    is_gemini_down = (now < gemini_cd) or (status == "EXHAUSTED" and gemini_cd == 0 and now < ex_until)
+                    is_claude_down = (now < claude_cd)
+                    if is_gemini_down and is_claude_down:
+                        earliest_res = min(gemini_cd, claude_cd) if (gemini_cd and claude_cd) else max(gemini_cd, claude_cd, ex_until)
+                        exhausted.append((earliest_res, p))
+                        continue
+                else:
+                    if ex_until > 0 and now < ex_until:
+                        exhausted.append((ex_until, p))
+                        continue
 
                 # Filter unauthenticated profiles so they don't block healthy profiles
                 email = get_profile_account_email(p)
@@ -1631,22 +1815,39 @@ class ProfileManager:
                     continue
 
                 in_fl = self.in_flight.get(key, 0)
-                is_recovering = status in ("EXHAUSTED", "RATE_LIMITED", "ERROR_COOLDOWN")
+                is_recovering = status in ("EXHAUSTED", "RATE_LIMITED", "ERROR_COOLDOWN") and not use_fallback_routing
                 is_locked = is_profile_sandbox_locked(p)
                 is_busy = (in_fl >= self.concurrency_per_profile) or is_locked
 
-                if is_recovering:
-                    if not is_busy:
-                        recovering_idle.append(p)
+                if use_fallback_routing:
+                    is_gemini_down = (now < gemini_cd) or (status == "EXHAUSTED" and gemini_cd == 0 and now < ex_until)
+                    if not is_gemini_down:
+                        if in_fl == 0 and not is_locked:
+                            ready_idle.append(p)
+                        elif not is_busy:
+                            ready_avail.append(p)
+                        else:
+                            ready_busy.append(p)
                     else:
-                        recovering_busy.append(p)
+                        if in_fl == 0 and not is_locked:
+                            sonnet_idle.append(p)
+                        elif not is_busy:
+                            sonnet_avail.append(p)
+                        else:
+                            sonnet_busy.append(p)
                 else:
-                    if in_fl == 0 and not is_locked:
-                        ready_idle.append(p)
-                    elif not is_busy:
-                        ready_avail.append(p)
+                    if is_recovering:
+                        if not is_busy:
+                            recovering_idle.append(p)
+                        else:
+                            recovering_busy.append(p)
                     else:
-                        ready_busy.append(p)
+                        if in_fl == 0 and not is_locked:
+                            ready_idle.append(p)
+                        elif not is_busy:
+                            ready_avail.append(p)
+                        else:
+                            ready_busy.append(p)
 
             # Round-robin among ready_idle profiles
             if ready_idle:
@@ -1654,18 +1855,25 @@ class ProfileManager:
                 ready_idle = ready_idle[idx:] + ready_idle[:idx]
                 self.current_idx = (idx + 1) % len(ready_idle)
 
-            # Sort partially loaded ready profiles by in_flight ascending
-            ready_avail.sort(key=lambda p: self.in_flight.get(p or "default", 0))
+            # Round-robin among sonnet_idle profiles
+            if sonnet_idle:
+                s_idx = self.current_idx % len(sonnet_idle)
+                sonnet_idle = sonnet_idle[s_idx:] + sonnet_idle[:s_idx]
 
-            # Exhausted profiles sorted by earliest cooldown expiration
+            ready_avail.sort(key=lambda p: self.in_flight.get(p or "default", 0))
+            sonnet_avail.sort(key=lambda p: self.in_flight.get(p or "default", 0))
+
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
 
             all_ordered = (
                 ready_idle
                 + ready_avail
+                + sonnet_idle
+                + sonnet_avail
                 + recovering_idle
                 + ready_busy
+                + sonnet_busy
                 + recovering_busy
                 + unauthenticated
                 + exhausted_profiles
@@ -1676,6 +1884,7 @@ class ProfileManager:
         self,
         candidates: Optional[List[Optional[str]]] = None,
         wait_timeout: float = 0.0,
+        model: Optional[str] = None,
     ) -> Optional[str]:
         """Atomically select and acquire an idle/available candidate profile with free in-flight lease.
         If all candidates are busy and wait_timeout > 0, waits up to wait_timeout for an in-flight job to release.
@@ -1683,7 +1892,7 @@ class ProfileManager:
         deadline = time.time() + wait_timeout if wait_timeout > 0 else 0.0
         with self.condition:
             while True:
-                target_list = list(candidates) if candidates is not None else self.get_ordered_profiles()
+                target_list = list(candidates) if candidates is not None else self.get_ordered_profiles(model=model)
                 now = time.time()
                 # 1. Prefer ready candidates where in_flight < concurrency_per_profile and not locked
                 available = [
@@ -1691,7 +1900,7 @@ class ProfileManager:
                     if self.in_flight.get(p or "default", 0) < self.concurrency_per_profile
                     and not is_profile_sandbox_locked(p)
                     and self.state.get(p or "default", {}).get("status") != "DISABLED"
-                    and (self.state.get(p or "default", {}).get("exhausted_until", 0) == 0 or now >= self.state.get(p or "default", {}).get("exhausted_until", 0))
+                    and self.is_executable(p, model=model)
                 ]
                 if available:
                     if candidates is not None:
@@ -1837,6 +2046,15 @@ class ProfileManager:
                 info["is_busy"] = is_busy
                 info["concurrency_status"] = "BUSY" if is_busy else ("IDLE" if in_fl == 0 else "PARTIAL")
 
+                gem_rem = int(self.get_family_cooldown_remaining(p, "gemini"))
+                claude_rem = int(self.get_family_cooldown_remaining(p, "claude"))
+                is_fallback = self.is_sonnet_fallback_candidate(p)
+
+                info["gemini_cooldown_seconds_remaining"] = gem_rem
+                info["claude_cooldown_seconds_remaining"] = claude_rem
+                info["sonnet_fallback_candidate"] = is_fallback
+                info["last_execution_model"] = self.get_last_execution_model(p)
+
                 if info.get("status") == "DISABLED" or cooldown_left > 0:
                     quota_pct = 0
                 else:
@@ -1867,6 +2085,7 @@ class ProfileManager:
             total_count = len(total_profiles)
 
             ready_list: List[str] = []
+            sonnet_fallback_list: List[Tuple[str, int]] = []
             cooldown_list: List[Tuple[str, int]] = []
             disabled_list: List[str] = []
 
@@ -1877,10 +2096,15 @@ class ProfileManager:
                 if st == "DISABLED":
                     disabled_list.append(pk)
                     continue
-                ex_until = info.get("exhausted_until", 0)
-                if ex_until > now:
-                    rem = int(ex_until - now)
-                    cooldown_list.append((pk, rem))
+
+                gemini_rem = int(self.get_family_cooldown_remaining(p, "gemini"))
+                claude_rem = int(self.get_family_cooldown_remaining(p, "claude"))
+
+                if gemini_rem > 0:
+                    if claude_rem == 0 and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
+                        sonnet_fallback_list.append((pk, gemini_rem))
+                    else:
+                        cooldown_list.append((pk, max(gemini_rem, claude_rem)))
                 else:
                     ready_list.append(pk)
 
@@ -1888,24 +2112,43 @@ class ProfileManager:
             ready_count = len(ready_list)
             pool_pct = int((ready_count / float(enabled_count)) * 100) if enabled_count > 0 else 0
 
-            lines = [
-                "",
-                "---",
-                f"> ⚡ **Antigravity Profile:** `{key}`{email_info} | 🔋 **Quota:** ~**{quota_pct}%** (Flash Est.)",
-            ]
+            # Header line for used profile
+            gemini_rem_used = int(self.get_family_cooldown_remaining(used_profile, "gemini"))
+            last_model = self.get_last_execution_model(used_profile)
+            if gemini_rem_used > 0 and (last_model and "claude" in last_model.lower() or self.is_sonnet_fallback_candidate(used_profile)):
+                model_label = "Claude Sonnet 4.6"
+                lines = [
+                    "",
+                    "---",
+                    f"> ⚡ **Antigravity Profile:** `{key}`{email_info} | 🔀 **Model:** `{model_label}` (Gemini Reset in {format_cooldown_duration(gemini_rem_used)})",
+                ]
+            else:
+                lines = [
+                    "",
+                    "---",
+                    f"> ⚡ **Antigravity Profile:** `{key}`{email_info} | 🔋 **Quota:** ~**{quota_pct}%** (Flash Est.)",
+                ]
 
             if total_count > 1:
-                pool_parts = [f"🟢 **{ready_count}/{enabled_count}** Ready (**{pool_pct}%** Capacity)"]
+                pool_parts = [f"🟢 **{ready_count}/{enabled_count}** Ready (Gemini)"]
+                if sonnet_fallback_list:
+                    pool_parts.append(f"🟣 **{len(sonnet_fallback_list)}** in Cooldown (Sonnet Fallback)")
                 if cooldown_list:
                     pool_parts.append(f"🔴 **{len(cooldown_list)}** in Cooldown")
                 if disabled_list:
                     pool_parts.append(f"⚪ **{len(disabled_list)}** Disabled")
                 lines.append(f"> 📊 **Quota Pool:** {' • '.join(pool_parts)}")
+                if sonnet_fallback_list:
+                    fb_items = [f"`{p}` (⏳ Gemini reset in {format_cooldown_duration(rem)})" for p, rem in sorted(sonnet_fallback_list, key=lambda x: x[1])]
+                    lines.append(f"> 🟣 **Sonnet Fallback Active:** {', '.join(fb_items)}")
                 if cooldown_list:
                     cd_items = [f"`{p}` (⏳ {format_cooldown_duration(rem)})" for p, rem in sorted(cooldown_list, key=lambda x: x[1])]
                     lines.append(f"> ⏳ **In Cooldown:** {', '.join(cd_items)}")
             else:
-                status_desc = "🟢 Ready" if key in ready_list else "🔴 In Cooldown"
+                if gemini_rem_used > 0 and self.is_sonnet_fallback_candidate(used_profile):
+                    status_desc = f"🟣 Sonnet Fallback Active (Gemini reset in {format_cooldown_duration(gemini_rem_used)})"
+                else:
+                    status_desc = "🟢 Ready" if key in ready_list else "🔴 In Cooldown"
                 lines.append(f"> 📊 **Quota Status:** {status_desc} (~{quota_pct}%)")
 
             return "\n".join(lines)
@@ -2053,9 +2296,10 @@ def extract_os_file_token() -> Optional[Dict[str, Any]]:
 
 def sync_profile_to_system(profile_name: str) -> Tuple[str, str]:
     """Sync active profile credentials to all OS-specific auth directories and system keyrings."""
-    profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile_name}")
+    config_base = get_canonical_antigravity_dir()
+    profile_dir = os.path.join(config_base, "profiles", profile_name)
     if not os.path.exists(profile_dir):
-        alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile_name}")
+        alt_dir = os.path.join(config_base, profile_name)
         if os.path.exists(alt_dir) and os.path.isdir(alt_dir):
             profile_dir = alt_dir
 
@@ -2440,6 +2684,16 @@ def parse_cmd_template(
 ) -> Tuple[List[str], str]:
     """Parse command template into list of arguments for subprocess (shell=False)."""
     model_flags = resolve_model_flags(model_name)
+    # Normalize CLI-specific model flag names for binary compatibility with agy CLI
+    normalized_flags = []
+    for f in model_flags:
+        if f == "claude-sonnet-4.6":
+            normalized_flags.append("claude-sonnet-4-6")
+        elif f == "claude-opus-4.6":
+            normalized_flags.append("claude-opus-4-6-thinking")
+        else:
+            normalized_flags.append(f)
+    model_flags = normalized_flags
     prompt_bytes_len = len(prompt_text.encode("utf-8"))
 
     if "{prompt}" in cmd_template:
@@ -2855,10 +3109,10 @@ def execute_cli_command(
             logger.info("[PROXY] Active Outbound Proxy: %s (Bypassing 127.0.0.1,localhost)", proxy_url)
 
         if profile:
-            email_preview, token_preview = sync_profile_to_system(profile)
-            profile_dir = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}")
+            config_base = get_canonical_antigravity_dir()
+            profile_dir = os.path.join(config_base, "profiles", profile)
             if not os.path.exists(profile_dir):
-                alt_dir = os.path.expanduser(f"~/.config/antigravity/{profile}")
+                alt_dir = os.path.join(config_base, profile)
                 if os.path.exists(alt_dir) and os.path.isdir(alt_dir):
                     profile_dir = alt_dir
 
@@ -2967,6 +3221,18 @@ def execute_cli_command(
         return output_text
 
 
+class CLIExecutionResult(tuple):
+    """Result tuple of CLI execution supporting backward-compatible 2-element unpacking (output, profile)
+    while exposing effective_model attribute."""
+    def __new__(cls, output: str, profile: Optional[str], effective_model: Optional[str] = None):
+        return super().__new__(cls, (output, profile))
+
+    def __init__(self, output: str, profile: Optional[str], effective_model: Optional[str] = None):
+        self.output = output
+        self.profile = profile
+        self.effective_model = effective_model or "default"
+
+
 def execute_cli_with_fallback(
     cmd_template: str,
     prompt_text: str,
@@ -2984,9 +3250,9 @@ def execute_cli_with_fallback(
     if profiles is not None:
         mgr.set_profiles(profiles)
 
-    candidate_profiles = mgr.get_ordered_profiles()
+    candidate_profiles = mgr.get_ordered_profiles(model=model_name)
     if preferred_profile and preferred_profile in candidate_profiles:
-        if not mgr.is_profile_busy(preferred_profile) and not mgr.is_in_cooldown(preferred_profile):
+        if not mgr.is_profile_busy(preferred_profile) and mgr.is_executable(preferred_profile, model=model_name):
             candidate_profiles = [preferred_profile] + [p for p in candidate_profiles if p != preferred_profile]
         else:
             logger.info(
@@ -3018,7 +3284,7 @@ def execute_cli_with_fallback(
         # Check if all available candidates are currently busy
         all_busy = all(mgr.is_profile_busy(p) for p in available_candidates)
         wait_time = min(2.0, remaining_budget) if all_busy else 0.0
-        profile = mgr.acquire_profile(available_candidates, wait_timeout=wait_time)
+        profile = mgr.acquire_profile(available_candidates, wait_timeout=wait_time, model=model_name)
         if profile is None and available_candidates:
             # If still none free after wait, take the least-loaded candidate
             available_candidates.sort(key=lambda p: mgr.get_in_flight(p))
@@ -3027,12 +3293,34 @@ def execute_cli_with_fallback(
 
         tried_profiles.add(profile)
         profile_key = profile or "default"
-        is_cooldown = mgr.is_in_cooldown(profile)
         in_flight_count = mgr.get_in_flight(profile)
-
         attempt_timeout = max(1.0, min(timeout, remaining_budget))
 
-        if is_cooldown:
+        # Determine effective model for this profile (Dynamic Model Fallback)
+        effective_model = model_name
+        is_fallback_active = False
+
+        if model_name and get_model_family(model_name) == "gemini" and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
+            if mgr.is_family_in_cooldown(profile, "gemini"):
+                if not mgr.is_family_in_cooldown(profile, "claude"):
+                    effective_model = DEFAULT_SONNET_FALLBACK_MODEL
+                    is_fallback_active = True
+                    gemini_rem = mgr.get_family_cooldown_remaining(profile, "gemini")
+                    logger.info(
+                        "[DYNAMIC FALLBACK] Profile '%s' in Gemini cooldown (reset in %s) -> Switching model to %s",
+                        profile_key,
+                        format_cooldown_duration(gemini_rem),
+                        effective_model,
+                    )
+                else:
+                    logger.warning(
+                        "Skipping fallback profile in cooldown for both Gemini and Claude: %s",
+                        profile_key,
+                    )
+                    errors.append(f"Profile '{profile_key}' exhausted for both Gemini and Claude. Skipping.")
+                    mgr.release_profile(profile)
+                    continue
+        elif mgr.is_in_cooldown(profile, model=model_name):
             logger.warning(
                 "Skipping fallback profile in cooldown: %s (model=%s, in_flight=%d, timeout=%.1fs)",
                 profile_key,
@@ -3043,14 +3331,15 @@ def execute_cli_with_fallback(
             errors.append(f"Profile '{profile_key}' is in cooldown (exhausted). Skipping.")
             mgr.release_profile(profile)
             continue
-        else:
-            logger.info(
-                "Attempting CLI execution with profile: %s (model=%s, in_flight=%d, timeout=%.1fs)",
-                profile_key,
-                model_name or "default",
-                in_flight_count,
-                attempt_timeout,
-            )
+
+        logger.info(
+            "Attempting CLI execution with profile: %s (requested_model=%s, effective_model=%s, in_flight=%d, timeout=%.1fs)",
+            profile_key,
+            model_name or "default",
+            effective_model or "default",
+            in_flight_count,
+            attempt_timeout,
+        )
 
         try:
             try:
@@ -3061,7 +3350,7 @@ def execute_cli_with_fallback(
                         prompt_text,
                         timeout=attempt_timeout,
                         profile=profile,
-                        model_name=model_name,
+                        model_name=effective_model,
                         stall_timeout=stall_timeout,
                         output_callback=output_callback,
                     )
@@ -3071,7 +3360,7 @@ def execute_cli_with_fallback(
                         prompt_text,
                         timeout=attempt_timeout,
                         profile=profile,
-                        model_name=model_name,
+                        model_name=effective_model,
                     )
             except TypeError:
                 output = execute_cli_command(
@@ -3079,19 +3368,20 @@ def execute_cli_with_fallback(
                     prompt_text,
                     timeout=attempt_timeout,
                     profile=profile,
-                    model_name=model_name,
+                    model_name=effective_model,
                 )
-            mgr.mark_success(profile)
-            return output, profile
+            mgr.mark_success(profile, model=effective_model)
+            mgr.set_last_execution_model(profile, effective_model or "default")
+            return CLIExecutionResult(output, profile, effective_model)
         except Exception as exc:
             err_str = str(exc)
             logger.warning("Profile '%s' execution failed: %s", profile_key, exc)
             if "sandbox is currently locked" in err_str.lower():
                 logger.info("Profile '%s' sandbox is locked/busy by another process. Routing to alternative profile.", profile_key)
             elif "authentication required" in err_str.lower() or "not signed in" in err_str.lower():
-                mgr.mark_exhausted(profile, err_str, cooldown_seconds=3600.0)
+                mgr.mark_exhausted(profile, err_str, cooldown_seconds=3600.0, model=effective_model)
             elif is_quota_or_rate_limit_error(err_str):
-                mgr.mark_exhausted(profile, err_str)
+                mgr.mark_exhausted(profile, err_str, model=effective_model)
             elif "stalled" in err_str.lower():
                 logger.warning("[FALLBACK] Profile '%s' execution stalled/hung. Routing to alternative profile immediately.", profile_key)
                 mgr.mark_error(profile, err_str)
@@ -4494,7 +4784,15 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     preferred_profile=req_profile,
                     stall_timeout=stall_timeout,
                 )
-                logger.info("Successfully executed CLI using profile: %s (model=%s, timeout=%.1fs, stall_timeout=%.1fs)", used_profile or "default", model, prof_timeout, stall_timeout)
+                actual_model = getattr(output_text, "effective_model", None) or profile_manager.get_last_execution_model(used_profile) or model
+                logger.info(
+                    "Successfully executed CLI using profile: %s (model=%s, effective_model=%s, timeout=%.1fs, stall_timeout=%.1fs)",
+                    used_profile or "default",
+                    model,
+                    actual_model,
+                    prof_timeout,
+                    stall_timeout,
+                )
             except Exception as exc:
                 logger.error("All agy profile attempts failed: %s", exc)
                 if stream:
@@ -4562,6 +4860,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             extra_resp_headers["X-Antigravity-Stall-Timeout"] = f"{stall_timeout:.1f}s"
             if used_profile:
                 extra_resp_headers["X-Antigravity-Active-Profile"] = str(used_profile)
+            if actual_model and actual_model != model:
+                extra_resp_headers["X-Antigravity-Effective-Model"] = str(actual_model)
+                extra_resp_headers["X-Antigravity-Model-Fallback"] = "true"
             if profile_manager:
                 summary = profile_manager.get_status_summary()
                 ready_ct = sum(1 for s in summary.values() if s.get("available"))
@@ -4778,12 +5079,14 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
 def get_profile_account_email(profile: Optional[str]) -> str:
     """Get active logged in email for a profile from google_accounts.json."""
+    config_base = get_canonical_antigravity_dir()
     if not profile or profile == "default":
-        p = os.path.expanduser("~/.gemini/google_accounts.json")
+        cand_gemini = os.path.join(os.path.dirname(config_base), ".gemini", "google_accounts.json")
+        p = cand_gemini if os.path.exists(cand_gemini) else os.path.expanduser("~/.gemini/google_accounts.json")
     else:
-        p = os.path.expanduser(f"~/.config/antigravity/profiles/{profile}/google_accounts.json")
+        p = os.path.join(config_base, "profiles", profile, "google_accounts.json")
         if not os.path.exists(p):
-            alt_p = os.path.expanduser(f"~/.config/antigravity/{profile}/google_accounts.json")
+            alt_p = os.path.join(config_base, profile, "google_accounts.json")
             if os.path.exists(alt_p):
                 p = alt_p
     if os.path.exists(p):
@@ -4831,14 +5134,21 @@ Examples:
         return 0
 
     sub = argv[0].lower() if argv else "list"
-    profiles_dir = os.path.expanduser("~/.config/antigravity/profiles")
+    profiles_dir = os.path.join(get_canonical_antigravity_dir(), "profiles")
     os.makedirs(profiles_dir, exist_ok=True)
+
+    def _make_authed_request(url: str, data: Optional[bytes] = None, headers: Optional[Dict[str, str]] = None, method: Optional[str] = None) -> urllib.request.Request:
+        h = dict(headers or {})
+        active_keys = get_configured_api_keys()
+        if active_keys:
+            h["Authorization"] = f"Bearer {next(iter(active_keys.keys()))}"
+        return urllib.request.Request(url, data=data, headers=h, method=method)
 
     if sub in ("list", "ls", "status"):
         live_data = None
         port = 8000
         try:
-            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/profiles")
+            req = _make_authed_request(f"http://127.0.0.1:{port}/v1/profiles")
             with urllib.request.urlopen(req, timeout=2.0) as resp:
                 if resp.status == 200:
                     live_data = json.loads(resp.read().decode("utf-8"))
@@ -4853,9 +5163,12 @@ Examples:
             all_profiles = get_available_profiles()
             summary = pm.get_status_summary()
 
-        print("\n" + "=" * 118)
-        print(f"{'Profile Name':<16} {'Google Account Email':<28} {'Status':<10} {'Concurrency':<14} {'Cooldown':<10} {'Est. Quota':<12} {'Success'}")
-        print("=" * 118)
+        print("\n" + "=" * 135)
+        print(f"{'Profile Name':<18} {'Google Account Email':<30} {'Status':<10} {'Concurrency':<14} {'Gemini Quota':<20} {'Model Mode':<24} {'Success'}")
+        print("=" * 135)
+        gemini_ready_ct = 0
+        sonnet_fallback_ct = 0
+        disabled_ct = 0
         for p in all_profiles:
             name = p or "default"
             email = get_profile_account_email(p)
@@ -4865,11 +5178,30 @@ Examples:
             max_c = info.get('max_concurrency', 1)
             c_status = info.get('concurrency_status', 'IDLE')
             concurrency_display = f"{in_fl}/{max_c} ({c_status})"
-            cooldown = f"{info.get('cooldown_seconds_remaining', 0)}s" if info.get("cooldown_seconds_remaining", 0) > 0 else "Ready"
+            gem_rem = info.get("gemini_cooldown_seconds_remaining", info.get("cooldown_seconds_remaining", 0))
+            is_fallback = info.get("sonnet_fallback_candidate", False)
             succ = info.get("success_count", 0)
             q_pct = f"{info.get('estimated_quota_percent', 100)}%"
-            print(f"{name:<16} {email:<28} {status:<10} {concurrency_display:<14} {cooldown:<10} {q_pct:<12} {succ}")
-        print("=" * 118 + "\n")
+
+            if status == "DISABLED":
+                disabled_ct += 1
+                gem_display = "DISABLED"
+                mode_display = "⚪ Disabled"
+            elif gem_rem > 0:
+                gem_display = f"Resets in {format_cooldown_duration(gem_rem)}"
+                if is_fallback:
+                    sonnet_fallback_ct += 1
+                    mode_display = "🟣 Sonnet 4.6 (Fallback)"
+                else:
+                    mode_display = "🔴 Exhausted"
+            else:
+                gemini_ready_ct += 1
+                gem_display = f"🟢 Ready ({q_pct})"
+                mode_display = "🟢 Gemini 3.8"
+
+            print(f"{name:<18} {email:<30} {status:<10} {concurrency_display:<14} {gem_display:<20} {mode_display:<24} {succ}")
+        print("=" * 135)
+        print(f"📊 Pool Status: 🟢 {gemini_ready_ct} Gemini Ready • 🟣 {sonnet_fallback_ct} Sonnet Fallback Active • ⚪ {disabled_ct} Disabled (Total: {len(all_profiles)} Profiles)\n")
         return 0
 
     elif sub in ("set", "use", "config", "order", "rotate"):
@@ -4897,7 +5229,7 @@ Examples:
             pass
 
         # 2. Update local bridge_config.json
-        cfg_file = os.path.expanduser("~/.config/antigravity/bridge_config.json")
+        cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
         try:
             cfg_data: Dict[str, Any] = {}
             if os.path.exists(cfg_file):
