@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const profileSelect = document.getElementById('profileSelect');
   const cliStatusEl = document.getElementById('cliStatus');
   const webChannelToggle = document.getElementById('webChannelToggle');
+  const canvasModeToggle = document.getElementById('canvasModeToggle');
   const webModelSelect = document.getElementById('webModelSelect');
   const saveBtn = document.getElementById('saveBtn');
   const reloadExtBtn = document.getElementById('reloadExtBtn');
@@ -96,6 +97,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     bridgeUrlInput.value = status.bridgeUrl || 'http://127.0.0.1:8000';
     webChannelToggle.checked = status.webEnabled !== false;
+    if (canvasModeToggle) {
+      canvasModeToggle.checked = status.canvasMode !== false;
+    }
     if (webModelSelect && status.preferredWebModel) {
       webModelSelect.value = status.preferredWebModel;
     }
@@ -126,13 +130,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     const bridgeUrl = bridgeUrlInput.value.trim() || 'http://127.0.0.1:8000';
     const assignedProfile = profileSelect.value;
     const webEnabled = webChannelToggle.checked;
-    const preferredWebModel = webModelSelect ? webModelSelect.value : 'gemini-2.0-flash-thinking';
+    const canvasMode = canvasModeToggle ? canvasModeToggle.checked : true;
+    const preferredWebModel = webModelSelect ? webModelSelect.value : 'gemini-3.8-flash-thinking';
 
     chrome.runtime.sendMessage({
       type: 'SET_CONFIG',
       bridgeUrl,
       assignedProfile,
       webEnabled,
+      canvasMode,
       preferredWebModel
     }, (res) => {
       if (res && res.success) {

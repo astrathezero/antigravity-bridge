@@ -12,13 +12,14 @@
 
   console.log('[Antigravity Content] Content script initialized.');
 
-  // 1. Inject page.js into page context once
+  // 1. Inject page.js into page context
   function injectPageScript() {
     try {
-      if (document.getElementById('antigravity-page-script')) return;
+      const existing = document.getElementById('antigravity-page-script');
+      if (existing) existing.remove();
       const script = document.createElement('script');
       script.id = 'antigravity-page-script';
-      script.src = chrome.runtime.getURL('page.js');
+      script.src = chrome.runtime.getURL('page.js?t=' + Date.now());
       (document.head || document.documentElement).appendChild(script);
     } catch (e) {
       console.warn('[Antigravity Content] Failed to inject page script:', e);
@@ -86,6 +87,11 @@
         type: 'JOB_ERROR',
         jobId: msg.jobId,
         error: msg.error
+      }).catch(() => {});
+    } else if (msg.type === 'AG_DEBUG') {
+      chrome.runtime.sendMessage({
+        type: 'DEBUG',
+        debug: msg.debug
       }).catch(() => {});
     }
   };

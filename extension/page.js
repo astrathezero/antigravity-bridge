@@ -314,131 +314,259 @@
     // Strip out any remaining localized speaker indicator like "Gemini บอกว่า" or "Gemini says:"
     mainText = mainText.replace(/^(?:Gemini\s*(?:บอกว่า|says)[\s:]*)+/i, '').trim();
 
+    // Strip Antigravity status footer that Gemini may append when Canvas session has prior context
+    // Pattern: "\n---\n> ⚡ Antigravity Profile: ..." or similar blockquote separator footers
+    mainText = mainText.replace(/\n[-—]{2,}\n(?:>\s*.*\n?)*$/m, '').trim();
+    // Also strip trailing blockquote lines with profile/quota info
+    mainText = mainText.replace(/(\n>[ \t]*[⚡🔋📊🟢].+)+$/g, '').trim();
+
     if (thoughtText && !mainText.startsWith('<think>')) {
-      return `<think>\n${thoughtText}\n</think>\n\n${mainText}`;
+      mainText = `<think>\n${thoughtText}\n</think>\n\n${mainText}`;
+    }
+
+    // Extract Canvas Workspace Content (if open and contains document/code)
+    const canvasContent = extractCanvasContent();
+    if (canvasContent && canvasContent.length > 30 && !mainText.includes(canvasContent.slice(0, 40))) {
+      mainText = `${mainText}\n\n${canvasContent}`;
     }
 
     return mainText;
   }
 
-  // 6.5 Intelligent Model Selection (Flash Thinking / Best Available Model)
+  // 6.3 Canvas Workspace Content Extraction
+  function extractCanvasContent() {
+    try {
+      const canvasPanels = document.querySelectorAll(
+        'canvas-workspace, canvas-editor, .canvas-container, [data-test-id*="canvas-content"], ' +
+        '.canvas-document, .canvas-code, .workspace-content, mat-card.canvas-card, .canvas-body'
+      );
+      for (const panel of canvasPanels) {
+        if (panel && (panel.offsetParent !== null || panel.getBoundingClientRect().width > 0)) {
+          const codeEl = panel.querySelector('code, pre, .monaco-editor, textarea, .code-viewer');
+          if (codeEl) {
+            const codeText = (codeEl.innerText || codeEl.textContent || '').trim();
+            if (codeText.length > 20) return codeText;
+          }
+          const text = (panel.innerText || panel.textContent || '').trim();
+          if (text.length > 20) return text;
+        }
+      }
+    } catch {}
+    return '';
+  }
+
+  // 6.4 Canvas Mode Enforcement
+  // IMPORTANT: Never use window.location.href here — it reloads the page and kills the in-flight job.
+  // Instead, only attempt in-page Canvas button click. If no canvas button found, proceed normally.
+  async function ensureCanvasMode() {
+    const isCanvasUrl = window.location.pathname.includes('/canvas');
+
+    if (isCanvasUrl) {
+      // Already on canvas path — nothing to do
+      console.log('[Antigravity Page] Already on /canvas path, skipping canvas navigation.');
+      return;
+    }
+
+    // Try to find and click the Canvas attachment/mode button in the input area
+    // (the button that prepares the response as a Canvas document)
+    const canvasBtn = Array.from(document.querySelectorAll(
+      'button, gem-button, [data-test-id], mat-icon-button'
+    )).find(b => {
+      const label = (b.innerText || b.getAttribute('aria-label') || b.getAttribute('data-test-id') || '').toLowerCase();
+      return /canvas|แคนวาส/i.test(label) &&
+             !label.includes('ยกเลิก') &&
+             !label.includes('deselect') &&
+             (b.offsetParent !== null || b.getBoundingClientRect().width > 0);
+    });
+
+    if (canvasBtn) {
+      console.log('[Antigravity Page] Found Canvas button, clicking to enable Canvas mode.');
+      canvasBtn.click();
+      await new Promise(r => setTimeout(r, 600));
+    } else {
+      console.log('[Antigravity Page] Canvas button not found in current view, proceeding without canvas navigation.');
+    }
+  }
+
+  // 6.5 New Chat Reset — always start fresh to avoid context bleed between API calls
+  async function ensureFreshChatIfNeeded() {
+    // Always try to start a new chat so each API call is context-free
+    // Look for the new chat / sparkle button in the sidebar
+    const newChatBtn = document.querySelector(
+      '[data-test-id="new-chat-button"], ' +
+      'gem-nav-list-item[data-test-id="new-chat-button"], ' +
+      'a[data-test-id="side-nav-sparkle-button"], ' +
+      'button[aria-label*="แชทใหม่" i], ' +
+      'button[aria-label*="New chat" i], ' +
+      'a[aria-label*="New chat" i]'
+    );
+
+    if (newChatBtn) {
+      console.log('[Antigravity Page] Clicking New Chat button for fresh conversation.');
+      newChatBtn.click();
+      await new Promise(r => setTimeout(r, 1500));
+    } else {
+      // Fallback: check if we're on a thread path and log a warning
+      const pathParts = window.location.pathname.replace(/\/u\/\d+\//, '/').split('/').filter(Boolean);
+      const isOnThread = pathParts.length > 1 && !pathParts.includes('canvas') && !pathParts.includes('app');
+      if (isOnThread) {
+        console.warn('[Antigravity Page] On a thread but could not find New Chat button. Response may include prior context.');
+      }
+    }
+  }
+
+  // 6.6 Intelligent Model Selection (Flash Thinking / Best Available Model)
   async function selectBestModel(targetModel) {
-    if (!targetModel || targetModel === 'gemini-web' || targetModel === 'default') {
-      return;
+    let desired = (targetModel || 'gemini-3.8-flash-thinking').toLowerCase().trim();
+    if (desired === 'gemini-web' || desired === 'default' || !desired) {
+      desired = 'gemini-3.8-flash-thinking';
     }
-    // If on an existing conversation thread, model switching is disabled by Gemini UI anyway
-    const pathParts = window.location.pathname.replace(/\/u\/\d+\//, '/').split('/').filter(Boolean);
-    if (pathParts.length > 1) {
-      return;
-    }
-    const desired = targetModel.toLowerCase();
-    const preferThinking = desired.includes('thinking') || desired.includes('flash');
+
+    // Determine intent flags — mutually exclusive categories
+    const wantPro = (desired.includes('pro') || desired.includes('advanced')) && !desired.includes('flash');
+    const wantProThinking = wantPro && (desired.includes('thinking') || desired.includes('extended') || desired.includes('reason'));
+    const wantFlashThinking = !wantPro && (desired.includes('thinking') || desired.includes('extended') || desired.includes('reason'));
+    const wantLite = desired.includes('lite') || desired.includes('fast');
+    const wantFlashStandard = !wantPro && !wantFlashThinking && !wantLite;
+
+    console.log(`[Antigravity Page] selectBestModel: desired="${desired}" → wantFlashThinking=${wantFlashThinking}, wantProThinking=${wantProThinking}, wantPro=${wantPro}, wantLite=${wantLite}`);
 
     const switcherSelectors = [
+      '[data-test-id="bard-mode-menu-button"]',
+      'button.model-picker-btn',
+      'button:has([data-test-id="logo-pill-label-container"])',
       '[data-test-id="model-switcher"]',
       'button[aria-label*="model" i]',
       'button[aria-label*="โมเดล" i]',
-      'button[aria-label*="select model" i]',
-      'button.model-picker-btn',
-      'button:has(.model-title)',
+      'button[aria-label*="โหมด" i]',
       'div[role="combobox"]'
     ];
 
     let switcherBtn = null;
     for (const sel of switcherSelectors) {
       try {
-        const candidates = document.querySelectorAll(sel);
-        for (const btn of candidates) {
-          if (btn && (btn.offsetParent !== null || btn.getBoundingClientRect().width > 0)) {
-            const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase();
-            if (
-              text.includes('flash') ||
-              text.includes('pro') ||
-              text.includes('thinking') ||
-              text.includes('advanced') ||
-              text.includes('gemini') ||
-              btn.getAttribute('data-test-id') === 'model-switcher'
-            ) {
-              switcherBtn = btn;
-              break;
-            }
-          }
+        const found = document.querySelector(sel);
+        if (found && (found.offsetParent !== null || found.getBoundingClientRect().width > 0)) {
+          switcherBtn = found;
+          break;
         }
-        if (switcherBtn) break;
       } catch {}
     }
 
     if (!switcherBtn) {
+      console.log('[Antigravity Page] Model switcher button not found on this view.');
       return;
     }
 
-    const currentText = (switcherBtn.innerText || switcherBtn.getAttribute('aria-label') || '').toLowerCase();
-    if (preferThinking && (currentText.includes('flash thinking') || currentText.includes('3.8 flash thinking') || currentText.includes('2.0 flash thinking') || currentText.includes('thinking'))) {
-      console.log(`[Antigravity Page] Already on desired model: ${currentText}`);
-      return;
+    const currentText = (switcherBtn.innerText + ' ' + (switcherBtn.getAttribute('aria-label') || '')).toLowerCase();
+
+    // Check if already in the correct target state (must be specific enough to avoid false positives)
+    if (wantFlashThinking) {
+      const alreadyFlashThinking = (currentText.includes('flash') || currentText.includes('3.8')) &&
+        (currentText.includes('thinking') || currentText.includes('extended') || currentText.includes('คิดที่นานขึ้น'));
+      if (alreadyFlashThinking) {
+        console.log(`[Antigravity Page] Already in Flash Thinking mode: "${currentText}"`);
+        return;
+      }
+    } else if (wantProThinking) {
+      const alreadyProThinking = currentText.includes('pro') &&
+        (currentText.includes('thinking') || currentText.includes('extended'));
+      if (alreadyProThinking) {
+        console.log(`[Antigravity Page] Already in Pro Thinking mode: "${currentText}"`);
+        return;
+      }
+    } else if (wantPro) {
+      if (currentText.includes('pro') && !currentText.includes('thinking')) {
+        console.log(`[Antigravity Page] Already in Pro mode: "${currentText}"`);
+        return;
+      }
+    } else if (wantLite) {
+      if (currentText.includes('lite')) {
+        console.log(`[Antigravity Page] Already in Flash-Lite mode: "${currentText}"`);
+        return;
+      }
+    } else if (wantFlashStandard) {
+      if (currentText.includes('flash') && !currentText.includes('thinking') && !currentText.includes('extended') && !currentText.includes('lite') && !currentText.includes('pro')) {
+        console.log(`[Antigravity Page] Already in standard Flash mode: "${currentText}"`);
+        return;
+      }
     }
 
+    // Open model menu
     switcherBtn.click();
-    await new Promise(r => setTimeout(r, 450));
+    await new Promise(r => setTimeout(r, 500));
 
     const itemSelectors = [
+      'gem-menu-item',
       '[role="menuitem"]',
       '[role="option"]',
-      'button.mat-mdc-menu-item',
-      '.mat-mdc-menu-panel button',
-      'div[role="listbox"] div[role="option"]',
-      '.model-item'
+      '.mat-mdc-menu-item',
+      'mat-option'
     ];
 
-    let menuItems = [];
-    for (const s of itemSelectors) {
-      try {
-        const found = document.querySelectorAll(s);
-        for (const it of found) {
-          if (it && (it.offsetParent !== null || it.getBoundingClientRect().width > 0)) {
-            menuItems.push(it);
-          }
-        }
-      } catch {}
-    }
+    const menuItems = Array.from(document.querySelectorAll(itemSelectors.join(',')))
+      .filter(it => it.offsetParent !== null || it.getBoundingClientRect().width > 0);
 
     if (menuItems.length === 0) {
       document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
       return;
     }
 
-    let bestItem = null;
-    let highestScore = -1;
+    // Log all menu items for debugging
+    console.log('[Antigravity Page] Available menu items:', menuItems.map(it => (it.innerText || '').trim().slice(0, 60)));
 
-    for (const item of menuItems) {
-      const label = (item.innerText || item.getAttribute('aria-label') || '').toLowerCase();
-      let score = 0;
-      if (label.includes('3.8 flash thinking') || label.includes('flash thinking') || label.includes('thinking')) {
-        score = 100;
-      } else if (label.includes('2.0 flash thinking')) {
-        score = 95;
-      } else if (label.includes('3.8 flash')) {
-        score = 90;
-      } else if (label.includes('2.0 flash')) {
-        score = 80;
-      } else if (label.includes('flash')) {
-        score = 70;
-      } else if (label.includes('pro') || label.includes('advanced')) {
-        score = 60;
-      }
+    let targetItem = null;
 
-      if (score > highestScore) {
-        highestScore = score;
-        bestItem = item;
+    if (wantFlashThinking) {
+      // Must match Flash/3.8 AND thinking/extended — explicitly exclude pro
+      targetItem = menuItems.find(it => {
+        const t = (it.innerText + ' ' + (it.getAttribute('aria-label') || '')).toLowerCase();
+        const hasThinking = t.includes('thinking') || t.includes('extended') || t.includes('คิดที่นานขึ้น');
+        const hasFlash = t.includes('flash') || t.includes('3.8');
+        const isPro = t.includes('pro') || t.includes('advanced') || t.includes('เหตุผลขั้นสูง');
+        return hasThinking && (hasFlash || !isPro);
+      });
+      // Fallback: any thinking item that is NOT pro
+      if (!targetItem) {
+        targetItem = menuItems.find(it => {
+          const t = (it.innerText + ' ' + (it.getAttribute('aria-label') || '')).toLowerCase();
+          const hasThinking = t.includes('thinking') || t.includes('extended') || t.includes('คิดที่นานขึ้น');
+          const isPro = t.includes('pro') || t.includes('advanced');
+          return hasThinking && !isPro;
+        });
       }
+    } else if (wantProThinking) {
+      targetItem = menuItems.find(it => {
+        const t = (it.innerText + ' ' + (it.getAttribute('aria-label') || '')).toLowerCase();
+        return t.includes('pro') && (t.includes('thinking') || t.includes('extended'));
+      });
+    } else if (wantPro) {
+      targetItem = menuItems.find(it => {
+        const t = (it.innerText + ' ' + (it.getAttribute('aria-label') || '')).toLowerCase();
+        return (t.includes('3.1 pro') || t.includes('pro') || t.includes('เหตุผลขั้นสูง')) && !t.includes('thinking');
+      });
+    } else if (wantLite) {
+      targetItem = menuItems.find(it => {
+        const t = (it.innerText + ' ' + (it.getAttribute('aria-label') || '')).toLowerCase();
+        return t.includes('lite') || t.includes('3.5 flash-lite');
+      });
+    } else {
+      // Standard Flash — no thinking, no lite, no pro
+      targetItem = menuItems.find(it => {
+        const t = (it.innerText + ' ' + (it.getAttribute('aria-label') || '')).toLowerCase();
+        return (t.includes('3.8 flash') || t.includes('flash')) &&
+               !t.includes('lite') && !t.includes('thinking') &&
+               !t.includes('extended') && !t.includes('คิด') && !t.includes('pro');
+      });
     }
 
-    if (bestItem && highestScore > 0) {
-      const chosenLabel = (bestItem.innerText || bestItem.getAttribute('aria-label') || '').trim();
-      console.log(`[Antigravity Page] Selected model: "${chosenLabel}" (score=${highestScore})`);
-      bestItem.click();
-      await new Promise(r => setTimeout(r, 400));
+    if (targetItem) {
+      const chosenLabel = (targetItem.innerText || targetItem.getAttribute('aria-label') || '').trim();
+      console.log(`[Antigravity Page] Switching to model: "${chosenLabel}"`);
+      targetItem.click();
+      await new Promise(r => setTimeout(r, 600));
     } else {
+      console.warn(`[Antigravity Page] No menu item matched for: "${desired}". Items: ${menuItems.map(it => (it.innerText || '').trim().slice(0, 40)).join(' | ')}`);
       document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
     }
   }
@@ -448,7 +576,7 @@
     const jobId = job.jobId || job.job_id;
     activeJobId = jobId;
 
-    console.log(`[Antigravity Page] Starting job ${jobId} (model=${job.model || 'default'})`);
+    console.log(`[Antigravity Page] Starting job ${jobId} (model=${job.model || 'default'}, canvas=${job.canvas})`);
 
     if (activeObserver) {
       activeObserver.disconnect();
@@ -459,7 +587,21 @@
       idleTimer = null;
     }
 
-    // 0. Ensure best model (Flash Thinking by default)
+    // 0. Ensure fresh chat if on locked thread
+    try {
+      await ensureFreshChatIfNeeded();
+    } catch (fErr) {}
+
+    // 0.1 Ensure Canvas mode if requested
+    if (job.canvas !== false) {
+      try {
+        await ensureCanvasMode();
+      } catch (cErr) {
+        console.warn('[Antigravity Page] Canvas mode setup warning:', cErr);
+      }
+    }
+
+    // 0.2 Ensure target model (Flash Thinking by default)
     try {
       await selectBestModel(job.model || 'gemini-3.8-flash-thinking');
     } catch (mErr) {
@@ -471,7 +613,7 @@
       window.postMessage({
         type: 'AG_JOB_ERROR',
         jobId,
-        error: 'Unable to locate Gemini prompt input box. Please verify you are on gemini.google.com/app.'
+        error: 'Unable to locate Gemini prompt input box. Please verify you are on gemini.google.com/app or /canvas.'
       }, '*');
       return;
     }

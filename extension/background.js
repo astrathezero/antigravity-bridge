@@ -55,11 +55,12 @@ async function ensureOffscreenDocument() {
 // 3. Storage & Configuration Helpers
 async function getConfig() {
   try {
-    const res = await chrome.storage.local.get(['bridgeUrl', 'assignedProfile', 'webEnabled', 'preferredWebModel']);
+    const res = await chrome.storage.local.get(['bridgeUrl', 'assignedProfile', 'webEnabled', 'canvasMode', 'preferredWebModel']);
     return {
       bridgeUrl: res.bridgeUrl || DEFAULT_BRIDGE,
       assignedProfile: res.assignedProfile || '',
       webEnabled: res.webEnabled !== false,
+      canvasMode: res.canvasMode !== false,
       preferredWebModel: res.preferredWebModel || 'gemini-3.8-flash-thinking'
     };
   } catch {
@@ -67,6 +68,7 @@ async function getConfig() {
       bridgeUrl: DEFAULT_BRIDGE,
       assignedProfile: '',
       webEnabled: true,
+      canvasMode: true,
       preferredWebModel: 'gemini-3.8-flash-thinking'
     };
   }
@@ -292,14 +294,18 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
     return;
   }
 
-  if (!job.model || job.model === 'default') {
-    job.model = 'gemini-web';
+  if (!job.model || job.model === 'default' || job.model === 'gemini-web') {
+    job.model = cfg.preferredWebModel || 'gemini-3.8-flash-thinking';
+  }
+
+  if (job.canvas === undefined) {
+    job.canvas = cfg.canvasMode !== false;
   }
 
   const targetProfile = job.profile || assignedProfile;
   const targetEmail = (assignedEmail || '').toLowerCase();
 
-  console.log(`[Antigravity BG] Dispatching job ${jobId} to profile=${targetProfile} (email=${targetEmail})`);
+  console.log(`[Antigravity BG] Dispatching job ${jobId} to profile=${targetProfile} (model=${job.model}, canvas=${job.canvas})`);
 
   // Step 1: Find tab belonging to this profile / email
   let targetTabId = null;
@@ -333,7 +339,10 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
   // Step 3: Open tab if no tab exists
   if (!targetTabId) {
     const isU1 = /somporn/i.test(targetProfile) || /somporn/i.test(targetEmail);
-    const targetUrl = isU1 ? 'https://gemini.google.com/u/1/app' : 'https://gemini.google.com/app';
+    const useCanvas = job.canvas !== false;
+    const targetUrl = isU1
+      ? (useCanvas ? 'https://gemini.google.com/u/1/canvas' : 'https://gemini.google.com/u/1/app')
+      : (useCanvas ? 'https://gemini.google.com/canvas' : 'https://gemini.google.com/app');
     const newTab = await chrome.tabs.create({ url: targetUrl, active: false });
     targetTabId = newTab.id;
     await new Promise(r => setTimeout(r, 4000));
@@ -512,6 +521,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       job_id: message.jobId,
       error: message.error
     });
+  } else if (message.type === 'DEBUG') {
+    postToBridge('/extension/debug', message.debug);
   } else if (message.type === 'DETECTED_EMAIL') {
     const tabId = sender.tab?.id;
     const tabUrl = sender.tab?.url || '';
@@ -553,6 +564,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         bridgeUrl: cfg.bridgeUrl,
         assignedProfile: cfg.assignedProfile,
         webEnabled: cfg.webEnabled,
+        canvasMode: cfg.canvasMode !== false,
         preferredWebModel: cfg.preferredWebModel
       });
     });
@@ -562,6 +574,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       bridgeUrl: message.bridgeUrl,
       assignedProfile: message.assignedProfile,
       webEnabled: message.webEnabled !== false,
+      canvasMode: message.canvasMode !== false,
       preferredWebModel: message.preferredWebModel || 'gemini-3.8-flash-thinking'
     }, () => {
       sendResponse({ success: true });
