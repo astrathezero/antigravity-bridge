@@ -5,10 +5,11 @@
 (() => {
   'use strict';
 
-  if (window.__ANTIGRAVITY_PAGE_LOADED__) return;
-  window.__ANTIGRAVITY_PAGE_LOADED__ = true;
+  // Support hot replacement without blocking newer extension versions
+  const GEN = (window.__ANTIGRAVITY_PAGE_GEN__ ?? 0) + 1;
+  window.__ANTIGRAVITY_PAGE_GEN__ = GEN;
 
-  console.log('[Antigravity Page] Initialized in Gemini Web context');
+  console.log(`[Antigravity Page] Initialized in Gemini Web context (gen=${GEN})`);
 
   let activeObserver = null;
   let activeJobId = null;
@@ -16,7 +17,6 @@
 
   // 1. Detect Logged-in Google Account Email
   function detectAccountEmail() {
-    // Strategy A: Check user account avatar buttons and links with aria-labels
     const selectors = [
       'a[aria-label*="@"]',
       'button[aria-label*="@"]',
@@ -29,17 +29,18 @@
     const emailRegex = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/;
 
     for (const sel of selectors) {
-      const elements = document.querySelectorAll(sel);
-      for (const el of elements) {
-        const text = (el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('data-profile-email') || el.innerText || '');
-        const match = text.match(emailRegex);
-        if (match && match[1]) {
-          return match[1].toLowerCase();
+      try {
+        const elements = document.querySelectorAll(sel);
+        for (const el of elements) {
+          const text = (el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('data-profile-email') || el.innerText || '');
+          const match = text.match(emailRegex);
+          if (match && match[1]) {
+            return match[1].toLowerCase();
+          }
         }
-      }
+      } catch {}
     }
 
-    // Strategy B: Search entire document meta and raw text for email pattern
     const metaUser = document.querySelector('meta[name="user-email"]');
     if (metaUser && metaUser.content) {
       return metaUser.content.toLowerCase();
@@ -48,8 +49,9 @@
     return '';
   }
 
-  // Periodic account email detection announcement
+  // Periodic account email announcement
   setInterval(() => {
+    if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
     const email = detectAccountEmail();
     if (email) {
       window.postMessage({ type: 'AG_DETECTED_EMAIL', email }, '*');
@@ -59,10 +61,13 @@
   // 2. Locate the prompt input element
   function findInputElement() {
     const candidates = [
+      'input-container rich-textarea .ql-editor',
       'rich-textarea .ql-editor',
-      'rich-textarea div[contenteditable="true"]',
-      'div[contenteditable="true"][role="textbox"]',
+      'chat-window .textarea',
+      'input-container [contenteditable="true"][role="textbox"]',
+      'chat-window [contenteditable="true"][role="textbox"]',
       'div.ql-editor[contenteditable="true"]',
+      'div[contenteditable="true"][role="textbox"]',
       'div[contenteditable="true"]',
       'textarea[aria-label*="prompt" i]',
       'rich-textarea',
@@ -70,34 +75,76 @@
     ];
 
     for (const sel of candidates) {
-      const el = document.querySelector(sel);
-      if (el && el.offsetParent !== null) { // must be visible
-        return el;
-      }
+      try {
+        const elements = Array.from(document.querySelectorAll(sel));
+        const visible = elements.find(el => el.offsetParent !== null || el.getBoundingClientRect().width > 0);
+        if (visible) return visible;
+        if (elements[0]) return elements[0];
+      } catch {}
     }
     return null;
   }
 
   // 3. Locate the send button
-  function findSendButton() {
-    const sendSelectors = [
-      'button[aria-label*="Send" i]',
-      'button[aria-label*="ส่ง" i]',
-      'button.send-button',
-      'button[data-test-id="send-button"]',
-      '.send-button-container button',
-      'button:has(mat-icon[fonticon="send"])'
-    ];
+  const GEMINI_SEND_BUTTON_SELECTORS = [
+    'chat-window button.send-button',
+    'button.send-button',
+    'button[aria-label*="Send" i]',
+    'button[aria-label*="ส่ง" i]',
+    'button[aria-label*="送出" i]',
+    'button[aria-label*="傳送" i]',
+    'button[aria-label*="Submit" i]',
+    'button[data-test-id*="send" i]',
+    'button[data-testid*="send" i]',
+    '.send-button-container button',
+    'button:has(mat-icon[fonticon="send"])',
+    'button:has([data-mat-icon-name="send"])'
+  ];
 
-    for (const sel of sendSelectors) {
+  function isSendButtonEnabled(btn) {
+    if (!btn) return false;
+    if (btn.disabled) return false;
+    if (btn.getAttribute('aria-disabled') === 'true') return false;
+    if (btn.classList.contains('mat-mdc-button-disabled')) return false;
+    return true;
+  }
+
+  function isLikelySendButton(button) {
+    const ariaLabel = (button.getAttribute('aria-label') || '').toLowerCase();
+    const testId = (
+      button.getAttribute('data-test-id') ||
+      button.getAttribute('data-testid') ||
+      ''
+    ).toLowerCase();
+    const textContent = (button.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const icon = button.querySelector('mat-icon, [data-mat-icon-name], [fonticon]');
+    const iconName = (
+      icon?.getAttribute('fonticon') ||
+      icon?.getAttribute('data-mat-icon-name') ||
+      icon?.textContent ||
+      ''
+    ).toLowerCase();
+
+    const sendTokens = ['send', 'submit', 'ส่ง', 'ส่งข้อความ', '送出', '傳送', '提交'];
+    return sendTokens.some((token) =>
+      ariaLabel.includes(token) ||
+      testId.includes(token) ||
+      textContent === token ||
+      iconName.includes(token)
+    );
+  }
+
+  function findSendButton() {
+    for (const sel of GEMINI_SEND_BUTTON_SELECTORS) {
       try {
         const btn = document.querySelector(sel);
-        if (btn && btn.offsetParent !== null && !btn.disabled) {
+        if (btn && (btn.offsetParent !== null || btn.getBoundingClientRect().width > 0)) {
           return btn;
         }
       } catch {}
     }
-    return null;
+    const allButtons = Array.from(document.querySelectorAll('button'));
+    return allButtons.find(btn => (btn.offsetParent !== null || btn.getBoundingClientRect().width > 0) && isLikelySendButton(btn)) || null;
   }
 
   // 4. Check if Gemini is actively generating a response (Stop button present)
@@ -105,46 +152,69 @@
     const stopSelectors = [
       'button[aria-label*="Stop" i]',
       'button[aria-label*="หยุด" i]',
+      'button[aria-label*="停止" i]',
       'button.stop-button',
       'button:has(mat-icon[fonticon="stop"])',
+      'button:has([data-mat-icon-name="stop"])',
       '[aria-label*="Stop response" i]'
     ];
     for (const sel of stopSelectors) {
       try {
         const btn = document.querySelector(sel);
-        if (btn && btn.offsetParent !== null) {
+        if (btn && (btn.offsetParent !== null || btn.getBoundingClientRect().width > 0)) {
           return true;
         }
       } catch {}
     }
+
+    const allButtons = Array.from(document.querySelectorAll('button'));
+    for (const btn of allButtons) {
+      if (btn.offsetParent === null && btn.getBoundingClientRect().width === 0) continue;
+      const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+      const icon = btn.querySelector('mat-icon, [data-mat-icon-name], [fonticon]');
+      const iconName = (icon?.getAttribute('fonticon') || icon?.getAttribute('data-mat-icon-name') || icon?.textContent || '').toLowerCase();
+      if (aria.includes('stop') || aria.includes('หยุด') || aria.includes('停止') || iconName.includes('stop')) {
+        return true;
+      }
+    }
     return false;
   }
 
-  // 5. Get the latest response container
-  function getLatestResponseElement() {
+  // 5. Get all response blocks on the page
+  function getAllResponseBlocks() {
     const selectors = [
-      'message-content',
-      '.model-response-text',
+      'model-response',
+      'response-container',
+      '.model-response-container',
       '[data-test-id="model-response"]',
-      '.response-container-content',
-      '.markdown',
-      'model-response'
+      'message-content',
+      '.conversation-container:has(message-content)',
+      '.conversation-container'
     ];
 
     for (const sel of selectors) {
-      const items = document.querySelectorAll(sel);
-      if (items.length > 0) {
-        return items[items.length - 1];
-      }
+      try {
+        const found = Array.from(document.querySelectorAll(sel));
+        if (found.length > 0) {
+          if (sel === '.conversation-container') {
+            const assistantOnly = found.filter(el => !el.querySelector('user-query, .user-query, .query-text, .query-text-line'));
+            if (assistantOnly.length > 0) return assistantOnly;
+          } else {
+            return found;
+          }
+        }
+      } catch {}
     }
-    return null;
+    return [];
   }
 
   // 6. Clean and format response text (with Flash Thinking process extraction)
   function extractCleanText(el) {
     if (!el) return '';
 
-    // Check for thinking / reasoning containers (e.g. Gemini 2.0 Flash Thinking thoughts block)
+    const mdChild = el.querySelector('.markdown, message-content, .response-container-content');
+    const target = mdChild || el;
+
     const thoughtSelectors = [
       '.thought-content',
       '.thoughts-container',
@@ -168,9 +238,8 @@
       } catch {}
     }
 
-    let mainText = (el.innerText || el.textContent || '').trim();
+    let mainText = (target.innerText || target.textContent || '').trim();
 
-    // If thoughtText is isolated, format as standard reasoning block
     if (thoughtText && !mainText.startsWith('<think>')) {
       const cleanedMain = mainText.replace(thoughtText, '').trim();
       if (cleanedMain) {
@@ -186,7 +255,6 @@
     const desired = (targetModel || 'gemini-3.8-flash-thinking').toLowerCase();
     const preferThinking = desired.includes('thinking') || desired.includes('flash') || desired.includes('web');
 
-    // Selectors for model switcher dropdown in Gemini Web UI
     const switcherSelectors = [
       '[data-test-id="model-switcher"]',
       'button[aria-label*="model" i]',
@@ -203,7 +271,7 @@
       try {
         const candidates = document.querySelectorAll(sel);
         for (const btn of candidates) {
-          if (btn && btn.offsetParent !== null) {
+          if (btn && (btn.offsetParent !== null || btn.getBoundingClientRect().width > 0)) {
             const text = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase();
             if (
               text.includes('flash') ||
@@ -227,17 +295,14 @@
     }
 
     const currentText = (switcherBtn.innerText || switcherBtn.getAttribute('aria-label') || '').toLowerCase();
-    // If already on Flash Thinking, no need to toggle
     if (preferThinking && (currentText.includes('flash thinking') || currentText.includes('3.8 flash thinking') || currentText.includes('2.0 flash thinking') || currentText.includes('thinking'))) {
       console.log(`[Antigravity Page] Already on desired model: ${currentText}`);
       return;
     }
 
-    // Open model menu
     switcherBtn.click();
     await new Promise(r => setTimeout(r, 450));
 
-    // Look for options in open menu
     const itemSelectors = [
       '[role="menuitem"]',
       '[role="option"]',
@@ -252,7 +317,7 @@
       try {
         const found = document.querySelectorAll(s);
         for (const it of found) {
-          if (it && it.offsetParent !== null) {
+          if (it && (it.offsetParent !== null || it.getBoundingClientRect().width > 0)) {
             menuItems.push(it);
           }
         }
@@ -264,7 +329,6 @@
       return;
     }
 
-    // Score candidates: 3.8 Flash Thinking / Flash Thinking > 2.0 Flash Thinking > Flash > Pro
     let bestItem = null;
     let highestScore = -1;
 
@@ -303,6 +367,8 @@
 
   // 7. Execute Job
   async function executeJob(job) {
+    if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
+
     const jobId = job.jobId || job.job_id;
     activeJobId = jobId;
 
@@ -319,7 +385,7 @@
 
     // 0. Ensure best model (Flash Thinking by default)
     try {
-      await selectBestModel(job.model || 'gemini-2.0-flash-thinking');
+      await selectBestModel(job.model || 'gemini-3.8-flash-thinking');
     } catch (mErr) {
       console.warn('[Antigravity Page] Model selection warning:', mErr);
     }
@@ -334,85 +400,112 @@
       return;
     }
 
-    // Set input content
+    // 1. Snapshot response blocks BEFORE sending prompt
+    const baselineBlocks = getAllResponseBlocks();
+    const baselineCount = baselineBlocks.length;
+
+    // 2. Set input content
     inputEl.focus();
     try {
       if (inputEl.isContentEditable) {
-        document.execCommand('selectAll', false, null);
-        const inserted = document.execCommand('insertText', false, job.prompt);
-        if (!inserted || !inputEl.innerText.trim()) {
-          inputEl.innerHTML = '';
+        const lines = (job.prompt || '').split('\n');
+        inputEl.innerHTML = '';
+        lines.forEach((line) => {
           const p = document.createElement('p');
-          p.textContent = job.prompt;
+          p.innerText = line;
           inputEl.appendChild(p);
-        }
+        });
+
+        try {
+          const q = inputEl.__quill || inputEl.closest('rich-textarea')?.__quill;
+          if (q && typeof q.setText === 'function') {
+            q.setText(job.prompt);
+          }
+        } catch {}
       } else {
         inputEl.value = job.prompt;
       }
-      
-      inputEl.dispatchEvent(new Event('beforeinput', { bubbles: true }));
-      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-      inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+
+      inputEl.dispatchEvent(new Event('beforeinput', { bubbles: true, cancelable: true }));
+      inputEl.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      inputEl.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
     } catch (e) {
       console.warn('[Antigravity Page] Input dispatch error, fallback direct property:', e);
       inputEl.textContent = job.prompt;
     }
 
-    await new Promise(r => setTimeout(r, 400));
+    // 3. Wait for send button to become enabled and click it
+    let sendBtn = null;
+    const submitStart = Date.now();
+    while (Date.now() - submitStart < 3500) {
+      sendBtn = findSendButton();
+      if (sendBtn && isSendButtonEnabled(sendBtn)) {
+        break;
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
 
-    // Click send button
-    let sendBtn = findSendButton();
-    if (sendBtn && !sendBtn.disabled) {
+    if (sendBtn && isSendButtonEnabled(sendBtn)) {
+      sendBtn.focus();
       sendBtn.click();
     } else {
-      // Fallback to Enter keydown
+      // Fallback: Dispatch Enter keydown
       inputEl.dispatchEvent(new KeyboardEvent('keydown', {
         key: 'Enter',
         code: 'Enter',
         keyCode: 13,
         which: 13,
-        bubbles: true
+        bubbles: true,
+        cancelable: true
       }));
       await new Promise(r => setTimeout(r, 300));
       sendBtn = findSendButton();
-      if (sendBtn && !sendBtn.disabled) {
+      if (sendBtn) {
         sendBtn.click();
       }
     }
 
-    // Wait for generation to start and capture response
-    const baselineResponseCount = document.querySelectorAll('message-content, .model-response-text').length;
+    // 4. Wait for generation to start and capture response container
     let targetResponseEl = null;
     let fullText = '';
     let emittedLength = 0;
     const startTime = Date.now();
     const timeoutMs = (job.timeout || 600) * 1000;
 
-    // Wait until new response element is attached to DOM
-    while (!targetResponseEl && (Date.now() - startTime < 30000)) {
-      await new Promise(r => setTimeout(r, 300));
-      const currentResponses = document.querySelectorAll('message-content, .model-response-text, model-response');
-      if (currentResponses.length > baselineResponseCount) {
-        targetResponseEl = currentResponses[currentResponses.length - 1];
+    while (!targetResponseEl && (Date.now() - startTime < 45000)) {
+      await new Promise(r => setTimeout(r, 350));
+      const currentBlocks = getAllResponseBlocks();
+      if (currentBlocks.length > baselineCount) {
+        targetResponseEl = currentBlocks[currentBlocks.length - 1];
         break;
       }
-      // If stop button is visible, latest element is our target
       if (isGenerating()) {
-        targetResponseEl = getLatestResponseElement();
-        if (targetResponseEl) break;
+        if (currentBlocks.length > 0) {
+          targetResponseEl = currentBlocks[currentBlocks.length - 1];
+          break;
+        }
       }
     }
 
     if (!targetResponseEl) {
-      // Fallback: use getLatestResponseElement directly
-      targetResponseEl = getLatestResponseElement();
+      const currentBlocks = getAllResponseBlocks();
+      if (currentBlocks.length > 0) {
+        targetResponseEl = currentBlocks[currentBlocks.length - 1];
+      }
+    }
+
+    if (!targetResponseEl) {
+      const mainChat = document.querySelector('chat-window, main, infinite-scroller, .chat-history');
+      if (mainChat) {
+        targetResponseEl = mainChat;
+      }
     }
 
     if (!targetResponseEl) {
       window.postMessage({
         type: 'AG_JOB_ERROR',
         jobId,
-        error: 'Timeout waiting for Gemini response container to appear.'
+        error: `Timeout waiting for Gemini response container to appear. (url=${window.location.pathname}, baseline=${baselineCount}, isGenerating=${isGenerating()})`
       }, '*');
       return;
     }
@@ -420,6 +513,7 @@
     console.log(`[Antigravity Page] Attached observer to response container for job ${jobId}`);
 
     const emitDeltas = () => {
+      if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
       const currentFullText = extractCleanText(targetResponseEl);
       if (currentFullText.length > emittedLength) {
         const delta = currentFullText.slice(emittedLength);
@@ -434,6 +528,7 @@
     };
 
     const finishJob = () => {
+      if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
       if (activeObserver) {
         activeObserver.disconnect();
         activeObserver = null;
@@ -458,7 +553,6 @@
 
       if (idleTimer) clearTimeout(idleTimer);
 
-      // Check if finished: no stop button and idle for 1200ms
       if (!isGenerating()) {
         idleTimer = setTimeout(() => {
           if (!isGenerating()) {
@@ -474,8 +568,12 @@
       characterData: true
     });
 
-    // Safety polling loop to catch stop button toggle or page errors
     const pollInterval = setInterval(() => {
+      if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) {
+        clearInterval(pollInterval);
+        return;
+      }
+
       emitDeltas();
 
       if (Date.now() - startTime > timeoutMs) {
@@ -491,7 +589,6 @@
       }
 
       if (!isGenerating() && emittedLength > 0) {
-        // Stop button gone and we have content
         if (!idleTimer) {
           idleTimer = setTimeout(() => {
             if (!isGenerating()) {
@@ -506,6 +603,7 @@
 
   // Listen for execution commands from content script
   window.addEventListener('message', (event) => {
+    if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
     if (event.source !== window || !event.data) return;
 
     if (event.data.type === 'AG_EXECUTE_JOB' && event.data.job) {

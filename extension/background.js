@@ -86,15 +86,29 @@ async function postToBridge(path, data) {
 }
 
 // 4. Tab Discovery and Creation for gemini.google.com
-async function findOrOpenGeminiTab() {
+async function findOrOpenGeminiTab(job) {
+  const cfg = await getConfig();
   const tabs = await chrome.tabs.query({ url: ['https://gemini.google.com/*', 'https://*.gemini.google.com/*'] });
   if (tabs.length > 0) {
-    const active = tabs.find(t => !t.discarded && t.status === 'complete');
-    return active || tabs[0];
+    // Account-aware tab matching: Google accounts often use /u/1/ for secondary profiles
+    if (cfg.activeEmail && /somporn/i.test(cfg.activeEmail)) {
+      const u1Tab = tabs.find(t => t.url && t.url.includes('/u/1/') && !t.discarded);
+      if (u1Tab) return u1Tab;
+    } else if (cfg.activeEmail && /attasit/i.test(cfg.activeEmail)) {
+      const defaultTab = tabs.find(t => t.url && !t.url.includes('/u/1/') && !t.discarded);
+      if (defaultTab) return defaultTab;
+    }
+
+    const nonDiscarded = tabs.find(t => !t.discarded && t.status === 'complete');
+    if (nonDiscarded) return nonDiscarded;
+    return tabs[0];
   }
 
   // No tab exists, open one
-  const newTab = await chrome.tabs.create({ url: 'https://gemini.google.com/app', active: false });
+  const targetUrl = (cfg.activeEmail && /somporn/i.test(cfg.activeEmail))
+    ? 'https://gemini.google.com/u/1/app'
+    : 'https://gemini.google.com/app';
+  const newTab = await chrome.tabs.create({ url: targetUrl, active: false });
   // Wait for tab to complete loading
   await new Promise((resolve) => {
     const listener = (tabId, info) => {
@@ -130,7 +144,7 @@ async function handleJobEvent(job) {
   console.log(`[Antigravity BG] Processing job ${jobId} (profile=${job.profile}, model=${job.model})`);
 
   try {
-    const tab = await findOrOpenGeminiTab();
+    const tab = await findOrOpenGeminiTab(job);
     if (!tab || !tab.id) {
       throw new Error('Could not acquire or open a gemini.google.com tab.');
     }

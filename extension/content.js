@@ -8,12 +8,19 @@
   console.log('[Antigravity Content] Injecting page script...');
 
   // 1. Inject page.js into page context
-  const script = document.createElement('script');
-  script.src = chrome.runtime.getURL('page.js');
-  script.onload = () => {
-    script.remove();
-  };
-  (document.head || document.documentElement).appendChild(script);
+  function injectPageScript() {
+    try {
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('page.js');
+      script.onload = () => {
+        script.remove();
+      };
+      (document.head || document.documentElement).appendChild(script);
+    } catch (e) {
+      console.warn('[Antigravity Content] Failed to inject page script:', e);
+    }
+  }
+  injectPageScript();
 
   // 2. Keepalive port to background worker
   let port = null;
@@ -84,10 +91,13 @@
     if (!message || !message.type) return;
 
     if (message.type === 'EXECUTE_JOB') {
-      window.postMessage({
-        type: 'AG_EXECUTE_JOB',
-        job: message.job
-      }, '*');
+      injectPageScript();
+      setTimeout(() => {
+        window.postMessage({
+          type: 'AG_EXECUTE_JOB',
+          job: message.job
+        }, '*');
+      }, 50);
       sendResponse({ status: 'dispatched' });
     } else if (message.type === 'CHECK_EMAIL') {
       window.postMessage({
