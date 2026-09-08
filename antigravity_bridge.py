@@ -3704,14 +3704,15 @@ def execute_cli_command(
 
 class CLIExecutionResult(tuple):
     """Result tuple of CLI execution supporting backward-compatible 2-element unpacking (output, profile)
-    while exposing effective_model attribute."""
-    def __new__(cls, output: str, profile: Optional[str], effective_model: Optional[str] = None):
+    while exposing effective_model and channel attributes."""
+    def __new__(cls, output: str, profile: Optional[str], effective_model: Optional[str] = None, channel: str = "cli"):
         return super().__new__(cls, (output, profile))
 
-    def __init__(self, output: str, profile: Optional[str], effective_model: Optional[str] = None):
+    def __init__(self, output: str, profile: Optional[str], effective_model: Optional[str] = None, channel: str = "cli"):
         self.output = output
         self.profile = profile
         self.effective_model = effective_model or "default"
+        self.channel = channel  # "cli" or "web"
 
 
 def execute_web_command(
@@ -3770,7 +3771,7 @@ def execute_web_command(
         raise RuntimeError(f"Web Extension Execution Error: {job.error}")
 
     result_text = job.final_output if (not output_callback and job.final_output) else ("".join(accumulated) or job.final_output)
-    return CLIExecutionResult(result_text, prof, effective_model=model_name or "gemini-web")
+    return CLIExecutionResult(result_text, prof, effective_model=model_name or "gemini-web", channel="web")
 
 
 def execute_cli_with_fallback(
@@ -3983,7 +3984,7 @@ def execute_cli_with_fallback(
                 )
             mgr.mark_success(profile, model=effective_model)
             mgr.set_last_execution_model(profile, effective_model or "default")
-            return CLIExecutionResult(output, profile, effective_model)
+            return CLIExecutionResult(output, profile, effective_model, channel="cli")
         except Exception as exc:
             err_str = str(exc)
             logger.warning("Profile '%s' execution failed: %s", profile_key, exc)
@@ -4013,6 +4014,7 @@ def execute_cli_with_fallback(
                             )
                             mgr.mark_success(profile, model="gemini-web")
                             mgr.set_last_execution_model(profile, DEFAULT_WEB_FALLBACK_MODEL)
+                            web_result.channel = "web"  # ensure channel tag
                             return web_result
                         except Exception as w_exc:
                             logger.warning("Immediate Web fallback failed for profile '%s': %s", profile_key, w_exc)
@@ -4047,6 +4049,7 @@ def execute_cli_with_fallback(
                 )
                 mgr.mark_success(web_prof, model="gemini-web")
                 mgr.set_last_execution_model(web_prof, DEFAULT_WEB_FALLBACK_MODEL)
+                web_result.channel = "web"  # ensure channel tag
                 return web_result
             except Exception as net_exc:
                 logger.warning("Global Web Safety Net failed on profile '%s': %s", web_prof or "default", net_exc)
@@ -5030,13 +5033,14 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             is_ext_delta = path in ("/extension/delta", "/api/web/delta")
             is_ext_done = path in ("/extension/done", "/api/web/done")
             is_ext_error = path in ("/extension/error", "/api/web/error")
+            is_ext_debug = path in ("/extension/debug", "/api/web/debug")
 
-            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check or is_profiles_config or is_profiles_disable or is_profiles_enable or is_profiles_toggle or is_keys_create or is_keys_revoke or is_ext_delta or is_ext_done or is_ext_error):
+            if not (is_openai or is_anthropic or is_image_gen or is_profiles_reset or is_profiles_check or is_profiles_config or is_profiles_disable or is_profiles_enable or is_profiles_toggle or is_keys_create or is_keys_revoke or is_ext_delta or is_ext_done or is_ext_error or is_ext_debug):
                 self._send_json_response({"error": "Not Found"}, status_code=404)
                 return
 
             is_loopback = getattr(self, "client_address", ("",))[0] in ("127.0.0.1", "::1", "localhost")
-            is_ext_req = is_ext_delta or is_ext_done or is_ext_error
+            is_ext_req = is_ext_delta or is_ext_done or is_ext_error or is_ext_debug
             if not (is_ext_req and is_loopback) and not self._authorized():
                 self._send_json_response(
                     {
@@ -5246,6 +5250,11 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 err_msg = req_json.get("error", "Unknown browser error")
                 success = GLOBAL_WEB_CLIENT_MANAGER.handle_error(str(job_id), str(err_msg))
                 self._send_json_response({"status": "ok" if success else "unknown_job"})
+                return
+
+            if is_ext_debug:
+                logger.info("[EXTENSION DEBUG] %s", json.dumps(req_json, ensure_ascii=False))
+                self._send_json_response({"status": "ok"})
                 return
 
             if is_profiles_reset:
@@ -5827,11 +5836,21 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             if openai_tool_calls:
                 message_obj["tool_calls"] = openai_tool_calls
 
+            # Determine channel from result object (cli or web)
+            _exec_channel = getattr(output_text, "channel", None) if output_text is not None else None
+            _exec_channel = _exec_channel or ("web" if (model and "web" in model) else "cli")
+            _channel_suffix = f"-{_exec_channel}"  # e.g. "-cli" or "-web"
+            _profile_used = used_profile or "default"
+            _effective_model = actual_model or model or "default"
+            # Model field: append channel suffix so clients can see routing at a glance
+            _response_model = f"{_effective_model}{_channel_suffix}"
+
             response_payload = {
                 "id": completion_id,
                 "object": "chat.completion",
                 "created": created_ts,
-                "model": model,
+                "model": _response_model,
+                "system_fingerprint": f"agy-{_exec_channel}|profile:{_profile_used}|model:{_effective_model}",
                 "choices": [
                     {
                         "index": 0,
