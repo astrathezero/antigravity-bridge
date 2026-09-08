@@ -20,3 +20,8 @@ deploy.env
 deploy.local.sh
 local_patch.*
 *.service.local
+
+# Staging & Backup Files
+*.staging
+*.bak
+*.bak.*
