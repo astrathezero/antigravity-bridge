@@ -215,6 +215,25 @@
 
   // 5. Get all response blocks on the page
   function getAllResponseBlocks() {
+    // Strategy 1: Find by action buttons (Copy / Good response / Modify) present on every response
+    const actionButtons = document.querySelectorAll(
+      'button[aria-label*="Copy" i], button[aria-label*="คัดลอก" i], ' +
+      'button[aria-label*="Good response" i], button[aria-label*="คำตอบที่ดี" i], ' +
+      'button[aria-label*="Modify" i], button[aria-label*="สร้างใหม่" i]'
+    );
+    if (actionButtons.length > 0) {
+      const blocks = [];
+      for (const btn of actionButtons) {
+        const container = btn.closest('model-response, response-container, .conversation-container, [data-test-id="model-response"]') ||
+                          btn.parentElement?.parentElement?.parentElement;
+        if (container && !blocks.includes(container)) {
+          blocks.push(container);
+        }
+      }
+      if (blocks.length > 0) return blocks;
+    }
+
+    // Strategy 2: Standard custom elements and containers
     const selectors = [
       'model-response',
       'response-container',
@@ -245,7 +264,7 @@
   function extractCleanText(el) {
     if (!el) return '';
 
-    const mdChild = el.querySelector('.markdown, message-content, .response-container-content');
+    const mdChild = el.querySelector('.markdown, message-content, .response-container-content, [class*="markdown"]');
     const target = mdChild || el;
 
     const thoughtSelectors = [
@@ -271,7 +290,16 @@
       } catch {}
     }
 
-    let mainText = (target.innerText || target.textContent || '').trim();
+    // Extract text while excluding action buttons, icons, and toolbars
+    let mainText = '';
+    try {
+      const clone = target.cloneNode(true);
+      const buttonsAndToolbars = clone.querySelectorAll('button, mat-icon, response-action-buttons, message-actions, .response-container-footer, .action-button');
+      buttonsAndToolbars.forEach(b => b.remove());
+      mainText = (clone.innerText || clone.textContent || '').trim();
+    } catch {
+      mainText = (target.innerText || target.textContent || '').trim();
+    }
 
     if (thoughtText && !mainText.startsWith('<think>')) {
       const cleanedMain = mainText.replace(thoughtText, '').trim();

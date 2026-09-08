@@ -1868,12 +1868,13 @@ class ProfileManager:
         """Check if a profile can execute requests for the given model (either directly, via Sonnet fallback, or via Web extension)."""
         key = profile or "default"
         info = self.state.get(key, {})
-        if info.get("status") == "DISABLED":
-            return False
         now = time.time()
         # If Web extension is connected and enabled, profile is executable via Web fallback
+        # (Independent of CLI status or CLI quota exhaustion)
         if self.is_web_executable(profile, model=model):
             return True
+        if info.get("status") == "DISABLED":
+            return False
         if not model:
             return now >= info.get("exhausted_until", 0)
         fam = get_model_family(model)
@@ -1914,14 +1915,22 @@ class ProfileManager:
             return (now >= gemini_until) or (now >= claude_until)
         return not self.is_in_cooldown(profile, model=model)
 
+    def is_web_in_cooldown(self, profile: Optional[str]) -> bool:
+        """Check if a profile's Web extension channel is in cooldown."""
+        key = profile or "default"
+        info = self.state.get(key, {})
+        now = time.time()
+        web_until = info.get("family_cooldowns", {}).get("web", 0)
+        return now < web_until
+
     def is_web_executable(self, profile: Optional[str], model: Optional[str] = None) -> bool:
-        """Check if a profile is allowed for Web extension execution, connected, and not in cooldown."""
+        """Check if a profile is allowed for Web extension execution, connected, and not in web cooldown.
+        Web quota is completely independent of CLI quota/exhaustion."""
         if not is_profile_web_enabled(profile):
             return False
         if not GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(profile):
             return False
-        web_model = "gemini-web" if (not model or "web" not in model) else model
-        return not self.is_in_cooldown(profile, model=web_model)
+        return not self.is_web_in_cooldown(profile)
 
     def set_last_execution_model(self, profile: Optional[str], model: str) -> None:
         """Record the model last successfully executed by this profile."""
@@ -2165,7 +2174,7 @@ class ProfileManager:
                 info = self.state.get(key, {})
                 status = info.get("status", "OK")
                 if status == "DISABLED":
-                    if req_ch == "web" and is_profile_web_enabled(p) and GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(p):
+                    if req_ch in ("web", "auto") and is_profile_web_enabled(p) and GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(p):
                         pass
                     else:
                         continue
@@ -4002,7 +4011,7 @@ def execute_cli_with_fallback(
     if req_ch == "auto":
         connected_profiles = [p for p in GLOBAL_WEB_CLIENT_MANAGER.get_connected_profiles() if is_profile_web_enabled(p)]
         for web_prof in connected_profiles:
-            if web_prof in tried_profiles and not mgr.is_web_executable(web_prof, model=model_name):
+            if not mgr.is_web_executable(web_prof, model=model_name):
                 continue
             logger.info(
                 "[GLOBAL WEB SAFETY NET] All CLI attempts exhausted. Falling back to connected Web Extension on profile '%s'",
