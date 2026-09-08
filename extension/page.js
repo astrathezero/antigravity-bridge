@@ -5,11 +5,13 @@
 (() => {
   'use strict';
 
-  // Support hot replacement without blocking newer extension versions
-  const GEN = (window.__ANTIGRAVITY_PAGE_GEN__ ?? 0) + 1;
-  window.__ANTIGRAVITY_PAGE_GEN__ = GEN;
+  if (window.__ANTIGRAVITY_PAGE_LOADED__) {
+    console.log('[Antigravity Page] Already loaded in Gemini Web context');
+    return;
+  }
+  window.__ANTIGRAVITY_PAGE_LOADED__ = true;
 
-  console.log(`[Antigravity Page] Initialized in Gemini Web context (gen=${GEN})`);
+  console.log('[Antigravity Page] Initialized in Gemini Web context');
 
   let activeObserver = null;
   let activeJobId = null;
@@ -84,7 +86,6 @@
 
   // Periodic account email announcement every 4 seconds
   setInterval(() => {
-    if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
     const email = detectAccountEmail();
     if (email) {
       window.postMessage({ type: 'AG_DETECTED_EMAIL', email }, '*');
@@ -182,58 +183,40 @@
 
   // 4. Check if Gemini is actively generating a response (Stop button present)
   function isGenerating() {
-    const stopSelectors = [
-      'button[aria-label*="Stop" i]',
-      'button[aria-label*="หยุด" i]',
-      'button[aria-label*="停止" i]',
-      'button.stop-button',
-      'button:has(mat-icon[fonticon="stop"])',
-      'button:has([data-mat-icon-name="stop"])',
-      '[aria-label*="Stop response" i]'
-    ];
-    for (const sel of stopSelectors) {
-      try {
-        const btn = document.querySelector(sel);
-        if (btn && (btn.offsetParent !== null || btn.getBoundingClientRect().width > 0)) {
-          return true;
-        }
-      } catch {}
+    const inputArea = document.querySelector('input-container, rich-textarea, .input-area, form.chat-input, .send-button-container');
+    const stopInInput = inputArea?.querySelector(
+      'button[aria-label*="Stop response" i], button[aria-label*="หยุดการตอบกลับ" i], ' +
+      'button.stop-button, button[aria-label="Stop" i], button[aria-label="หยุด" i]'
+    );
+    if (stopInInput && (stopInInput.offsetParent !== null || stopInInput.getBoundingClientRect().width > 0)) {
+      return true;
     }
 
-    const allButtons = Array.from(document.querySelectorAll('button'));
-    for (const btn of allButtons) {
-      if (btn.offsetParent === null && btn.getBoundingClientRect().width === 0) continue;
-      const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-      const icon = btn.querySelector('mat-icon, [data-mat-icon-name], [fonticon]');
-      const iconName = (icon?.getAttribute('fonticon') || icon?.getAttribute('data-mat-icon-name') || icon?.textContent || '').toLowerCase();
-      if (aria.includes('stop') || aria.includes('หยุด') || aria.includes('停止') || iconName.includes('stop')) {
-        return true;
-      }
+    const chatRoot = document.querySelector('chat-window, main, .chat-history, infinite-scroller') || document.body;
+    const stopBtn = chatRoot.querySelector(
+      'button.stop-button, button[aria-label="Stop response" i], button[aria-label="หยุดการตอบกลับ" i]'
+    );
+    if (stopBtn && (stopBtn.offsetParent !== null || stopBtn.getBoundingClientRect().width > 0)) {
+      return true;
     }
+
     return false;
+  }
+
+  // 4.1 Check if Gemini has rendered final response action buttons (Copy / Feedback)
+  function hasResponseFinished(targetEl) {
+    if (!targetEl) return false;
+    const hasActions = targetEl.querySelector(
+      'button[aria-label*="Copy" i], button[aria-label*="คัดลอก" i], ' +
+      'button[aria-label*="Good response" i], button[aria-label*="คำตอบที่ดี" i], ' +
+      'response-action-buttons, .response-container-footer, message-actions'
+    );
+    return Boolean(hasActions);
   }
 
   // 5. Get all response blocks on the page
   function getAllResponseBlocks() {
-    // Strategy 1: Find by action buttons (Copy / Good response / Modify) present on every response
-    const actionButtons = document.querySelectorAll(
-      'button[aria-label*="Copy" i], button[aria-label*="คัดลอก" i], ' +
-      'button[aria-label*="Good response" i], button[aria-label*="คำตอบที่ดี" i], ' +
-      'button[aria-label*="Modify" i], button[aria-label*="สร้างใหม่" i]'
-    );
-    if (actionButtons.length > 0) {
-      const blocks = [];
-      for (const btn of actionButtons) {
-        const container = btn.closest('model-response, response-container, .conversation-container, [data-test-id="model-response"]') ||
-                          btn.parentElement?.parentElement?.parentElement;
-        if (container && !blocks.includes(container)) {
-          blocks.push(container);
-        }
-      }
-      if (blocks.length > 0) return blocks;
-    }
-
-    // Strategy 2: Standard custom elements and containers
+    // Strategy 1: Standard model response custom elements and containers (present immediately upon turn start)
     const selectors = [
       'model-response',
       'response-container',
@@ -257,6 +240,25 @@
         }
       } catch {}
     }
+
+    // Strategy 2: Find by action buttons (Copy / Good response / Modify)
+    const actionButtons = document.querySelectorAll(
+      'button[aria-label*="Copy" i], button[aria-label*="คัดลอก" i], ' +
+      'button[aria-label*="Good response" i], button[aria-label*="คำตอบที่ดี" i], ' +
+      'button[aria-label*="Modify" i], button[aria-label*="สร้างใหม่" i]'
+    );
+    if (actionButtons.length > 0) {
+      const blocks = [];
+      for (const btn of actionButtons) {
+        const container = btn.closest('model-response, response-container, .conversation-container, [data-test-id="model-response"]') ||
+                          btn.parentElement?.parentElement?.parentElement;
+        if (container && !blocks.includes(container)) {
+          blocks.push(container);
+        }
+      }
+      if (blocks.length > 0) return blocks;
+    }
+
     return [];
   }
 
@@ -264,7 +266,7 @@
   function extractCleanText(el) {
     if (!el) return '';
 
-    const mdChild = el.querySelector('.markdown, message-content, .response-container-content, [class*="markdown"]');
+    const mdChild = el.querySelector('.markdown, message-content, .response-container-content, [class*="markdown"], .model-response-text');
     const target = mdChild || el;
 
     const thoughtSelectors = [
@@ -290,22 +292,30 @@
       } catch {}
     }
 
-    // Extract text while excluding action buttons, icons, and toolbars
+    // Extract text while excluding action buttons, icons, toolbars, and thinking container
     let mainText = '';
     try {
       const clone = target.cloneNode(true);
-      const buttonsAndToolbars = clone.querySelectorAll('button, mat-icon, response-action-buttons, message-actions, .response-container-footer, .action-button');
+      const buttonsAndToolbars = clone.querySelectorAll(
+        'button, mat-icon, response-action-buttons, message-actions, .response-container-footer, .action-button, ' +
+        '.thought-content, .thoughts-container, [data-test-id*="thought"], .thinking-process, details.thought, .collapse-thought, ' +
+        '.visually-hidden, [class*="visually-hidden"], [class*="sr-only"], .speaker-label, [aria-hidden="true"]'
+      );
       buttonsAndToolbars.forEach(b => b.remove());
       mainText = (clone.innerText || clone.textContent || '').trim();
     } catch {
       mainText = (target.innerText || target.textContent || '').trim();
     }
 
+    if (!mainText) {
+      mainText = (target.innerText || target.textContent || '').trim();
+    }
+
+    // Strip out any remaining localized speaker indicator like "Gemini บอกว่า" or "Gemini says:"
+    mainText = mainText.replace(/^(?:Gemini\s*(?:บอกว่า|says)[\s:]*)+/i, '').trim();
+
     if (thoughtText && !mainText.startsWith('<think>')) {
-      const cleanedMain = mainText.replace(thoughtText, '').trim();
-      if (cleanedMain) {
-        return `<think>\n${thoughtText}\n</think>\n\n${cleanedMain}`;
-      }
+      return `<think>\n${thoughtText}\n</think>\n\n${mainText}`;
     }
 
     return mainText;
@@ -313,8 +323,16 @@
 
   // 6.5 Intelligent Model Selection (Flash Thinking / Best Available Model)
   async function selectBestModel(targetModel) {
-    const desired = (targetModel || 'gemini-3.8-flash-thinking').toLowerCase();
-    const preferThinking = desired.includes('thinking') || desired.includes('flash') || desired.includes('web');
+    if (!targetModel || targetModel === 'gemini-web' || targetModel === 'default') {
+      return;
+    }
+    // If on an existing conversation thread, model switching is disabled by Gemini UI anyway
+    const pathParts = window.location.pathname.replace(/\/u\/\d+\//, '/').split('/').filter(Boolean);
+    if (pathParts.length > 1) {
+      return;
+    }
+    const desired = targetModel.toLowerCase();
+    const preferThinking = desired.includes('thinking') || desired.includes('flash');
 
     const switcherSelectors = [
       '[data-test-id="model-switcher"]',
@@ -323,8 +341,7 @@
       'button[aria-label*="select model" i]',
       'button.model-picker-btn',
       'button:has(.model-title)',
-      'div[role="combobox"]',
-      'button[aria-haspopup="menu"]'
+      'div[role="combobox"]'
     ];
 
     let switcherBtn = null;
@@ -428,8 +445,6 @@
 
   // 7. Execute Job
   async function executeJob(job) {
-    if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
-
     const jobId = job.jobId || job.job_id;
     activeJobId = jobId;
 
@@ -469,13 +484,24 @@
     inputEl.focus();
     try {
       if (inputEl.isContentEditable) {
-        const lines = (job.prompt || '').split('\n');
-        inputEl.innerHTML = '';
-        lines.forEach((line) => {
-          const p = document.createElement('p');
-          p.innerText = line;
-          inputEl.appendChild(p);
-        });
+        try {
+          const sel = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(inputEl);
+          sel.removeAllRanges();
+          sel.addRange(range);
+          document.execCommand('insertText', false, job.prompt);
+        } catch {}
+
+        if (!inputEl.innerText || !inputEl.innerText.trim()) {
+          const lines = (job.prompt || '').split('\n');
+          inputEl.innerHTML = '';
+          lines.forEach((line) => {
+            const p = document.createElement('p');
+            p.innerText = line;
+            inputEl.appendChild(p);
+          });
+        }
 
         try {
           const q = inputEl.__quill || inputEl.closest('rich-textarea')?.__quill;
@@ -487,6 +513,10 @@
         inputEl.value = job.prompt;
       }
 
+      try {
+        inputEl.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: job.prompt }));
+        inputEl.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: job.prompt }));
+      } catch {}
       inputEl.dispatchEvent(new Event('beforeinput', { bubbles: true, cancelable: true }));
       inputEl.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
       inputEl.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
@@ -510,14 +540,24 @@
       sendBtn.focus();
       sendBtn.click();
     } else {
-      // Fallback: Dispatch Enter keydown
+      // Fallback: Dispatch Enter keydown and keyup
       inputEl.dispatchEvent(new KeyboardEvent('keydown', {
         key: 'Enter',
         code: 'Enter',
         keyCode: 13,
         which: 13,
         bubbles: true,
-        cancelable: true
+        cancelable: true,
+        composed: true
+      }));
+      inputEl.dispatchEvent(new KeyboardEvent('keyup', {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+        composed: true
       }));
       await new Promise(r => setTimeout(r, 300));
       sendBtn = findSendButton();
@@ -573,13 +613,15 @@
 
     console.log(`[Antigravity Page] Attached observer to response container for job ${jobId}`);
 
+    let lastTextChangeTime = Date.now();
+
     const emitDeltas = () => {
-      if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
       const currentFullText = extractCleanText(targetResponseEl);
       if (currentFullText.length > emittedLength) {
         const delta = currentFullText.slice(emittedLength);
         emittedLength = currentFullText.length;
         fullText = currentFullText;
+        lastTextChangeTime = Date.now();
         window.postMessage({
           type: 'AG_JOB_DELTA',
           jobId,
@@ -588,8 +630,10 @@
       }
     };
 
+    let isFinished = false;
     const finishJob = () => {
-      if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
+      if (isFinished) return;
+      isFinished = true;
       if (activeObserver) {
         activeObserver.disconnect();
         activeObserver = null;
@@ -598,6 +642,7 @@
         clearTimeout(idleTimer);
         idleTimer = null;
       }
+      clearInterval(pollInterval);
       emitDeltas();
       console.log(`[Antigravity Page] Job ${jobId} finished. Output length: ${fullText.length}`);
       window.postMessage({
@@ -612,9 +657,17 @@
     activeObserver = new MutationObserver(() => {
       emitDeltas();
 
-      if (idleTimer) clearTimeout(idleTimer);
+      if (hasResponseFinished(targetResponseEl) && emittedLength > 0) {
+        if (!idleTimer) {
+          idleTimer = setTimeout(() => {
+            finishJob();
+          }, 400);
+        }
+        return;
+      }
 
       if (!isGenerating()) {
+        if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(() => {
           if (!isGenerating()) {
             finishJob();
@@ -630,12 +683,30 @@
     });
 
     const pollInterval = setInterval(() => {
-      if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) {
+      emitDeltas();
+
+      const timeSinceChange = Date.now() - lastTextChangeTime;
+
+      // Completion Condition 1: Action buttons have appeared (definitive indicator that Gemini finished)
+      if (hasResponseFinished(targetResponseEl) && emittedLength > 0 && timeSinceChange > 500) {
         clearInterval(pollInterval);
+        finishJob();
         return;
       }
 
-      emitDeltas();
+      // Completion Condition 2: Not generating and no new text for 2.0s
+      if (emittedLength > 0 && !isGenerating() && timeSinceChange > 2000) {
+        clearInterval(pollInterval);
+        finishJob();
+        return;
+      }
+
+      // Completion Condition 3: Absolute text stall (no change for 5s)
+      if (emittedLength > 0 && timeSinceChange > 5000) {
+        clearInterval(pollInterval);
+        finishJob();
+        return;
+      }
 
       if (Date.now() - startTime > timeoutMs) {
         clearInterval(pollInterval);
@@ -648,23 +719,11 @@
         activeJobId = null;
         return;
       }
-
-      if (!isGenerating() && emittedLength > 0) {
-        if (!idleTimer) {
-          idleTimer = setTimeout(() => {
-            if (!isGenerating()) {
-              clearInterval(pollInterval);
-              finishJob();
-            }
-          }, 1500);
-        }
-      }
-    }, 800);
+    }, 400);
   }
 
   // Listen for execution commands from content script
   window.addEventListener('message', (event) => {
-    if (window.__ANTIGRAVITY_PAGE_GEN__ !== GEN) return;
     if (event.source !== window || !event.data) return;
 
     if (event.data.type === 'AG_EXECUTE_JOB' && event.data.job) {
@@ -675,7 +734,23 @@
     }
   });
 
-  // Announce page script readiness
-  const initialEmail = detectAccountEmail();
-  window.postMessage({ type: 'AG_PAGE_READY', email: initialEmail }, '*');
+  // Announce page script readiness and poll for email if not found immediately
+  let detectedEmail = detectAccountEmail();
+  if (detectedEmail) {
+    window.postMessage({ type: 'AG_PAGE_READY', email: detectedEmail }, '*');
+    window.postMessage({ type: 'AG_DETECTED_EMAIL', email: detectedEmail }, '*');
+  } else {
+    let attempts = 0;
+    const emailPoller = setInterval(() => {
+      attempts++;
+      detectedEmail = detectAccountEmail();
+      if (detectedEmail || attempts > 20) {
+        clearInterval(emailPoller);
+        if (detectedEmail) {
+          window.postMessage({ type: 'AG_PAGE_READY', email: detectedEmail }, '*');
+          window.postMessage({ type: 'AG_DETECTED_EMAIL', email: detectedEmail }, '*');
+        }
+      }
+    }, 1000);
+  }
 })();

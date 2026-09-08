@@ -1579,29 +1579,39 @@ class WebClientManager:
                             self.jobs.pop(jid, None)
 
     def is_profile_connected(self, profile: Optional[str]) -> bool:
-        if not profile:
-            return False
         with self.lock:
-            cids = self.profile_to_client_ids.get(profile, set())
-            return len(cids) > 0
+            prof = profile or "default"
+            cids = self.profile_to_client_ids.get(prof, set())
+            if any(self.clients.get(cid) and self.clients[cid].is_alive for cid in cids):
+                return True
+            # If profile is None, empty, or "default", return True if ANY client is alive
+            if prof == "default":
+                return any(c.is_alive for c in self.clients.values())
+            return False
 
     def get_connected_profiles(self) -> List[str]:
         with self.lock:
             return sorted(list(self.profile_to_client_ids.keys()))
 
-    def get_client_for_profile(self, profile: str) -> Optional[WebClient]:
+    def get_client_for_profile(self, profile: Optional[str]) -> Optional[WebClient]:
         with self.lock:
-            cids = self.profile_to_client_ids.get(profile, set())
+            prof = profile or "default"
+            cids = self.profile_to_client_ids.get(prof, set())
             valid_clients = []
             for cid in list(cids):
                 client = self.clients.get(cid)
                 if client and client.is_alive:
                     valid_clients.append(client)
-            if not valid_clients:
-                return None
-            # Return the most recently active/connected client
-            valid_clients.sort(key=lambda c: max(c.connected_at, c.last_heartbeat), reverse=True)
-            return valid_clients[0]
+            if valid_clients:
+                valid_clients.sort(key=lambda c: max(c.connected_at, c.last_heartbeat), reverse=True)
+                return valid_clients[0]
+            # Fallback for "default" or unspecified profile: return any active client
+            if prof == "default":
+                all_alive = [c for c in self.clients.values() if c.is_alive]
+                if all_alive:
+                    all_alive.sort(key=lambda c: max(c.connected_at, c.last_heartbeat), reverse=True)
+                    return all_alive[0]
+            return None
 
     def dispatch_job(self, job: WebJob) -> bool:
         with self.lock:
@@ -1609,6 +1619,9 @@ class WebClientManager:
             if not client:
                 logger.warning("[WEB EXTENSION] No active extension client connected for profile '%s'", job.profile)
                 return False
+            # If job had a generic profile but was routed to a concrete client, align job.profile
+            if job.profile == "default" and client.profile != "default":
+                job.profile = client.profile
             self.jobs[job.job_id] = job
             client.queue.put({
                 "event": "job",
@@ -3710,6 +3723,11 @@ def execute_web_command(
 ) -> CLIExecutionResult:
     """Execute prompt via connected Chrome extension on gemini.google.com for the target profile."""
     prof = profile or "default"
+    # Auto-map default profile to the active connected client's profile if default has no dedicated client
+    if prof == "default":
+        active_client = GLOBAL_WEB_CLIENT_MANAGER.get_client_for_profile(prof)
+        if active_client and active_client.profile:
+            prof = active_client.profile
     if not is_profile_web_enabled(prof):
         raise RuntimeError(f"Profile '{prof}' has Web channel disabled in configuration")
     if not GLOBAL_WEB_CLIENT_MANAGER.is_profile_connected(prof):
@@ -3751,7 +3769,7 @@ def execute_web_command(
     if job.error:
         raise RuntimeError(f"Web Extension Execution Error: {job.error}")
 
-    result_text = "".join(accumulated) or job.final_output
+    result_text = job.final_output if (not output_callback and job.final_output) else ("".join(accumulated) or job.final_output)
     return CLIExecutionResult(result_text, prof, effective_model=model_name or "gemini-web")
 
 
@@ -3908,8 +3926,10 @@ def execute_cli_with_fallback(
                     timeout=attempt_timeout,
                     output_callback=output_callback,
                 )
-                mgr.mark_success(profile, model="gemini-web")
-                mgr.set_last_execution_model(profile, effective_model or DEFAULT_WEB_FALLBACK_MODEL)
+                actual_prof = getattr(web_result, "profile", profile) or profile
+                mgr.mark_success(actual_prof, model="gemini-web")
+                mgr.set_last_execution_model(actual_prof, effective_model or DEFAULT_WEB_FALLBACK_MODEL)
+                mgr.release_profile(profile)
                 return web_result
             except Exception as web_exc:
                 logger.warning("Web Extension execution failed for profile '%s': %s", profile_key, web_exc)
@@ -4922,6 +4942,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     "object": "list",
                     "data": models_list,
                 })
+                return
+
             if path in ("/extension/events", "/api/web/events", "/events"):
                 query = urllib.parse.urlparse(self.path).query
                 params = urllib.parse.parse_qs(query)

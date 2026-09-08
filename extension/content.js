@@ -5,16 +5,20 @@
 (() => {
   'use strict';
 
-  console.log('[Antigravity Content] Injecting page script...');
+  // Clean up any previous listener/port instances to prevent duplicates while allowing fresh re-binds
+  if (typeof window.__ANTIGRAVITY_CLEANUP__ === 'function') {
+    try { window.__ANTIGRAVITY_CLEANUP__(); } catch {}
+  }
 
-  // 1. Inject page.js into page context
+  console.log('[Antigravity Content] Content script initialized.');
+
+  // 1. Inject page.js into page context once
   function injectPageScript() {
     try {
+      if (document.getElementById('antigravity-page-script')) return;
       const script = document.createElement('script');
+      script.id = 'antigravity-page-script';
       script.src = chrome.runtime.getURL('page.js');
-      script.onload = () => {
-        script.remove();
-      };
       (document.head || document.documentElement).appendChild(script);
     } catch (e) {
       console.warn('[Antigravity Content] Failed to inject page script:', e);
@@ -40,7 +44,7 @@
   ensurePort();
 
   // Periodic heartbeat every 10s to keep worker from sleeping
-  setInterval(() => {
+  const heartbeatTimer = setInterval(() => {
     try {
       if (port) {
         port.postMessage({ type: 'content-heartbeat', time: Date.now() });
@@ -52,7 +56,7 @@
   }, 10000);
 
   // 3. Listen to messages from page.js (DOM world)
-  window.addEventListener('message', (event) => {
+  const onWindowMessage = (event) => {
     if (event.source !== window || !event.data || typeof event.data !== 'object') return;
 
     const msg = event.data;
@@ -84,20 +88,18 @@
         error: msg.error
       }).catch(() => {});
     }
-  });
+  };
+  window.addEventListener('message', onWindowMessage);
 
   // 4. Listen for commands from background service worker
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const onRuntimeMessage = (message, sender, sendResponse) => {
     if (!message || !message.type) return;
 
     if (message.type === 'EXECUTE_JOB') {
-      injectPageScript();
-      setTimeout(() => {
-        window.postMessage({
-          type: 'AG_EXECUTE_JOB',
-          job: message.job
-        }, '*');
-      }, 50);
+      window.postMessage({
+        type: 'AG_EXECUTE_JOB',
+        job: message.job
+      }, '*');
       sendResponse({ status: 'dispatched' });
     } else if (message.type === 'CHECK_EMAIL') {
       window.postMessage({
@@ -106,5 +108,16 @@
       sendResponse({ status: 'checking' });
     }
     return true;
-  });
+  };
+  chrome.runtime.onMessage.addListener(onRuntimeMessage);
+
+  window.__ANTIGRAVITY_CLEANUP__ = () => {
+    window.removeEventListener('message', onWindowMessage);
+    chrome.runtime.onMessage.removeListener(onRuntimeMessage);
+    clearInterval(heartbeatTimer);
+    if (port) {
+      try { port.disconnect(); } catch {}
+      port = null;
+    }
+  };
 })();

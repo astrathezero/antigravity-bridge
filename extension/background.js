@@ -38,7 +38,7 @@ async function ensureOffscreenDocument() {
       if (await chrome.offscreen.hasDocument?.()) return;
       await chrome.offscreen.createDocument({
         url: 'offscreen.html',
-        reasons: ['BLOBS', 'MATCH_MEDIA'],
+        reasons: ['BLOBS'],
         justification: 'Keep service worker and SSE streams alive 24/7 for Antigravity web bridge'
       });
     } catch (err) {
@@ -153,6 +153,10 @@ async function ensureConnectionForProfile(profile, email) {
     if (email && !existing.email) existing.email = email;
     return;
   }
+  if (existing && existing.isConnecting) {
+    if (email && !existing.email) existing.email = email;
+    return;
+  }
 
   if (existing && existing.controller) {
     try { existing.controller.abort(); } catch {}
@@ -170,6 +174,7 @@ async function ensureConnectionForProfile(profile, email) {
     controller,
     clientId: '',
     isConnected: false,
+    isConnecting: true,
     lastHeartbeat: Date.now(),
     cycleTimer: null
   };
@@ -192,10 +197,12 @@ async function ensureConnectionForProfile(profile, email) {
     if (!response.ok) {
       console.warn(`[Antigravity BG] [${profile}] SSE refused with status ${response.status}`);
       conn.isConnected = false;
+      conn.isConnecting = false;
       return;
     }
 
     conn.isConnected = true;
+    conn.isConnecting = false;
     console.log(`[Antigravity BG] [${profile}] SSE connected.`);
 
     // Cycle connection every 4 minutes before browser stream timeout
@@ -285,9 +292,9 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
     return;
   }
 
-  job.model = job.model && job.model !== 'gemini-web' && job.model !== 'default' 
-    ? job.model 
-    : (cfg.preferredWebModel || 'gemini-3.8-flash-thinking');
+  if (!job.model || job.model === 'default') {
+    job.model = 'gemini-web';
+  }
 
   const targetProfile = job.profile || assignedProfile;
   const targetEmail = (assignedEmail || '').toLowerCase();
@@ -334,6 +341,12 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
 
   activeJobs.set(jobId, { tabId: targetTabId, profile: targetProfile, startTime: Date.now() });
 
+  // Activate tab so typing/execCommand and MutationObserver execute with full browser focus
+  try {
+    await chrome.tabs.update(targetTabId, { active: true });
+    await new Promise(r => setTimeout(r, 150));
+  } catch {}
+
   // Ensure content script is active in this tab
   try {
     await chrome.scripting.executeScript({
@@ -342,12 +355,36 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
     });
   } catch {}
 
-  // Send command to content script in tab
-  chrome.tabs.sendMessage(targetTabId, { type: 'EXECUTE_JOB', job }, (response) => {
-    if (chrome.runtime.lastError) {
-      console.warn(`[Antigravity BG] Failed to send EXECUTE_JOB to tab ${targetTabId}:`, chrome.runtime.lastError.message);
+  // Send command to content script in tab with retry and fallback error reporting
+  let sent = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await new Promise((resolve, reject) => {
+        chrome.tabs.sendMessage(targetTabId, { type: 'EXECUTE_JOB', job }, (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            resolve(response);
+          }
+        });
+      });
+      sent = true;
+      break;
+    } catch (e) {
+      console.warn(`[Antigravity BG] Attempt ${attempt} failed to send EXECUTE_JOB to tab ${targetTabId}:`, e.message);
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 1000));
+      }
     }
-  });
+  }
+
+  if (!sent) {
+    activeJobs.delete(jobId);
+    await postToBridge('/extension/error', {
+      job_id: jobId,
+      error: `Failed to deliver job to Gemini tab ${targetTabId} for profile '${targetProfile}'. Tab may still be loading or unready.`
+    });
+  }
 }
 
 // 8. Open Tabs Scanning & Auto-Registration
@@ -390,6 +427,11 @@ async function scanOpenTabs() {
         lastSeen: Date.now()
       });
       ensureConnectionForProfile(fallbackProf, fallbackEmail);
+    } else {
+      const existingTab = openGeminiTabs.get(tab.id);
+      if (existingTab && existingTab.profile) {
+        ensureConnectionForProfile(existingTab.profile, existingTab.email);
+      }
     }
   }
 

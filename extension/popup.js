@@ -1,5 +1,14 @@
 // Antigravity Web Bridge - Popup Controller
 
+// Fast programmatic reload trigger
+if (window.location.search.includes('reload=true')) {
+  try {
+    chrome.runtime.reload();
+  } catch (e) {
+    console.error('Reload failed:', e);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   const statusBadge = document.getElementById('statusBadge');
   const statusText = document.getElementById('statusText');
@@ -10,8 +19,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   const webChannelToggle = document.getElementById('webChannelToggle');
   const webModelSelect = document.getElementById('webModelSelect');
   const saveBtn = document.getElementById('saveBtn');
+  const reloadExtBtn = document.getElementById('reloadExtBtn');
   const openGeminiBtn = document.getElementById('openGeminiBtn');
   const alertBox = document.getElementById('alertBox');
+
+  if (reloadExtBtn) {
+    reloadExtBtn.addEventListener('click', () => {
+      showAlert('Reloading extension...');
+      setTimeout(() => {
+        chrome.runtime.reload();
+      }, 500);
+    });
+  }
 
   function showAlert(msg, isError = false) {
     alertBox.textContent = msg;
