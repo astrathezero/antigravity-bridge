@@ -7,21 +7,33 @@ services:
     container_name: antigravity-bridge
     restart: unless-stopped
     ports:
-      # noVNC web desktop interface (bound to 127.0.0.1 by default for security)
+      # noVNC web desktop (Nginx reverse proxy handles SSL termination externally)
       - "127.0.0.1:6080:6080"
-      # Antigravity Bridge API (OpenAI & Anthropic Claude endpoints)
+      # Antigravity Bridge API
       - "127.0.0.1:8000:8000"
     volumes:
-      # Persistent Chromium browser profile storing login sessions
-      - ./chrome-data:/app/chrome-data
-      # Chrome Extension files
+      # Chrome profile per-account (persistent login sessions)
+      - chrome-data:/app/chrome-data
+      # Extension (read-only — reload container to pick up changes)
       - ../extension:/app/extension:ro
-      # Bridge core server script
+      # Bridge server (read-only — use safe_deploy.sh on host to update)
       - ../antigravity_bridge.py:/app/antigravity_bridge.py:ro
-      # Bridge configuration file
+      # Bridge config (profiles, routing, etc.)
       - ../bridge_config.json:/app/bridge_config.json
-      # Host Gemini profiles directory (optional, for CLI profiles)
+      # Gemini CLI profiles (agy) — optional, for CLI fallback
       - ~/.gemini:/root/.gemini
     environment:
-      - noVNC_PASSWORD=${noVNC_PASSWORD:-}
+      - NOVNC_PASSWORD=${NOVNC_PASSWORD:-changeme}
       - PYTHONUNBUFFERED=1
+      # Number of Chrome windows to open at startup (one per Google account slot)
+      - CHROME_ACCOUNTS=${CHROME_ACCOUNTS:-2}
+      # Comma-separated list of Gemini URLs for each Chrome window
+      # Format: "url1,url2,url3,..." — defaults to /app and /u/1/app ... /u/9/app
+      - CHROME_URLS=${CHROME_URLS:-}
+    shm_size: '2gb'
+    security_opt:
+      - seccomp:unconfined
+
+volumes:
+  chrome-data:
+    driver: local
