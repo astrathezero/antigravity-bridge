@@ -14,11 +14,11 @@
 ---
 
 > [!IMPORTANT]
-> ### 📢 ข้อควรทราบ: การใช้งานข้ามเครื่อง (Cross-Machine Notice & Roadmap)
-> **ปัจจุบัน Antigravity Bridge ทำงานบนเครื่อง Local / Host เดียวกันกับที่ติดตั้ง `antigravity`/`agy` CLI และ Profiles เท่านั้น**
-> - โปรแกรมปลายทาง (เช่น Hermes Agent, OpenAI SDK, บอทเทรด, Webhook) สามารถเชื่อมต่อเข้ามาที่ Bridge ผ่านเครือข่าย HTTP จากเครื่องใดก็ได้
-> - แต่ตัว Bridge Server เองจะประมวลผลคำสั่ง CLI บนเครื่อง Host ที่รัน Bridge เท่านั้น
-> - **ยังไม่รองรับการกระจายงานไปประมวลผลบนหลายโหนดเครื่องข้ามระบบ (Cross-Machine / Distributed Worker)** โดยฟีเจอร์นี้อยู่ในแผนการพัฒนาสำหรับเวอร์ชันถัดไป (Roadmap)
+> ### 📢 ข้อควรทราบ: การใช้งานข้ามเครื่อง (Cross-Machine) และการเปิด Public Port ผ่าน Nginx
+> **Antigravity Bridge ทำงานและประมวลผลคำสั่ง CLI รวมถึง Browser Fallback บนเครื่อง Host ที่ติดตั้งไว้**
+> - **รองรับการเชื่อมต่อข้ามเครื่องอย่างเต็มรูปแบบ (Cross-Machine / Remote Access)**: คุณสามารถเปิดให้เครื่องภายนอก เช่น แล็ปท็อปส่วนตัว, เครื่องเซิร์ฟเวอร์บนคลาวด์ หรือ AI Agent ข้ามระบบ เชื่อมต่อเข้ามาใช้งาน Bridge จากภายนอกได้อย่างปลอดภัย โดยตั้งค่า **[Nginx Reverse Proxy](#2-ตั้งค่า-nginx-reverse-proxy-สำหรับเปิด-port-public-และรองรับสตรีมมิ่ง)** พร้อมเปิด HTTPS/SSL
+> - **แนวปฏิบัติด้านความปลอดภัย**: เมื่อเปิดเซิร์ฟเวอร์สู่เครือข่ายภายนอก (Public Internet) ควรเปิดใช้งานระบบยืนยันตัวตนด้วย Bearer API Key เสมอ โดยกำหนดค่า `ANTIGRAVITY_BRIDGE_API_KEYS` ในไฟล์ `.env`
+> - **Roadmap ในอนาคต**: การกระจายงานประมวลผลข้ามเครื่องหลายๆ เครื่องพร้อมกัน (Distributed Multi-node Worker Clustering) กำลังอยู่ในแผนพัฒนา แต่สถาปัตยกรรมแบบ Centralized Host ที่เปิดให้ Remote Clients จากหลายเครื่องเรียกใช้งานพร้อมกัน สามารถใช้งานได้ทันทีในปัจจุบัน
 
 > [!WARNING]
 > ### ⚠️ คำเตือนและข้อกำหนดการใช้งาน (Terms of Service Notice)
@@ -57,8 +57,10 @@
 - [⚙️ การตั้งค่าและตัวแปรสภาพแวดล้อม (Environment Variables)](#️-การตั้งค่าและตัวแปรสภาพแวดล้อม-environment-variables)
 - [🤖 การเชื่อมต่อกับ Hermes Agent (`config.yaml`)](#-การเชื่อมต่อกับ-hermes-agent-configyaml)
 - [🦞 การเชื่อมต่อกับ OpenClaw (`openclaw.json`)](#-การเชื่อมต่อกับ-openclaw-openclawjson)
-- [💻 ตัวอย่างการเขียนโค้ดเรียกใช้งาน (Client SDKs)](#-ตัวอย่างการเขียนโค้ดเรียกใช้งาน-client-sdks)
-- [🚀 การติดตั้งเพื่อใช้งานจริงในระดับ Production](#-การติดตั้งเพื่อใช้งานจริงในระดับ-production)
+- [🚀 การติดตั้งสำหรับใช้งานจริงและการเปิด Public Port ข้ามเครื่อง (Systemd / Nginx)](#-การติดตั้งสำหรับใช้งานจริงและการเปิด-public-port-ข้ามเครื่อง-systemd--nginx)
+  - [1. ติดตั้งผ่าน Systemd (Linux)](#1-ติดตั้งผ่าน-systemd-linux)
+  - [2. ตั้งค่า Nginx Reverse Proxy สำหรับเปิด Port Public และรองรับสตรีมมิ่ง](#2-ตั้งค่า-nginx-reverse-proxy-สำหรับเปิด-port-public-และรองรับสตรีมมิ่ง)
+  - [3. การเชื่อมต่อจาก Client หรือ Agent บนเครื่องอื่น (Cross-Machine Access)](#3-การเชื่อมต่อจาก-client-หรือ-agent-บนเครื่องอื่น-cross-machine-access)
 - [🔧 การแก้ไขปัญหาที่พบบ่อย (Troubleshooting & FAQ)](#-การแก้ไขปัญหาที่พบบ่อย-troubleshooting--faq)
 - [🧪 การรันชุดทดสอบ (Unit Tests)](#-การรันชุดทดสอบ-unit-tests)
 - [📄 สัญญาอนุญาต (License)](#-สัญญาอนุญาต-license)
@@ -776,7 +778,7 @@ python3 antigravity_bridge.py profile list
 
 ---
 
-## 🚀 การติดตั้งเพื่อใช้งานจริงในระดับ Production
+## 🚀 การติดตั้งสำหรับใช้งานจริงและการเปิด Public Port ข้ามเครื่อง (Systemd / Nginx)
 
 ### 1. ติดตั้งผ่าน Systemd (Linux)
 รันสคริปต์ติดตั้งอัตโนมัติ:
@@ -792,25 +794,167 @@ sudo systemctl restart antigravity-bridge
 sudo journalctl -u antigravity-bridge -f
 ```
 
-### 2. ตั้งค่า Nginx Reverse Proxy รองรับสตรีมมิ่ง
+### 2. ตั้งค่า Nginx Reverse Proxy สำหรับเปิด Port Public และรองรับสตรีมมิ่ง
+
+หากคุณต้องการเปิดให้เครื่องภายนอก (Remote Machines), โน้ตบุ๊กทำงานนอกสถานที่, เซิร์ฟเวอร์บนคลาวด์ หรือ Agent บอทต่างๆ เชื่อมต่อเข้ามาใช้ Antigravity Bridge จากภายนอกผ่านอินเทอร์เน็ตสาธารณะ (Public Internet) แนะนำให้ติดตั้ง **Nginx** ทำหน้าที่เป็น Reverse Proxy เพื่อเข้ารหัสความปลอดภัยด้วย SSL (HTTPS/WSS), รองรับ Real-time Server-Sent Events (SSE) Streaming และ WebSocket สำหรับส่วนขยาย Chrome Extension
+
+#### แผนผังเครือข่ายที่แนะนำ (Network Architecture)
+```
+┌────────────────────────────────────────────────────────┐
+│  Remote Clients / Machines (แล็ปท็อปภายนอก, Cloud VM, Bots)│
+└───────────────────────────┬────────────────────────────┘
+                            │ HTTPS (Port 443) / WSS
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│             Nginx Reverse Proxy (เปิด Port Public)      │
+│  - SSL / TLS Termination (Let's Encrypt Certbot)       │
+│  - ปิด Buffering สำหรับ SSE Stream (proxy_buffering off)│
+│  - WebSocket Upgrade สำหรับเชื่อมต่อ /ws Extension    │
+│  - ขยายเวลา Timeout เป็น 1800s รองรับ Thinking Model   │
+└───────────────────────────┬────────────────────────────┘
+                            │ HTTP (127.0.0.1:8000)
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│       Antigravity Bridge Server (เครื่อง Host ภายใน)     │
+│  - หมุนเวียน Profile บัญชีอัตโนมัติ + 3-tier Fallback    │
+│  - ตรวจสอบสิทธิ์ผ่าน Bearer API Key (ANTIGRAVITY_BRIDGE_API_KEYS)│
+└────────────────────────────────────────────────────────┘
+```
+
+#### ไฟล์คอนฟิก Nginx Virtual Host ฉบับสมบูรณ์
+สร้างหรือแก้ไขไฟล์ที่ `/etc/nginx/sites-available/antigravity-bridge`:
+
 ```nginx
+# 1. บังคับเปลี่ยน HTTP ไปเป็น HTTPS อัตโนมัติ
 server {
     listen 80;
+    listen [::]:80;
+    server_name bridge.yourdomain.com;
+    return 301 https://$host$request_uri;
+}
+
+# 2. เซิร์ฟเวอร์ HTTPS ปลอดภัย และ WebSocket Reverse Proxy
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name bridge.yourdomain.com;
 
+    # ใบรับรอง SSL (Certbot จะเข้ามาจัดการส่วนนี้ให้อัตโนมัติ)
+    ssl_certificate /etc/letsencrypt/live/bridge.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bridge.yourdomain.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    # กำหนดขนาด Body สูงสุดสำหรับการส่งรูปภาพ Base64 Multimodal
+    client_max_body_size 50M;
+
+    # พร็อกซี API หลัก (Chat Completions, Messages, Health Check)
     location / {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
+
+        # ส่งต่อ Header มาตรฐาน
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
 
-        # ปิด Buffering และเพิ่ม Timeout สำหรับงานวิเคราะห์ยาวนาน
+        # หัวใจสำคัญ: ปิด Buffering เพื่อให้ส่ง SSE Streaming สดได้ทันที
         proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+
+        # ขยายระยะเวลา Timeout สำหรับงานที่โมเดลต้องคิดวิเคราะห์นาน (Reasoning / Thinking)
+        proxy_connect_timeout 300s;
         proxy_read_timeout 1800s;
         proxy_send_timeout 1800s;
     }
+
+    # พร็อกซี WebSocket สำหรับเชื่อมต่อ Chrome Extension Bridge (/ws)
+    location /ws {
+        proxy_pass http://127.0.0.1:8000/ws;
+        proxy_http_version 1.1;
+
+        # Header สำหรับยกระดับการเชื่อมต่อเป็น WebSocket
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # ป้องกันการตัดสาย WebSocket ที่เปิดค้างไว้
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
 }
+```
+
+#### ขั้นตอนการติดตั้งและขอใบรับรอง SSL
+```bash
+# 1. ติดตั้ง Nginx และ Certbot (บน Ubuntu / Debian)
+sudo apt update && sudo apt install nginx certbot python3-certbot-nginx -y
+
+# 2. เปิดใช้งาน Virtual Host
+sudo ln -s /etc/nginx/sites-available/antigravity-bridge /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+
+# 3. ขอใบรับรองความปลอดภัย SSL ฟรีจาก Let's Encrypt
+sudo certbot --nginx -d bridge.yourdomain.com
+
+# 4. บังคับใช้ API Key ใน .env เพื่อความปลอดภัยบนเน็ตสาธารณะ
+# แก้ไขไฟล์ .env บนเครื่อง Host:
+# ANTIGRAVITY_BRIDGE_API_KEYS="sk-prod-your-secure-key-here"
+```
+
+### 3. การเชื่อมต่อจาก Client หรือ Agent บนเครื่องอื่น (Cross-Machine Access)
+
+เมื่อติดตั้ง Nginx Reverse Proxy เรียบร้อยแล้ว โปรแกรมจากเครื่องคอมพิวเตอร์เครื่องอื่น แล็ปท็อป หรือ Agent ต่างๆ สามารถเชื่อมต่อเข้ามาใช้งานได้เสมือนคุยกับ OpenAI หรือ Anthropic อย่างเป็นทางการ:
+
+#### Python OpenAI SDK (เรียกใช้งานจากเครื่องอื่นข้ามอินเทอร์เน็ต)
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://bridge.yourdomain.com/v1",
+    api_key="sk-prod-your-secure-key-here",
+)
+
+response = client.chat.completions.create(
+    model="gemini-3.8-flash",
+    messages=[{"role": "user", "content": "สวัสดีจากเครื่องภายนอก!"}],
+    stream=True,
+)
+
+for chunk in response:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+#### Hermes Agent (`config.yaml` บนเครื่องอื่น)
+```yaml
+model: gemini-3.8-flash
+api_base: https://bridge.yourdomain.com/v1
+api_key: sk-prod-your-secure-key-here
+```
+
+#### Claude Code / Anthropic SDK (จากเครื่องอื่น)
+```bash
+export ANTHROPIC_BASE_URL="https://bridge.yourdomain.com"
+export ANTHROPIC_API_KEY="sk-prod-your-secure-key-here"
+claude
+```
+
+#### ทดสอบผ่านคำสั่ง cURL ตรงจากเครื่องภายนอก
+```bash
+curl https://bridge.yourdomain.com/v1/chat/completions \
+  -H "Authorization: Bearer sk-prod-your-secure-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.8-flash",
+    "messages": [{"role": "user", "content": "ทดสอบยิงจากเครื่องอื่น"}]
+  }'
 ```
 
 ---

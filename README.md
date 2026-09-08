@@ -14,11 +14,11 @@
 ---
 
 > [!IMPORTANT]
-> ### 📢 Notice: Cross-Machine Usage & Roadmap
-> **Antigravity Bridge currently operates on the local host machine** where the `antigravity`/`agy` CLI and Google authentication profiles are installed.
-> - Client applications (Hermes Agent, OpenAI SDK, Anthropic SDK, bots, webhooks) can connect to the Bridge over HTTP from any network or machine.
-> - However, the Bridge itself executes the underlying CLI profiles locally on the host machine.
-> - **Distributed cross-machine / remote node worker clustering is NOT yet supported in this version** and is planned for an upcoming release.
+> ### 📢 Notice: Cross-Machine & Remote Access via Nginx
+> **Antigravity Bridge executes CLI subprocesses and browser web extensions on the host machine where it is installed.**
+> - **Cross-Machine / Remote Client Access Supported**: You can expose the Bridge to remote laptops, external servers, cloud VMs, and AI agents across your local network or the public internet by setting up an **[Nginx Reverse Proxy](#2-public-exposure--cross-machine-access-via-nginx-reverse-proxy)** with HTTPS/SSL.
+> - **Security Best Practice**: When exposing the server publicly, always enable Bearer API Key authentication by configuring `ANTIGRAVITY_BRIDGE_API_KEYS` in your `.env` file.
+> - **Roadmap**: Distributed multi-node worker clustering (dispatching CLI tasks across a swarm of separate host machines) is slated for a future release. Centralized hosting with remote client access across machines is fully supported today.
 
 > [!WARNING]
 > ### ⚠️ Disclaimer & Terms of Service Notice
@@ -57,8 +57,10 @@
 - [⚙️ Configuration & Environment Variables](#️-configuration--environment-variables)
 - [🤖 Hermes Agent Integration (`config.yaml`)](#-hermes-agent-integration-configyaml)
 - [🦞 OpenClaw Integration (`openclaw.json`)](#-openclaw-integration-openclawjson)
-- [💻 Client SDK Examples](#-client-sdk-examples)
-- [🚀 Production Deployment (Systemd / PM2 / Nginx)](#-production-deployment-systemd--pm2--nginx)
+- [🚀 Production Deployment & Public Exposure (Systemd / Nginx)](#-production-deployment--public-exposure-systemd--nginx)
+  - [1. Systemd Service Setup (Linux)](#1-systemd-service-setup-linux)
+  - [2. Public Exposure & Cross-Machine Access via Nginx Reverse Proxy](#2-public-exposure--cross-machine-access-via-nginx-reverse-proxy)
+  - [3. Connecting Remote Clients Across Machines](#3-connecting-remote-clients-across-machines)
 - [🔧 Troubleshooting & FAQ](#-troubleshooting--faq)
 - [🧪 Running Unit Tests](#-running-unit-tests)
 - [📄 License](#-license)
@@ -776,7 +778,7 @@ Supported values for `channel`:
 
 ---
 
-## 🚀 Production Deployment (Systemd / PM2 / Nginx)
+## 🚀 Production Deployment & Public Exposure (Systemd / Nginx)
 
 ### 1. Systemd Service Setup (Linux)
 Run the automated installer:
@@ -792,25 +794,167 @@ sudo systemctl restart antigravity-bridge
 sudo journalctl -u antigravity-bridge -f
 ```
 
-### 2. Nginx Reverse Proxy with Streaming Support
+### 2. Public Exposure & Cross-Machine Access via Nginx Reverse Proxy
+
+To allow remote machines, external laptops, cloud VMs, and decentralized AI agents to connect to your Antigravity Bridge over the public internet, deploy **Nginx** as a secure Reverse Proxy with SSL termination, Server-Sent Events (SSE) streaming support, and WebSocket proxying.
+
+#### Recommended Network Architecture
+```
+┌────────────────────────────────────────────────────────┐
+│  Remote Clients / Machines (Laptops, Cloud VMs, Bots)  │
+└───────────────────────────┬────────────────────────────┘
+                            │ HTTPS (Port 443) / WSS
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│             Nginx Reverse Proxy (Public Host)          │
+│  - SSL / TLS Termination (Let's Encrypt Certbot)       │
+│  - Unbuffered SSE Streaming (proxy_buffering off)       │
+│  - WebSocket Upgrade for /ws Extension Bridge          │
+│  - Extended 1800s Timeouts for Deep Reasoning Models   │
+└───────────────────────────┬────────────────────────────┘
+                            │ HTTP (127.0.0.1:8000)
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│         Antigravity Bridge Server (Local Host)         │
+│  - Multi-profile rotation & 3-tier fallback            │
+│  - Bearer API Key Authentication                       │
+└────────────────────────────────────────────────────────┘
+```
+
+#### Production Nginx Virtual Host Configuration
+Create or edit `/etc/nginx/sites-available/antigravity-bridge`:
+
 ```nginx
+# 1. HTTP to HTTPS automatic redirection
 server {
     listen 80;
+    listen [::]:80;
+    server_name bridge.yourdomain.com;
+    return 301 https://$host$request_uri;
+}
+
+# 2. Public HTTPS API & WebSocket Reverse Proxy
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name bridge.yourdomain.com;
 
+    # SSL certificates (managed automatically by Certbot)
+    ssl_certificate /etc/letsencrypt/live/bridge.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bridge.yourdomain.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    # Max body size for multimodal base64 image/file uploads
+    client_max_body_size 50M;
+
+    # Root API Proxy (Chat Completions, Anthropic Messages, Health)
     location / {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
+
+        # Standard Proxy Headers
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
 
-        # Crucial for SSE Streaming and Long Reasoning Tasks
+        # CRITICAL: Disable Buffering for Real-Time SSE Streaming
         proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+
+        # CRITICAL: Extended timeouts for Deep Reasoning / Thinking models
+        proxy_connect_timeout 300s;
         proxy_read_timeout 1800s;
         proxy_send_timeout 1800s;
     }
+
+    # WebSocket Proxy for Chrome Extension Bridge (/ws)
+    location /ws {
+        proxy_pass http://127.0.0.1:8000/ws;
+        proxy_http_version 1.1;
+
+        # WebSocket Upgrade Headers
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Keep-alive timeout for persistent WebSocket connections
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
 }
+```
+
+#### Step-by-Step Installation & SSL Setup
+```bash
+# 1. Install Nginx and Certbot (Ubuntu/Debian)
+sudo apt update && sudo apt install nginx certbot python3-certbot-nginx -y
+
+# 2. Enable virtual host configuration
+sudo ln -s /etc/nginx/sites-available/antigravity-bridge /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+
+# 3. Obtain free SSL certificate via Let's Encrypt
+sudo certbot --nginx -d bridge.yourdomain.com
+
+# 4. Require API Key in .env for public exposure
+# Edit .env on the Bridge host:
+# ANTIGRAVITY_BRIDGE_API_KEYS="sk-prod-your-secure-key-here"
+```
+
+### 3. Connecting Remote Clients Across Machines
+
+Once your Nginx Reverse Proxy is active, any client application or AI agent on any external machine can connect securely using standard SDKs:
+
+#### Python OpenAI SDK (from any remote machine)
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://bridge.yourdomain.com/v1",
+    api_key="sk-prod-your-secure-key-here",
+)
+
+response = client.chat.completions.create(
+    model="gemini-3.8-flash",
+    messages=[{"role": "user", "content": "Hello from an external machine!"}],
+    stream=True,
+)
+
+for chunk in response:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+#### Hermes Agent (`config.yaml` on remote machine)
+```yaml
+model: gemini-3.8-flash
+api_base: https://bridge.yourdomain.com/v1
+api_key: sk-prod-your-secure-key-here
+```
+
+#### Claude Code / Anthropic SDK (from any remote machine)
+```bash
+export ANTHROPIC_BASE_URL="https://bridge.yourdomain.com"
+export ANTHROPIC_API_KEY="sk-prod-your-secure-key-here"
+claude
+```
+
+#### Direct cURL (from any remote machine)
+```bash
+curl https://bridge.yourdomain.com/v1/chat/completions \
+  -H "Authorization: Bearer sk-prod-your-secure-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.8-flash",
+    "messages": [{"role": "user", "content": "Ping from remote machine"}]
+  }'
 ```
 
 ---
