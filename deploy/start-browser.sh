@@ -144,22 +144,9 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Ensure all configured Gemini account tabs are active
-echo "[start-browser] checking open account tabs..."
-EXISTING_TABS=$(curl -sf http://127.0.0.1:9222/json/list 2>/dev/null || echo "[]")
-for i in $(seq 0 $((CHROME_ACCOUNTS - 1))); do
-    URL="${CUSTOM_URL_LIST[$i]:-${DEFAULT_URLS[$i]}}"
-    if [ "$i" -eq 0 ]; then
-        PAT="gemini\.google\.com/(app|canvas)"
-    else
-        PAT="gemini\.google\.com/u/${i}/(app|canvas)"
-    fi
-    if ! echo "$EXISTING_TABS" | grep -Eq "$PAT"; then
-        echo "[start-browser] opening missing account tab $i → $URL"
-        curl -sf -X PUT "http://127.0.0.1:9222/json/new?${URL}" > /dev/null 2>&1 || true
-        sleep 1
-    fi
-done
+# Wait for initial tabs to finish loading
+echo "[start-browser] waiting 8s for initial tabs to settle..."
+sleep 8
 
 # Health-check loop: only re-open tabs if count of Gemini tabs is less than CHROME_ACCOUNTS
 echo "[start-browser] starting tab health monitor..."

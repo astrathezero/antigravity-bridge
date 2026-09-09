@@ -248,7 +248,12 @@
   }
 
   function isLikelyStopButton(button) {
+    if (!button) return false;
     const ariaLabel = (button.getAttribute('aria-label') || '').toLowerCase();
+    // Exclude options/menu/action buttons whose label may contain the user's prompt text
+    if (ariaLabel.includes('ตัวเลือก') || ariaLabel.includes('option') || ariaLabel.includes('menu') || ariaLabel.includes('คัดลอก') || ariaLabel.includes('copy')) {
+      return false;
+    }
     const testId = (
       button.getAttribute('data-test-id') ||
       button.getAttribute('data-testid') ||
@@ -263,17 +268,24 @@
     ).toLowerCase();
 
     return STOP_TOKENS.some((token) =>
-      ariaLabel.includes(token) ||
+      ariaLabel === token ||
+      ariaLabel.startsWith(`${token} `) ||
+      ariaLabel.startsWith(`${token}การ`) ||
+      ariaLabel.startsWith(`${token}สร้าง`) ||
+      ariaLabel.includes('stop generating') ||
+      ariaLabel.includes('stop response') ||
       testId.includes(token) ||
-      iconName.includes(token)
+      iconName === token ||
+      iconName.includes('stop') ||
+      iconName.includes('pause')
     );
   }
 
   function findStopButton() {
+    const composer = document.querySelector('input-container, .input-area, form.chat-input, .send-button-container');
     const searchRoots = [
-      document.querySelector('input-container, .input-area, form.chat-input, .send-button-container'),
-      document.querySelector('chat-window, main, .chat-history, infinite-scroller'),
-      document.body
+      composer,
+      document.querySelector('chat-window, main')
     ].filter(Boolean);
 
     for (const root of searchRoots) {
@@ -285,10 +297,7 @@
       }
     }
 
-    // Fallback: token scan, scoped to the composer so unrelated buttons elsewhere in the page
-    // cannot false-positive. Biased towards reporting "generating" — a false positive only
-    // delays completion to the stall timeout, while a false negative truncates the answer.
-    const composer = document.querySelector('input-container, .input-area, form.chat-input, .send-button-container');
+    // Fallback: token scan scoped to the composer so unrelated buttons elsewhere cannot false-positive
     if (composer) {
       try {
         const btn = Array.from(composer.querySelectorAll('button'))
@@ -449,6 +458,7 @@
       const buttonsAndToolbars = clone.querySelectorAll(
         'button, mat-icon, response-action-buttons, message-actions, .response-container-footer, .action-button, ' +
         'thinking-overlay, .thought-content, .thoughts-container, [data-test-id*="thought"], .thinking-process, details.thought, .collapse-thought, ' +
+        '[class*="processing-state"], [class*="thinking"], [class*="thought"], ' +
         '.model-response-label-announcer, [class*="model-response-label"], [class*="screen-reader"], ' +
         '.visually-hidden, [class*="visually-hidden"], [class*="sr-only"], .speaker-label, [aria-hidden="true"]'
       );
@@ -465,17 +475,20 @@
     // Strip out any remaining localized speaker indicator like "Gemini บอกว่า" or "Gemini says:"
     mainText = mainText.replace(/(?:Gemini\s*(?:บอกว่า|says)[\s:]*)/gi, '').trim();
 
-    // Strip ephemeral thinking state headers (e.g., "Interpreting the Prompt", "Assessing the Prompt", "Reviewing the Input")
-    mainText = mainText.replace(/^(?:Interpreting the Prompt|Assessing the Prompt|Reviewing the Input|Considering the Prompt|Evaluating the Math|Formulating the Response|Thinking\.{0,3}|กำลังคิด\.{0,3})\s*/i, '').trim();
+    // Strip ephemeral thinking state headers (e.g., "Initiating the Analysis", "Interpreting the Prompt", "Assessing the Prompt")
+    mainText = mainText.replace(/^(?:(?:Initiating|Interpreting|Assessing|Reviewing|Considering|Evaluating|Formulating|Analyzing|Exploring|Synthesizing)\s+[A-Za-z\s]+|Thinking\.{0,3}|กำลังคิด\.{0,3})\s*/i, '').trim();
 
-    // Strip Antigravity status footer that Gemini may append when Canvas session has prior context
-    // Pattern: "\n---\n> ⚡ Antigravity Profile: ..." or similar blockquote separator footers
-    mainText = mainText.replace(/\n[-—]{2,}\n(?:>\s*.*\n?)*$/m, '').trim();
-    // Also strip trailing blockquote lines with profile/quota info
-    mainText = mainText.replace(/(\n>[ \t]*[⚡🔋📊🟢].+)+$/g, '').trim();
+    if (thoughtText) {
+      const trimmedThought = thoughtText.trim();
+      if (mainText.trim() === trimmedThought) {
+        mainText = '';
+      } else if (mainText.startsWith(trimmedThought)) {
+        mainText = mainText.slice(trimmedThought.length).trim();
+      }
+    }
 
     if (thoughtText && !mainText.startsWith('<think>')) {
-      mainText = `<think>\n${thoughtText}\n</think>\n\n${mainText}`.trim();
+      mainText = mainText ? `<think>\n${thoughtText}\n</think>\n\n${mainText}` : `<think>\n${thoughtText}\n</think>`;
     }
 
     // Extract Canvas Workspace Content (if open and contains document/code)
@@ -604,45 +617,54 @@
 
   // 6.5 New Chat Reset — always start fresh to avoid context bleed between API calls
   async function ensureFreshChatIfNeeded() {
-    // Always try to start a new chat so each API call is context-free
-    // Look for the new chat / sparkle button in the sidebar
-    const newChatBtn = document.querySelector(
-      '[data-test-id="new-chat-button"], ' +
-      'gem-nav-list-item[data-test-id="new-chat-button"], ' +
-      'a[data-test-id="side-nav-sparkle-button"], ' +
-      'button[aria-label*="แชทใหม่" i], ' +
-      'button[aria-label*="New chat" i], ' +
-      'a[aria-label*="New chat" i]'
-    );
+    const isThreadPath = /\/(?:app|canvas)\/[a-zA-Z0-9_-]+/.test(window.location.pathname);
+    const hasPriorBlocks = getAllResponseBlocks().length > 0;
 
-    if (newChatBtn) {
-      console.log('[Antigravity Page] Clicking New Chat button for fresh conversation.');
-      newChatBtn.click();
-      // Wait for the previous thread to actually be torn down rather than sleeping a fixed
-      // 1500ms. If the SPA is still mid-teardown when the caller snapshots the baseline, the
-      // baseline captures the *old* thread's blocks and no new block can ever exceed it.
+    if (!isThreadPath && !hasPriorBlocks) {
+      return;
+    }
+
+    const findNewChatLink = () => {
+      // Direct anchor elements with new chat labels or inside list items
+      const direct = document.querySelector(
+        'a[data-test-id="side-nav-sparkle-button"], ' +
+        'a[aria-label*="แชทใหม่" i], ' +
+        'a[aria-label*="New chat" i], ' +
+        '[data-test-id="new-chat-button"] a, ' +
+        'gem-nav-list-item[data-test-id="new-chat-button"] a'
+      );
+      if (direct) return direct;
+
+      const host = document.querySelector(
+        '[data-test-id="new-chat-button"], ' +
+        'button[aria-label*="แชทใหม่" i], ' +
+        'button[aria-label*="New chat" i]'
+      );
+      if (host) return host.querySelector('a') || host;
+      return null;
+    };
+
+    const link = findNewChatLink();
+    if (link) {
+      console.log(`[Antigravity Page] Clicking New Chat link (${link.tagName}, href=${link.getAttribute('href')})`);
+      link.click();
       const settleStart = Date.now();
-      let stableSince = 0;
-      let lastCount = -1;
-      while (Date.now() - settleStart < 8000) {
-        await new Promise(r => setTimeout(r, 200));
-        const count = getAllResponseBlocks().length;
-        if (count !== lastCount) {
-          lastCount = count;
-          stableSince = Date.now();
-          continue;
+      while (Date.now() - settleStart < 4000) {
+        await new Promise(r => setTimeout(r, 150));
+        if (!/\/(?:app|canvas)\/[a-zA-Z0-9_-]+/.test(window.location.pathname) && getAllResponseBlocks().length === 0) {
+          console.log('[Antigravity Page] Successfully settled on fresh conversation.');
+          return;
         }
-        if (count === 0) break;                          // empty thread: ready immediately
-        if (Date.now() - stableSince > 1000) break;      // count settled; proceed with it
       }
-      console.log(`[Antigravity Page] New chat settled after ${Date.now() - settleStart}ms (blocks=${lastCount}).`);
-    } else {
-      // Fallback: check if we're on a thread path and log a warning
-      const pathParts = window.location.pathname.replace(/\/u\/\d+\//, '/').split('/').filter(Boolean);
-      const isOnThread = pathParts.length > 1 && !pathParts.includes('canvas') && !pathParts.includes('app');
-      if (isOnThread) {
-        console.warn('[Antigravity Page] On a thread but could not find New Chat button. Response may include prior context.');
-      }
+    }
+
+    // Force navigation to clean /app path if still on a thread or prior messages remain
+    if (isThreadPath || getAllResponseBlocks().length > 0) {
+      const uMatch = /\/u\/(\d+)\//.exec(window.location.pathname);
+      const cleanPath = uMatch ? `/u/${uMatch[1]}/app` : '/app';
+      console.log(`[Antigravity Page] Force-navigating to clean path: ${cleanPath}`);
+      window.location.assign(cleanPath);
+      await new Promise(r => setTimeout(r, 3000));
     }
   }
 
@@ -855,6 +877,7 @@
     const baselineBlocks = getAllResponseBlocks();
     const baselineCount = baselineBlocks.length;
     const baselineSet = new WeakSet(baselineBlocks);
+    const baselineTexts = new Set(baselineBlocks.map(b => (b.innerText || '').slice(0, 120).trim()).filter(Boolean));
 
     // 2. Set input content
     inputEl.focus();
@@ -953,23 +976,36 @@
 
       const currentBlocks = getAllResponseBlocks();
 
-      // Preferred signal: a block that was not present when we sent the prompt.
-      const fresh = currentBlocks.filter(el => !baselineSet.has(el));
-      if (fresh.length > 0) {
-        targetResponseEl = fresh[fresh.length - 1];
-        break;
-      }
-
-      if (isGenerating() && currentBlocks.length > 0) {
-        targetResponseEl = currentBlocks[currentBlocks.length - 1];
-        break;
+      if (baselineCount === 0) {
+        // Fresh conversation: any response block appearing is our target
+        if (currentBlocks.length > 0) {
+          targetResponseEl = currentBlocks[currentBlocks.length - 1];
+          break;
+        }
+      } else {
+        // Multi-turn conversation: strictly require that total blocks increased
+        // AND the new block does NOT match any baseline element or baseline text
+        if (currentBlocks.length > baselineCount) {
+          const candidate = currentBlocks[currentBlocks.length - 1];
+          const candText = (candidate.innerText || '').slice(0, 120).trim();
+          if (!baselineSet.has(candidate) && !baselineTexts.has(candText)) {
+            targetResponseEl = candidate;
+            break;
+          }
+        }
       }
     }
 
     if (!targetResponseEl) {
       const currentBlocks = getAllResponseBlocks();
-      if (currentBlocks.length > 0) {
+      if (baselineCount === 0 && currentBlocks.length > 0) {
         targetResponseEl = currentBlocks[currentBlocks.length - 1];
+      } else if (baselineCount > 0 && currentBlocks.length > baselineCount) {
+        const candidate = currentBlocks[currentBlocks.length - 1];
+        const candText = (candidate.innerText || '').slice(0, 120).trim();
+        if (!baselineSet.has(candidate) && !baselineTexts.has(candText)) {
+          targetResponseEl = candidate;
+        }
       }
     }
 
@@ -1008,11 +1044,21 @@
     const emitDeltas = () => {
       if (!isCurrentJob()) return;
 
-      // If targetResponseEl is missing or was detached by an SPA navigation/re-render, re-acquire
-      if (!targetResponseEl || !targetResponseEl.isConnected) {
+      // If targetResponseEl is missing or was detached by an SPA navigation/re-render, or accidentally pointed to baseline, re-acquire
+      if (!targetResponseEl || !targetResponseEl.isConnected || baselineSet.has(targetResponseEl)) {
         const currentBlocks = getAllResponseBlocks();
-        if (currentBlocks.length > 0) {
-          targetResponseEl = currentBlocks[currentBlocks.length - 1];
+        let candidate = null;
+        if (baselineCount === 0 && currentBlocks.length > 0) {
+          candidate = currentBlocks[currentBlocks.length - 1];
+        } else if (baselineCount > 0 && currentBlocks.length > baselineCount) {
+          const lastEl = currentBlocks[currentBlocks.length - 1];
+          const candText = (lastEl.innerText || '').slice(0, 120).trim();
+          if (!baselineSet.has(lastEl) && !baselineTexts.has(candText)) {
+            candidate = lastEl;
+          }
+        }
+        if (candidate && candidate !== targetResponseEl) {
+          targetResponseEl = candidate;
           if (activeObserver) {
             try { activeObserver.disconnect(); } catch {}
             activeObserver.observe(targetResponseEl, { childList: true, subtree: true, characterData: true });
@@ -1086,6 +1132,23 @@
         finishReason: 'stop'
       }, '*');
       activeJobId = null;
+
+      // Prepare tab for next job by resetting to a new chat in the background
+      setTimeout(() => {
+        try {
+          const resetLink = document.querySelector(
+            'a[data-test-id="side-nav-sparkle-button"], ' +
+            'a[aria-label*="แชทใหม่" i], ' +
+            'a[aria-label*="New chat" i], ' +
+            '[data-test-id="new-chat-button"] a, ' +
+            'gem-nav-list-item[data-test-id="new-chat-button"] a'
+          );
+          if (resetLink) {
+            console.log('[Antigravity Page] Auto-resetting to new chat for next request.');
+            resetLink.click();
+          }
+        } catch {}
+      }, 1000);
     };
 
     activeObserver = new MutationObserver(() => {
@@ -1164,9 +1227,10 @@
       // Failure Condition: Gemini has clearly finished (action buttons rendered) but the
       // extractor never produced a single character.
       if (!sawAnyText && Date.now() - startTime > 15000) {
-        // Last-chance check: see if any response block in the page has finished text
+        // Last-chance check: see if any fresh response block in the page has finished text
         const latestBlocks = getAllResponseBlocks();
-        const latestEl = latestBlocks.length > 0 ? latestBlocks[latestBlocks.length - 1] : null;
+        const freshBlocks = latestBlocks.filter(el => !baselineSet.has(el));
+        const latestEl = freshBlocks.length > 0 ? freshBlocks[freshBlocks.length - 1] : (baselineCount === 0 && latestBlocks.length > 0 ? latestBlocks[latestBlocks.length - 1] : null);
         const lastChance = latestEl ? extractCleanText(latestEl) : '';
         if (lastChance) {
           targetResponseEl = latestEl;
@@ -1176,7 +1240,7 @@
           return;
         }
 
-        if (hasResponseFinished(targetResponseEl) || (latestEl && hasResponseFinished(latestEl))) {
+        if ((targetResponseEl && !baselineSet.has(targetResponseEl) && hasResponseFinished(targetResponseEl)) || (latestEl && hasResponseFinished(latestEl))) {
           clearInterval(pollInterval);
           cleanupActiveJob();
           isFinished = true;

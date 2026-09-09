@@ -1512,6 +1512,7 @@ class TestAntigravityBridge(unittest.TestCase):
     def test_get_ordered_profiles_prioritizes_cli_gemini_then_sonnet_then_web(self):
         """Test profile ordering puts CLI Gemini > CLI Sonnet > Web Extension > Exhausted."""
         with patch.object(antigravity_bridge, "get_profile_account_email", return_value="user@example.com"), \
+             patch.object(antigravity_bridge, "is_web_priority_enabled", return_value=False), \
              patch.object(antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER, "is_profile_connected", return_value=True):
             pm = ProfileManager(profiles=["p_web_only", "p_cli_gemini", "p_cli_sonnet"], concurrency_per_profile=1)
             # p_cli_sonnet: Gemini in cooldown, Sonnet available
@@ -1529,7 +1530,10 @@ class TestAntigravityBridge(unittest.TestCase):
         """Test channel-specific disabling (cli, web) and backward compatibility."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_path = os.path.join(tmpdir, "bridge_config.json")
-            with patch.object(antigravity_bridge, "get_canonical_antigravity_dir", return_value=tmpdir):
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write("{}")
+            with patch.dict(os.environ, {"ANTIGRAVITY_BRIDGE_CONFIG": cfg_path}), \
+                 patch.object(antigravity_bridge, "get_canonical_antigravity_dir", return_value=tmpdir):
                 # Initially all enabled
                 self.assertTrue(antigravity_bridge.is_profile_cli_enabled("p_test"))
                 self.assertTrue(antigravity_bridge.is_profile_web_enabled("p_test"))

@@ -233,9 +233,6 @@ async function ensureConnectionForProfile(profile, email) {
   if (existing && existing.cycleTimer) {
     clearTimeout(existing.cycleTimer);
   }
-
-  await ensureOffscreenDocument();
-
   const controller = new AbortController();
   const conn = {
     profile,
@@ -248,7 +245,10 @@ async function ensureConnectionForProfile(profile, email) {
     lastHeartbeat: Date.now(),
     cycleTimer: null
   };
+  // Store immediately before any await to avoid concurrent callers racing on the same profile
   profileConnections.set(profile, conn);
+
+  await ensureOffscreenDocument();
 
   const queryParams = new URLSearchParams();
   queryParams.set('profile', profile);
@@ -390,16 +390,31 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
   // Step 1: Find tab belonging to this profile / email
   let targetTabId = null;
 
+  const matchingTabs = [];
   for (const [tId, tInfo] of openGeminiTabs.entries()) {
     if (tInfo.profile === targetProfile || (targetEmail && tInfo.email === targetEmail)) {
-      targetTabId = tId;
-      break;
+      matchingTabs.push(tInfo);
+    }
+  }
+
+  if (matchingTabs.length > 0) {
+    // Prefer clean tab (not on /app/<thread_id> or /canvas/<thread_id>)
+    const cleanTab = matchingTabs.find(t => !/\/(?:app|canvas)\/[a-zA-Z0-9_-]+/.test(t.url));
+    targetTabId = cleanTab ? cleanTab.tabId : matchingTabs[0].tabId;
+
+    // If duplicate tabs exist for the same profile and one is a stale thread while we have a clean tab, close stale tab
+    if (cleanTab && matchingTabs.length > 1) {
+      for (const t of matchingTabs) {
+        if (t.tabId !== cleanTab.tabId && /\/(?:app|canvas)\/[a-zA-Z0-9_-]+/.test(t.url)) {
+          console.log(`[Antigravity BG] Closing stale thread tab ${t.tabId} (${t.url}) in favor of clean tab ${cleanTab.tabId}`);
+          chrome.tabs.remove(t.tabId).catch(() => {});
+          openGeminiTabs.delete(t.tabId);
+        }
+      }
     }
   }
 
   // The /u/N/ index this profile's Google account is signed in at, if we have ever seen it.
-  // Previously this was a hardcoded test for one specific account name, which mapped every
-  // /u/1/ tab onto one person and would hand another user's job to the wrong Google account.
   const targetIndex = accountIndexForProfile(targetProfile, targetEmail);
 
   // Step 2: Fallback matching across all open tabs by account index
@@ -408,7 +423,8 @@ async function handleJobEvent(job, assignedProfile, assignedEmail) {
     const live = allTabs.filter(t => !t.discarded);
 
     if (targetIndex !== null) {
-      const match = live.find(t => accountIndexFromUrl(t.url) === targetIndex);
+      const match = live.find(t => accountIndexFromUrl(t.url) === targetIndex && !/\/(?:app|canvas)\/[a-zA-Z0-9_-]+/.test(t.url)) ||
+                    live.find(t => accountIndexFromUrl(t.url) === targetIndex);
       if (match) targetTabId = match.id;
     }
 
