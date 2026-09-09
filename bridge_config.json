@@ -1,1 +1,25 @@
-{}
+{
+  "profiles": {
+    "default": {
+      "account_email": "attasitusa@gmail.com",
+      "cli_enabled": true,
+      "web_enabled": true
+    },
+    "jirapornxiu": {
+      "account_email": "jirapornxiu@gmail.com",
+      "cli_enabled": true,
+      "web_enabled": true
+    },
+    "sompornjitdee80": {
+      "account_email": "sompornjitdee80@gmail.com",
+      "cli_enabled": true,
+      "web_enabled": true
+    }
+  },
+  "profile_emails": {
+    "attasitusa@gmail.com": "default",
+    "jirapornxiu@gmail.com": "jirapornxiu",
+    "sompornjitdee80@gmail.com": "sompornjitdee80"
+  },
+  "web_priority": true
+}

@@ -1698,6 +1698,34 @@ class TestAntigravityBridge(unittest.TestCase):
         self.assertEqual(getattr(res, "channel", None), "web")
         self.assertEqual(getattr(res, "effective_model", None), "gemini-3.8-flash")
 
+    def test_find_profile_by_email_from_bridge_config(self):
+        """Test matching profiles from bridge_config.json profiles dict and profile_emails."""
+        mock_cfg = {
+            "profiles": {
+                "default": {"account_email": "attasitusa@gmail.com"},
+                "jirapornxiu": {"account_email": "jirapornxiu@gmail.com"},
+            },
+            "profile_emails": {
+                "sompornjitdee80@gmail.com": "sompornjitdee80"
+            }
+        }
+        with patch.object(antigravity_bridge, "get_bridge_config_path", return_value="/fake/bridge_config.json"), \
+             patch("os.path.exists", side_effect=lambda p: p == "/fake/bridge_config.json"), \
+             patch("builtins.open", unittest.mock.mock_open(read_data=json.dumps(mock_cfg))):
+            self.assertEqual(antigravity_bridge.find_profile_by_email("attasitusa@gmail.com"), "default")
+            self.assertEqual(antigravity_bridge.find_profile_by_email("jirapornxiu@gmail.com"), "jirapornxiu")
+            self.assertEqual(antigravity_bridge.find_profile_by_email("sompornjitdee80@gmail.com"), "sompornjitdee80")
+
+    def test_web_priority_routing_orders_web_first(self):
+        """When is_web_priority_enabled is True, connected Web Extension profiles take precedence in ordering."""
+        mgr = antigravity_bridge.ProfileManager(profiles=["p_cli", "p_web"])
+        with patch.object(antigravity_bridge, "is_web_priority_enabled", return_value=True), \
+             patch.object(antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER, "is_profile_connected", side_effect=lambda p: p == "p_web"), \
+             patch.object(antigravity_bridge, "is_profile_web_enabled", return_value=True), \
+             patch.object(antigravity_bridge, "is_profile_cli_enabled", return_value=True):
+            ordered = mgr.get_ordered_profiles(model="gemini-3.8-flash", channel="auto")
+            self.assertEqual(ordered[0], "p_web")
+
 
 if __name__ == "__main__":
     unittest.main()

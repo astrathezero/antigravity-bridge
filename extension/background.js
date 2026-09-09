@@ -184,12 +184,16 @@ function resolveProfile(email, url) {
       }
     }
 
-    // 4. If exactly one bridge profile exists, map to it directly
+    // 4. If single bridge profile exists: only map to it if this account has no conflict
     if (profiles.length === 1 && profiles[0]?.name) {
-      return profiles[0].name;
+      const singleProf = profiles[0];
+      const singleEmail = (singleProf.account_email || '').toLowerCase().trim();
+      if (!singleEmail || singleEmail === cleanEmail || accountIndexFromUrl(url) === 0) {
+        return singleProf.name;
+      }
     }
 
-    // 5. Default to username portion if email present
+    // 5. Default to username portion if email present (guarantees isolated profile per user)
     if (cleanEmail) {
       return cleanEmail.split('@')[0];
     }

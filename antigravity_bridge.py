@@ -111,6 +111,39 @@ def get_canonical_antigravity_dir() -> str:
     return os.path.expanduser("~/.config/antigravity")
 
 
+def get_bridge_config_path() -> str:
+    """Return path to bridge_config.json, supporting environment override, docker mount (/app), or canonical config dir."""
+    env_cfg = os.environ.get("ANTIGRAVITY_BRIDGE_CONFIG", "").strip()
+    if env_cfg and os.path.exists(env_cfg):
+        return env_cfg
+    app_cfg = "/app/bridge_config.json"
+    if os.path.exists(app_cfg):
+        return app_cfg
+    cwd_cfg = os.path.join(os.getcwd(), "bridge_config.json")
+    if os.path.exists(cwd_cfg):
+        return cwd_cfg
+    return os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
+
+
+def is_web_priority_enabled() -> bool:
+    """Return True if Web Extension channel should take priority over CLI when connected."""
+    env_val = os.environ.get("ANTIGRAVITY_WEB_PRIORITY", "").strip().lower()
+    if env_val in ("1", "true", "yes"):
+        return True
+    if env_val in ("0", "false", "no"):
+        return False
+    cfg_file = get_bridge_config_path()
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                if "web_priority" in cfg:
+                    return bool(cfg["web_priority"])
+        except Exception:
+            pass
+    return False
+
+
 DEFAULT_QUOTA_CACHE_FILE = os.environ.get("ANTIGRAVITY_QUOTA_CACHE_FILE", os.path.join(get_canonical_antigravity_dir(), "quota_cache.json"))
 DEFAULT_QUOTA_WINDOW_SECONDS = 10800.0  # 3-hour sliding window for Google Gemini quota
 DEFAULT_FLASH_QUOTA_CAPACITY = 50       # Baseline 50 requests capacity per 3h window for Flash
@@ -1077,8 +1110,7 @@ def get_available_profiles() -> List[Optional[str]]:
         if profiles:
             return profiles
 
-    config_base = get_canonical_antigravity_dir()
-    cfg_file = os.path.join(config_base, "bridge_config.json")
+    cfg_file = get_bridge_config_path()
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -1086,8 +1118,12 @@ def get_available_profiles() -> List[Optional[str]]:
                 configured = cfg.get("profiles")
                 if configured and isinstance(configured, list) and len(configured) > 0:
                     return [str(p).strip() for p in configured if p]
+                elif configured and isinstance(configured, dict) and len(configured) > 0:
+                    return [str(p).strip() for p in configured.keys() if p]
         except Exception:
             pass
+
+    config_base = get_canonical_antigravity_dir()
 
     profiles_dir = os.path.join(config_base, "profiles")
     if os.path.exists(profiles_dir) and os.path.isdir(profiles_dir):
@@ -1177,7 +1213,7 @@ def get_disabled_profiles() -> Set[str]:
     if env_val:
         disabled.update(p.strip() for p in env_val.split(",") if p.strip())
 
-    cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
+    cfg_file = get_bridge_config_path()
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -1208,7 +1244,7 @@ def get_cli_disabled_profiles() -> Set[str]:
     if env_val:
         disabled.update(p.strip() for p in env_val.split(",") if p.strip())
 
-    cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
+    cfg_file = get_bridge_config_path()
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -1235,7 +1271,7 @@ def get_web_disabled_profiles() -> Set[str]:
     if env_val:
         disabled.update(p.strip() for p in env_val.split(",") if p.strip())
 
-    cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
+    cfg_file = get_bridge_config_path()
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -1292,7 +1328,7 @@ def persist_channel_profile_state(profile: str, channel: str = "all", disabled: 
     """Persist or update profile enable/disable state for 'cli', 'web', or 'all' channels in bridge_config.json."""
     if not profile:
         return
-    cfg_file = os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
+    cfg_file = get_bridge_config_path()
     try:
         data: Dict[str, Any] = {}
         if os.path.exists(cfg_file):
@@ -2178,7 +2214,7 @@ class ProfileManager:
 
         with self.lock:
             profiles = list(self._profiles)
-            if req_ch == "web":
+            if req_ch in ("web", "auto"):
                 for wp in GLOBAL_WEB_CLIENT_MANAGER.get_connected_profiles():
                     if wp and wp not in profiles and is_profile_web_enabled(wp):
                         profiles.append(wp)
@@ -2195,6 +2231,8 @@ class ProfileManager:
             recovering_busy: List[Optional[str]] = []
             exhausted: List[Tuple[float, Optional[str]]] = []
             unauthenticated: List[Optional[str]] = []
+
+            web_prio = is_web_priority_enabled()
 
             for p in profiles:
                 key = p or "default"
@@ -2232,6 +2270,19 @@ class ProfileManager:
                             web_busy.append(p)
                     else:
                         exhausted.append((ex_until or (now + 300), p))
+                    continue
+
+                # Auto channel where Web priority is enabled and Web Extension is connected & executable
+                if req_ch == "auto" and web_prio and self.is_web_executable(p, model=model):
+                    in_fl = self.in_flight.get(key, 0)
+                    is_locked = is_profile_sandbox_locked(p)
+                    is_busy = (in_fl >= self.concurrency_per_profile) or is_locked
+                    if in_fl == 0 and not is_locked:
+                        web_idle.append(p)
+                    elif not is_busy:
+                        web_avail.append(p)
+                    else:
+                        web_busy.append(p)
                     continue
 
                 # Auto channel where CLI channel is explicitly disabled: check web
@@ -2349,21 +2400,38 @@ class ProfileManager:
             exhausted.sort(key=lambda x: x[0])
             exhausted_profiles = [p for _, p in exhausted]
 
-            all_ordered = (
-                ready_idle
-                + ready_avail
-                + sonnet_idle
-                + sonnet_avail
-                + web_idle
-                + web_avail
-                + recovering_idle
-                + ready_busy
-                + sonnet_busy
-                + web_busy
-                + recovering_busy
-                + unauthenticated
-                + exhausted_profiles
-            )
+            if web_prio and (web_idle or web_avail):
+                all_ordered = (
+                    web_idle
+                    + web_avail
+                    + ready_idle
+                    + ready_avail
+                    + sonnet_idle
+                    + sonnet_avail
+                    + recovering_idle
+                    + web_busy
+                    + ready_busy
+                    + sonnet_busy
+                    + recovering_busy
+                    + unauthenticated
+                    + exhausted_profiles
+                )
+            else:
+                all_ordered = (
+                    ready_idle
+                    + ready_avail
+                    + sonnet_idle
+                    + sonnet_avail
+                    + web_idle
+                    + web_avail
+                    + recovering_idle
+                    + ready_busy
+                    + sonnet_busy
+                    + web_busy
+                    + recovering_busy
+                    + unauthenticated
+                    + exhausted_profiles
+                )
             return all_ordered if all_ordered else [None]
 
     def acquire_profile(
@@ -3862,6 +3930,8 @@ def execute_cli_with_fallback(
         use_web = False
         if req_ch == "web":
             use_web = True
+        elif req_ch == "auto" and (is_web_priority_enabled() or (model_name and ("-web" in model_name or "thinking" in model_name or "high" in model_name))) and mgr.is_web_executable(profile, model=model_name):
+            use_web = True
         elif req_ch == "auto" and model_name and ("-web" in model_name or model_name == "gemini-web"):
             use_web = True
         elif req_ch == "auto" and not is_profile_cli_enabled(profile):
@@ -3954,8 +4024,12 @@ def execute_cli_with_fallback(
             except Exception as web_exc:
                 logger.warning("Web Extension execution failed for profile '%s': %s", profile_key, web_exc)
                 errors.append(f"Web Profile '{profile_key}': {web_exc}")
-                mgr.release_profile(profile)
-                continue
+                if req_ch == "auto" and is_profile_cli_enabled(profile):
+                    logger.info("Falling back to CLI execution for profile '%s' after Web failure", profile_key)
+                    use_web = False
+                else:
+                    mgr.release_profile(profile)
+                    continue
 
         if not is_profile_cli_enabled(profile):
             logger.warning("Skipping CLI execution for profile '%s' (CLI channel disabled)", profile_key)
@@ -5910,7 +5984,28 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
 
 
 def get_profile_account_email(profile: Optional[str]) -> str:
-    """Get active logged in email for a profile from google_accounts.json."""
+    """Get active logged in email for a profile from bridge_config.json or google_accounts.json."""
+    cfg_file = get_bridge_config_path()
+    prof_key = profile or "default"
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                p_cfg = cfg.get("profiles", {})
+                if isinstance(p_cfg, dict):
+                    info = p_cfg.get(prof_key, {})
+                    if isinstance(info, dict):
+                        em = info.get("account_email") or info.get("email")
+                        if em:
+                            return str(em).strip()
+                pem = cfg.get("profile_emails", {})
+                if isinstance(pem, dict):
+                    for em, pr in pem.items():
+                        if pr == prof_key:
+                            return str(em).strip()
+        except Exception:
+            pass
+
     config_base = get_canonical_antigravity_dir()
     if not profile or profile == "default":
         cand_gemini = os.path.join(os.path.dirname(config_base), ".gemini", "google_accounts.json")
@@ -5932,10 +6027,30 @@ def get_profile_account_email(profile: Optional[str]) -> str:
 
 
 def find_profile_by_email(email: Optional[str]) -> Optional[str]:
-    """Find a profile name whose google_accounts.json active email matches given email."""
+    """Find a profile name whose bridge_config.json or google_accounts.json matches given email."""
     if not email:
         return None
     target = email.strip().lower()
+
+    # 1. Check bridge_config.json first
+    cfg_file = get_bridge_config_path()
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                pem = cfg.get("profile_emails", {})
+                if isinstance(pem, dict) and target in pem:
+                    return str(pem[target])
+                p_cfg = cfg.get("profiles", {})
+                if isinstance(p_cfg, dict):
+                    for prof_name, p_info in p_cfg.items():
+                        if isinstance(p_info, dict):
+                            p_email = p_info.get("account_email") or p_info.get("email")
+                            if p_email and str(p_email).strip().lower() == target:
+                                return str(prof_name)
+        except Exception:
+            pass
+
     config_base = get_canonical_antigravity_dir()
     profiles_dir = os.path.join(config_base, "profiles")
     candidates = []

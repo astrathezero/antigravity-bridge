@@ -41,19 +41,28 @@
   }
 
   // 1. Detect Logged-in Google Account Email
+  function isValidUserEmail(candidate) {
+    if (!candidate) return false;
+    const c = candidate.toLowerCase().trim();
+    if (c === 'googlers@google.com' || c === 'user@example.com') return false;
+    return true;
+  }
+
   function detectAccountEmail() {
     const emailRegex = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/;
 
     const selectors = [
+      'a[aria-label*="บัญชี Google"]',
+      'a[aria-label*="Google Account"]',
+      'button[aria-label*="บัญชี Google"]',
+      'button[aria-label*="Google Account"]',
+      'a[href*="SignOutOptions"]',
       'a[aria-label*="@"]',
       'button[aria-label*="@"]',
       'img[alt*="@"]',
       'a[href*="accounts.google.com"]',
-      'a[href*="SignOutOptions"]',
       '[data-profile-email]',
       '[data-user-email]',
-      '[aria-label*="Google Account"]',
-      '[aria-label*="บัญชี Google"]',
       'header [aria-label*="@"]',
       '.gb_d [aria-label*="@"]',
       '.gb_Fa [aria-label*="@"]',
@@ -75,7 +84,7 @@
             ''
           );
           const match = text.match(emailRegex);
-          if (match && match[1]) {
+          if (match && match[1] && isValidUserEmail(match[1])) {
             return match[1].toLowerCase();
           }
         }
@@ -85,35 +94,30 @@
     const metaUser = document.querySelector('meta[name="user-email"]');
     if (metaUser && metaUser.content) {
       const match = metaUser.content.match(emailRegex);
-      if (match && match[1]) return match[1].toLowerCase();
+      if (match && match[1] && isValidUserEmail(match[1])) return match[1].toLowerCase();
     }
-
-    try {
-      if (window.WIZ_global_data) {
-        const str = JSON.stringify(window.WIZ_global_data);
-        const match = str.match(emailRegex);
-        if (match && match[1]) return match[1].toLowerCase();
-      }
-    } catch {}
 
     try {
       const header = document.querySelector('header, [role="banner"], .gb_rd, .gb_d');
       if (header) {
         const match = (header.innerHTML || '').match(emailRegex);
-        if (match && match[1]) return match[1].toLowerCase();
+        if (match && match[1] && isValidUserEmail(match[1])) return match[1].toLowerCase();
       }
     } catch {}
 
     return '';
   }
 
-  // Periodic account email announcement every 4 seconds
-  setInterval(() => {
+  // Initial and periodic account email announcement every 3 seconds
+  const announceEmail = () => {
     const email = detectAccountEmail();
     if (email) {
       window.postMessage({ type: 'AG_DETECTED_EMAIL', email }, '*');
     }
-  }, 4000);
+  };
+  setTimeout(announceEmail, 500);
+  setTimeout(announceEmail, 2000);
+  setInterval(announceEmail, 3000);
 
   // 2. Locate the prompt input element
   function findInputElement() {
