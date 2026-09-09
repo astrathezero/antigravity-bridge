@@ -48,7 +48,7 @@ rm -f /app/chrome-data/Singleton* \
       /tmp/.org.chromium.Chromium.* \
       /tmp/Singleton* 2>/dev/null || true
 
-# Sanitize exit_type in Preferences and Local State so Chrome never starts in Crashed state
+# Sanitize exit_type and enforce session cookie retention in Preferences and Local State
 python3 -c "
 import json, os
 for p in ['/app/chrome-data/Default/Preferences', '/app/chrome-data/Local State']:
@@ -58,6 +58,11 @@ for p in ['/app/chrome-data/Default/Preferences', '/app/chrome-data/Local State'
             if 'profile' in d and isinstance(d['profile'], dict):
                 d['profile']['exit_type'] = 'Normal'
                 d['profile']['exited_cleanly'] = True
+            # Enforce restore_on_startup: 1 so Chromium preserves all session cookies across restarts
+            if 'Default' in p:
+                if 'session' not in d or not isinstance(d['session'], dict):
+                    d['session'] = {}
+                d['session']['restore_on_startup'] = 1
             with open(p, 'w') as f: json.dump(d, f)
         except Exception: pass
 " 2>/dev/null || true

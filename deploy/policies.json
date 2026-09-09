@@ -1,0 +1,11 @@
+{
+  "RestoreOnStartup": 1,
+  "DefaultCookiesSetting": 1,
+  "BlockThirdPartyCookies": false,
+  "CookiesAllowedForUrls": [
+    "https://[*.]google.com",
+    "https://[*.]google.co.th",
+    "https://[*.]youtube.com",
+    "https://gemini.google.com"
+  ]
+}

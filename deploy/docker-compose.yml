@@ -16,6 +16,8 @@ services:
       # Machine ID (fixed identity across container recreates)
       - ./machine-id:/etc/machine-id:ro
       - ./machine-id:/var/lib/dbus/machine-id:ro
+      # Chromium managed enterprise policy (enforce persistent cookies)
+      - ./policies.json:/etc/chromium/policies/managed/policies.json:ro
       # Chrome profile per-account (persistent login sessions on host)
       - ./chrome-data:/app/chrome-data
       # Startup scripts (mount live so changes take effect on restart)
