@@ -113,8 +113,57 @@ def get_canonical_antigravity_dir() -> str:
 DEFAULT_QUOTA_CACHE_FILE = os.environ.get("ANTIGRAVITY_QUOTA_CACHE_FILE", os.path.join(get_canonical_antigravity_dir(), "quota_cache.json"))
 DEFAULT_QUOTA_WINDOW_SECONDS = 10800.0  # 3-hour sliding window for Google Gemini quota
 DEFAULT_FLASH_QUOTA_CAPACITY = 50       # Baseline 50 requests capacity per 3h window for Flash
-DEFAULT_SONNET_FALLBACK_MODEL = os.environ.get("ANTIGRAVITY_SONNET_FALLBACK_MODEL", "claude-sonnet-4-6")
+DEFAULT_SONNET_FALLBACK_MODEL = os.environ.get("ANTIGRAVITY_SONNET_FALLBACK_MODEL", "claude-opus-4-6-thinking")
+DEFAULT_FALLBACK_CHAIN = ["claude-opus-4-6-thinking", "gpt-oss-120b-medium"]
 ANTIGRAVITY_MODEL_FALLBACK_ENABLED = os.environ.get("ANTIGRAVITY_MODEL_FALLBACK_ENABLED", "true").lower() in ("1", "true", "yes")
+
+
+def get_bridge_config_path() -> str:
+    """Return path to bridge_config.json, supporting environment override, cwd, or canonical config dir."""
+    env_cfg = os.environ.get("ANTIGRAVITY_BRIDGE_CONFIG", "").strip()
+    if env_cfg:
+        return env_cfg
+    cwd_cfg = os.path.join(os.getcwd(), "bridge_config.json")
+    if os.path.exists(cwd_cfg):
+        return cwd_cfg
+    return os.path.join(get_canonical_antigravity_dir(), "bridge_config.json")
+
+
+def get_model_fallback_chain(model_name: Optional[str] = None) -> List[str]:
+    """Return configured fallback chain for a requested model."""
+    # 1. Check bridge_config.json
+    cfg_file = get_bridge_config_path()
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                fb_chains = cfg.get("fallback_chains") or cfg.get("model_fallbacks")
+                if isinstance(fb_chains, dict):
+                    if model_name and model_name in fb_chains:
+                        chain = fb_chains[model_name]
+                        if isinstance(chain, list) and chain:
+                            return [str(m).strip() for m in chain if m]
+                    if "default" in fb_chains:
+                        chain = fb_chains["default"]
+                        if isinstance(chain, list) and chain:
+                            return [str(m).strip() for m in chain if m]
+                elif isinstance(fb_chains, list) and fb_chains:
+                    return [str(m).strip() for m in fb_chains if m]
+        except Exception:
+            pass
+
+    # 2. Check environment variable override
+    env_chain = os.environ.get("ANTIGRAVITY_FALLBACK_CHAIN", "").strip()
+    if env_chain:
+        return [m.strip() for m in env_chain.split(",") if m.strip()]
+
+    # 3. Check legacy ANTIGRAVITY_SONNET_FALLBACK_MODEL
+    legacy_sonnet = os.environ.get("ANTIGRAVITY_SONNET_FALLBACK_MODEL")
+    if legacy_sonnet:
+        return [legacy_sonnet, "gpt-oss-120b-medium"]
+
+    return list(DEFAULT_FALLBACK_CHAIN)
+
 
 SUPPORTED_MODELS = {
     "gemini-3.8-flash": ("gemini-3.8-flash", "high"),
@@ -149,6 +198,8 @@ SUPPORTED_MODELS = {
     "claude-opus-4.6": ("claude-opus-4.6", None),
     "gpt-oss-120b-medium": ("gpt-oss-120b", "medium"),
     "gpt-oss-120b": ("gpt-oss-120b", None),
+    "gpt-oss-128b-medium": ("gpt-oss-120b", "medium"),
+    "gpt-oss-128b": ("gpt-oss-120b", "medium"),
     "imagen-3.0-generate-002": ("ag/gemini-3.1-flash-image", None),
     "imagen-3.0-fast-generate-001": ("ag/gemini-3.1-flash-image", None),
 }
@@ -183,9 +234,11 @@ MODEL_CONTEXT_LIMITS = {
     "claude-opus-4-6-thinking": 200000,
     "claude-opus-4.6-thinking": 200000,
     "claude-opus-4.6": 200000,
-    # GPT-OSS 120B Models (128k tokens)
+    # GPT-OSS 120B / 128B Models (128k tokens)
     "gpt-oss-120b-medium": 128000,
     "gpt-oss-120b": 128000,
+    "gpt-oss-128b-medium": 128000,
+    "gpt-oss-128b": 128000,
     # Default CLI fallback
     "antigravity": 1000000,
     "agy": 1000000,
@@ -1056,7 +1109,7 @@ def get_available_profiles() -> List[Optional[str]]:
             return profiles
 
     config_base = get_canonical_antigravity_dir()
-    cfg_file = os.path.join(config_base, "bridge_config.json")
+    cfg_file = get_bridge_config_path()
     if os.path.exists(cfg_file):
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
@@ -1402,6 +1455,7 @@ class ProfileManager:
                         "family_cooldowns": {
                             "gemini": int(time.time() + 315360000) if is_dis else 0,
                             "claude": 0,
+                            "gpt-oss": 0,
                         },
                         "last_checked": 0,
                         "last_used": 0,
@@ -1445,6 +1499,7 @@ class ProfileManager:
                                 else:
                                     self.state[k]["family_cooldowns"].setdefault("gemini", 0)
                                     self.state[k]["family_cooldowns"].setdefault("claude", 0)
+                                    self.state[k]["family_cooldowns"].setdefault("gpt-oss", 0)
                                     if self.state[k]["family_cooldowns"]["gemini"] == 0 and ex_u > time.time() and st in ("EXHAUSTED", "RATE_LIMITED"):
                                         self.state[k]["family_cooldowns"]["gemini"] = ex_u
                 except Exception as exc:
@@ -1522,12 +1577,28 @@ class ProfileManager:
         fam = get_model_family(model)
         if fam == "gemini" and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
             gemini_until = info.get("family_cooldowns", {}).get("gemini", 0)
-            claude_until = info.get("family_cooldowns", {}).get("claude", 0)
-            return (now >= gemini_until) or (now >= claude_until)
+            if now >= gemini_until:
+                return True
+            return self.get_available_fallback_model(profile, model) is not None
         return not self.is_in_cooldown(profile, model=model)
 
+    def get_available_fallback_model(self, profile: Optional[str], requested_model: Optional[str] = None) -> Optional[str]:
+        """Find the first model in the fallback chain that is not in cooldown for this profile."""
+        if not ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
+            return None
+        key = profile or "default"
+        info = self.state.get(key, {})
+        if info.get("status") == "DISABLED":
+            return None
+        chain = get_model_fallback_chain(requested_model)
+        for candidate_model in chain:
+            cand_fam = get_model_family(candidate_model)
+            if not self.is_family_in_cooldown(profile, cand_fam):
+                return candidate_model
+        return None
+
     def is_sonnet_fallback_candidate(self, profile: Optional[str], requested_model: Optional[str] = None) -> bool:
-        """Check if a profile is in Gemini cooldown but ready to execute via Claude Sonnet fallback."""
+        """Check if a profile is in Gemini cooldown but ready to execute via Claude or fallback chain."""
         if not ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
             return False
         key = profile or "default"
@@ -1536,8 +1607,9 @@ class ProfileManager:
             return False
         now = time.time()
         gemini_until = info.get("family_cooldowns", {}).get("gemini", 0)
-        claude_until = info.get("family_cooldowns", {}).get("claude", 0)
-        return (now < gemini_until) and (now >= claude_until)
+        if now >= gemini_until:
+            return False
+        return self.get_available_fallback_model(profile, requested_model) is not None
 
     def set_last_execution_model(self, profile: Optional[str], model: str) -> None:
         """Record the model last successfully executed by this profile."""
@@ -1566,15 +1638,18 @@ class ProfileManager:
         key = profile or "default"
         now = time.time()
         fam = get_model_family(model)
-        if fam == "gemini" and any(w in reason.lower() for w in ("claude", "sonnet", "anthropic")):
-            fam = "claude"
+        if fam == "gemini":
+            if any(w in reason.lower() for w in ("claude", "sonnet", "opus", "anthropic")):
+                fam = "claude"
+            elif any(w in reason.lower() for w in ("gpt-oss", "oss")):
+                fam = "gpt-oss"
 
         with self.lock:
             if key not in self.state:
                 self.state[key] = {
                     "status": "OK",
                     "exhausted_until": 0,
-                    "family_cooldowns": {"gemini": 0, "claude": 0},
+                    "family_cooldowns": {"gemini": 0, "claude": 0, "gpt-oss": 0},
                     "last_checked": 0,
                     "last_used": 0,
                     "last_reason": "",
@@ -1596,7 +1671,7 @@ class ProfileManager:
 
             until_ts = int(now + duration)
             self.state[key]["status"] = "EXHAUSTED"
-            f_cds = self.state[key].setdefault("family_cooldowns", {"gemini": 0, "claude": 0})
+            f_cds = self.state[key].setdefault("family_cooldowns", {"gemini": 0, "claude": 0, "gpt-oss": 0})
             f_cds[fam] = until_ts
             self.state[key]["exhausted_until"] = max(f_cds.values()) if f_cds else until_ts
             self.state[key]["last_checked"] = int(now)
@@ -1743,7 +1818,7 @@ class ProfileManager:
                         continue
                     self.state[k]["status"] = "OK"
                     self.state[k]["exhausted_until"] = 0
-                    self.state[k]["family_cooldowns"] = {"gemini": 0, "claude": 0}
+                    self.state[k]["family_cooldowns"] = {"gemini": 0, "claude": 0, "gpt-oss": 0}
                     self.state[k]["consecutive_errors"] = 0
                     self.state[k]["window_requests"] = 0
                     self.state[k]["window_start"] = int(now)
@@ -1798,9 +1873,10 @@ class ProfileManager:
 
                 if use_fallback_routing:
                     is_gemini_down = (now < gemini_cd) or (status == "EXHAUSTED" and gemini_cd == 0 and now < ex_until)
-                    is_claude_down = (now < claude_cd)
-                    if is_gemini_down and is_claude_down:
-                        earliest_res = min(gemini_cd, claude_cd) if (gemini_cd and claude_cd) else max(gemini_cd, claude_cd, ex_until)
+                    fb_cand = self.get_available_fallback_model(p, model) if is_gemini_down else None
+                    if is_gemini_down and not fb_cand:
+                        active_cds = [cd for cd in f_cds.values() if cd > now]
+                        earliest_res = min(active_cds) if active_cds else (ex_until or (now + 300))
                         exhausted.append((earliest_res, p))
                         continue
                 else:
@@ -2048,10 +2124,12 @@ class ProfileManager:
 
                 gem_rem = int(self.get_family_cooldown_remaining(p, "gemini"))
                 claude_rem = int(self.get_family_cooldown_remaining(p, "claude"))
+                gpt_oss_rem = int(self.get_family_cooldown_remaining(p, "gpt-oss"))
                 is_fallback = self.is_sonnet_fallback_candidate(p)
 
                 info["gemini_cooldown_seconds_remaining"] = gem_rem
                 info["claude_cooldown_seconds_remaining"] = claude_rem
+                info["gpt_oss_cooldown_seconds_remaining"] = gpt_oss_rem
                 info["sonnet_fallback_candidate"] = is_fallback
                 info["last_execution_model"] = self.get_last_execution_model(p)
 
@@ -2098,13 +2176,13 @@ class ProfileManager:
                     continue
 
                 gemini_rem = int(self.get_family_cooldown_remaining(p, "gemini"))
-                claude_rem = int(self.get_family_cooldown_remaining(p, "claude"))
+                has_fb = self.get_available_fallback_model(p) is not None
 
                 if gemini_rem > 0:
-                    if claude_rem == 0 and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
+                    if has_fb and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
                         sonnet_fallback_list.append((pk, gemini_rem))
                     else:
-                        cooldown_list.append((pk, max(gemini_rem, claude_rem)))
+                        cooldown_list.append((pk, gemini_rem))
                 else:
                     ready_list.append(pk)
 
@@ -2115,8 +2193,16 @@ class ProfileManager:
             # Header line for used profile
             gemini_rem_used = int(self.get_family_cooldown_remaining(used_profile, "gemini"))
             last_model = self.get_last_execution_model(used_profile)
-            if gemini_rem_used > 0 and (last_model and "claude" in last_model.lower() or self.is_sonnet_fallback_candidate(used_profile)):
-                model_label = "Claude Sonnet 4.6"
+            if gemini_rem_used > 0 and (last_model and ("claude" in last_model.lower() or "opus" in last_model.lower() or "gpt-oss" in last_model.lower()) or self.is_sonnet_fallback_candidate(used_profile)):
+                if last_model and "opus" in last_model.lower():
+                    model_label = "Claude Opus 4.6 (Thinking)"
+                elif last_model and "gpt-oss" in last_model.lower():
+                    model_label = "GPT-OSS 120B (Medium)"
+                elif last_model and "sonnet" in last_model.lower():
+                    model_label = "Claude Sonnet 4.6"
+                else:
+                    fb = self.get_available_fallback_model(used_profile, last_model)
+                    model_label = fb or "Model Fallback"
                 lines = [
                     "",
                     "---",
@@ -2132,7 +2218,7 @@ class ProfileManager:
             if total_count > 1:
                 pool_parts = [f"🟢 **{ready_count}/{enabled_count}** Ready (Gemini)"]
                 if sonnet_fallback_list:
-                    pool_parts.append(f"🟣 **{len(sonnet_fallback_list)}** in Cooldown (Sonnet Fallback)")
+                    pool_parts.append(f"🟣 **{len(sonnet_fallback_list)}** in Cooldown (Model Fallback)")
                 if cooldown_list:
                     pool_parts.append(f"🔴 **{len(cooldown_list)}** in Cooldown")
                 if disabled_list:
@@ -2140,13 +2226,13 @@ class ProfileManager:
                 lines.append(f"> 📊 **Quota Pool:** {' • '.join(pool_parts)}")
                 if sonnet_fallback_list:
                     fb_items = [f"`{p}` (⏳ Gemini reset in {format_cooldown_duration(rem)})" for p, rem in sorted(sonnet_fallback_list, key=lambda x: x[1])]
-                    lines.append(f"> 🟣 **Sonnet Fallback Active:** {', '.join(fb_items)}")
+                    lines.append(f"> 🟣 **Model Fallback Active:** {', '.join(fb_items)}")
                 if cooldown_list:
                     cd_items = [f"`{p}` (⏳ {format_cooldown_duration(rem)})" for p, rem in sorted(cooldown_list, key=lambda x: x[1])]
                     lines.append(f"> ⏳ **In Cooldown:** {', '.join(cd_items)}")
             else:
                 if gemini_rem_used > 0 and self.is_sonnet_fallback_candidate(used_profile):
-                    status_desc = f"🟣 Sonnet Fallback Active (Gemini reset in {format_cooldown_duration(gemini_rem_used)})"
+                    status_desc = f"🟣 Model Fallback Active (Gemini reset in {format_cooldown_duration(gemini_rem_used)})"
                 else:
                     status_desc = "🟢 Ready" if key in ready_list else "🔴 In Cooldown"
                 lines.append(f"> 📊 **Quota Status:** {status_desc} (~{quota_pct}%)")
@@ -2666,8 +2752,10 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
         flags.extend(["--model", "Claude Sonnet 4.6 (Thinking)"])
     elif "claude-opus-4.6" in model_lower:
         flags.extend(["--model", "Claude Opus 4.6 (Thinking)"])
-    elif "gpt-oss-120b" in model_lower:
+    elif "gpt-oss-120b" in model_lower or "gpt-oss-128b" in model_lower:
         flags.extend(["--model", "gpt-oss-120b"])
+        if not effort:
+            effort = "medium"
     elif model_lower not in ("antigravity", "agy", "default", "local") and not model_clean.startswith("-"):
         flags.extend(["--model", model_clean])
 
@@ -3303,8 +3391,9 @@ def execute_cli_with_fallback(
 
         if model_name and get_model_family(model_name) == "gemini" and ANTIGRAVITY_MODEL_FALLBACK_ENABLED:
             if mgr.is_family_in_cooldown(profile, "gemini"):
-                if not mgr.is_family_in_cooldown(profile, "claude"):
-                    effective_model = DEFAULT_SONNET_FALLBACK_MODEL
+                fb_model = mgr.get_available_fallback_model(profile, model_name)
+                if fb_model:
+                    effective_model = fb_model
                     is_fallback_active = True
                     gemini_rem = mgr.get_family_cooldown_remaining(profile, "gemini")
                     logger.info(
@@ -3315,10 +3404,10 @@ def execute_cli_with_fallback(
                     )
                 else:
                     logger.warning(
-                        "Skipping fallback profile in cooldown for both Gemini and Claude: %s",
+                        "Skipping fallback profile in cooldown for Gemini and all fallback models: %s",
                         profile_key,
                     )
-                    errors.append(f"Profile '{profile_key}' exhausted for both Gemini and Claude. Skipping.")
+                    errors.append(f"Profile '{profile_key}' exhausted for Gemini and all fallback models. Skipping.")
                     mgr.release_profile(profile)
                     continue
         elif mgr.is_in_cooldown(profile, model=model_name):

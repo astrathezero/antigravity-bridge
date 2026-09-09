@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 import urllib.request
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, mock_open
 
 # Allow import from current dir or scripts dir
 try:
@@ -1435,6 +1435,87 @@ class TestAntigravityBridge(unittest.TestCase):
             ordered = pm.get_ordered_profiles(model="gemini-3.8-flash")
             self.assertEqual(ordered[0], "p_healthy")
             self.assertEqual(ordered[1], "p_cooldown")
+
+
+    def test_dynamic_fallback_gemini_to_opus_to_gpt_oss(self):
+        """Test multi-tier fallback: Gemini -> Claude Opus -> GPT-OSS when quota limits are hit."""
+        pm = ProfileManager(profiles=["p_tiered"], concurrency_per_profile=1)
+
+        # 1. Tier 0: Gemini healthy
+        executed = []
+        def mock_exec(cmd_tpl, prompt, timeout=180.0, profile=None, model_name=None, **kwargs):
+            executed.append(model_name)
+            return f"Result from {model_name}"
+
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            res1 = execute_cli_with_fallback('echo "{prompt}"', "Hi", profile_manager=pm, model_name="gemini-3.8-flash-high")
+            self.assertEqual(res1.effective_model, "gemini-3.8-flash-high")
+            self.assertEqual(executed, ["gemini-3.8-flash-high"])
+
+        # 2. Tier 1: Gemini in cooldown -> falls back to Opus 4.6 Thinking
+        pm.mark_exhausted("p_tiered", "Gemini 429 quota reached", model="gemini-3.8-flash-high")
+        self.assertTrue(pm.is_family_in_cooldown("p_tiered", "gemini"))
+        self.assertFalse(pm.is_family_in_cooldown("p_tiered", "claude"))
+        self.assertFalse(pm.is_family_in_cooldown("p_tiered", "gpt-oss"))
+
+        executed.clear()
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            res2 = execute_cli_with_fallback('echo "{prompt}"', "Hi", profile_manager=pm, model_name="gemini-3.8-flash-high")
+            self.assertEqual(res2.effective_model, "claude-opus-4-6-thinking")
+            self.assertEqual(executed, ["claude-opus-4-6-thinking"])
+
+        # 3. Tier 2: Both Gemini and Claude in cooldown -> falls back to GPT-OSS 120B/128B
+        pm.mark_exhausted("p_tiered", "Claude quota reached", model="claude-opus-4-6-thinking")
+        self.assertTrue(pm.is_family_in_cooldown("p_tiered", "gemini"))
+        self.assertTrue(pm.is_family_in_cooldown("p_tiered", "claude"))
+        self.assertFalse(pm.is_family_in_cooldown("p_tiered", "gpt-oss"))
+
+        executed.clear()
+        with patch.object(antigravity_bridge, "execute_cli_command", side_effect=mock_exec):
+            res3 = execute_cli_with_fallback('echo "{prompt}"', "Hi", profile_manager=pm, model_name="gemini-3.8-flash-high")
+            self.assertEqual(res3.effective_model, "gpt-oss-120b-medium")
+            self.assertEqual(executed, ["gpt-oss-120b-medium"])
+
+        # 4. Tier 3: Gemini, Claude, and GPT-OSS all in cooldown -> raises RuntimeError
+        pm.mark_exhausted("p_tiered", "GPT-OSS quota reached", model="gpt-oss-120b-medium")
+        self.assertTrue(pm.is_family_in_cooldown("p_tiered", "gpt-oss"))
+        self.assertFalse(pm.is_executable("p_tiered", model="gemini-3.8-flash-high"))
+
+        with self.assertRaises(RuntimeError) as ctx:
+            execute_cli_with_fallback('echo "{prompt}"', "Hi", profile_manager=pm, model_name="gemini-3.8-flash-high")
+        self.assertIn("All agy profile execution attempts failed", str(ctx.exception))
+
+    def test_gpt_oss_128b_model_aliases(self):
+        """Test that gpt-oss-128b and gpt-oss-128b-medium resolve properly to agy flags."""
+        flags_128b = resolve_model_flags("gpt-oss-128b")
+        self.assertEqual(flags_128b, ["--model", "gpt-oss-120b", "--effort", "medium"])
+
+        flags_128b_med = resolve_model_flags("gpt-oss-128b-medium")
+        self.assertEqual(flags_128b_med, ["--model", "gpt-oss-120b", "--effort", "medium"])
+
+        # Context limits
+        self.assertEqual(antigravity_bridge.MODEL_CONTEXT_LIMITS["gpt-oss-128b"], 128000)
+        self.assertEqual(antigravity_bridge.MODEL_CONTEXT_LIMITS["gpt-oss-128b-medium"], 128000)
+
+    def test_custom_fallback_chain_from_env(self):
+        """Test that ANTIGRAVITY_FALLBACK_CHAIN env var overrides fallback models."""
+        with patch.dict(os.environ, {"ANTIGRAVITY_FALLBACK_CHAIN": "custom-m1,custom-m2"}):
+            chain = antigravity_bridge.get_model_fallback_chain("gemini-3.8-flash-high")
+            self.assertEqual(chain, ["custom-m1", "custom-m2"])
+
+    def test_custom_fallback_chain_from_bridge_config(self):
+        """Test that bridge_config.json fallback_chains configure per-model fallbacks."""
+        mock_cfg = json.dumps({
+            "fallback_chains": {
+                "gemini-3.8-flash-high": ["claude-opus-4-6-thinking", "gpt-oss-120b-medium"],
+                "default": ["claude-opus-4-6-thinking"]
+            }
+        })
+        with patch("builtins.open", mock_open(read_data=mock_cfg)), \
+             patch("os.path.exists", return_value=True), \
+             patch.dict(os.environ, {}, clear=True):
+            chain = antigravity_bridge.get_model_fallback_chain("gemini-3.8-flash-high")
+            self.assertEqual(chain, ["claude-opus-4-6-thinking", "gpt-oss-120b-medium"])
 
 
 if __name__ == "__main__":

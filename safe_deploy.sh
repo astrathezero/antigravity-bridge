@@ -102,9 +102,9 @@ cmd_test() {
 }
 
 get_api_key() {
-    python3 -c '
+    python3 -c "
 import sys, os
-sys.path.insert(0, "/home/attasit/antigravity-bridge")
+sys.path.insert(0, '$SCRIPT_DIR')
 try:
     import antigravity_bridge
     keys = antigravity_bridge.get_configured_api_keys()
@@ -112,22 +112,34 @@ try:
         print(list(keys.keys())[0])
 except Exception:
     pass
-' 2>/dev/null
+" 2>/dev/null
+}
+
+restart_bridge_process() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active antigravity-bridge.service >/dev/null 2>&1; then
+        log_info "⚡ Restarting antigravity-bridge service (via systemctl)..."
+        systemctl restart antigravity-bridge.service
+    else
+        log_info "⚡ Restarting antigravity-bridge process (direct daemon)..."
+        pkill -f "antigravity_bridge.py" || true
+        sleep 1
+        nohup python3 "$LIVE_FILE" --host 0.0.0.0 --port 8000 --enable-cors >/tmp/antigravity_bridge.log 2>&1 &
+    fi
 }
 
 wait_for_health() {
     local timeout=15
     local api_key
     api_key=$(get_api_key)
-    local auth_header=()
-    if [ -n "$api_key" ]; then
-        auth_header=(-H "Authorization: Bearer $api_key")
-    fi
 
     log_info "⏳ Waiting for Antigravity Bridge service to become healthy (timeout: ${timeout}s)..."
     for ((i=1; i<=timeout; i++)); do
         local resp
-        resp=$(curl -s -o /dev/null -w "%{http_code}" "${auth_header[@]}" "$HEALTH_URL" 2>/dev/null || echo "000")
+        if [ -n "$api_key" ]; then
+            resp=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $api_key" "$HEALTH_URL" 2>/dev/null || echo "000")
+        else
+            resp=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" 2>/dev/null || echo "000")
+        fi
         if [ "$resp" = "200" ]; then
             log_ok "Service is UP and HEALTHY! (HTTP 200 after ${i}s)"
             return 0
@@ -170,8 +182,7 @@ cmd_deploy() {
     cp "$staging" "$LIVE_FILE"
 
     # Step 4: Restart service
-    log_info "⚡ Restarting antigravity-bridge service (via systemd auto-restart on SIGTERM)..."
-    pkill -f "antigravity_bridge.py" || true
+    restart_bridge_process
     sleep 2
 
     # Step 5: Post-deployment health verification
@@ -181,12 +192,12 @@ cmd_deploy() {
     else
         log_err "🚨 CRITICAL: Post-deployment health check failed! INITIATING AUTO-ROLLBACK..."
         cp "$latest_bak" "$LIVE_FILE"
-        pkill -f "antigravity_bridge.py" || true
+        restart_bridge_process
         sleep 3
         if wait_for_health; then
             log_warn "⚠️ Rollback to backup was successful. Service is restored with previous working version."
         else
-            log_err "❌ FATAL: Auto-rollback failed to restore health. Please check systemctl logs manually!"
+            log_err "❌ FATAL: Auto-rollback failed to restore health. Please check process logs manually!"
         fi
         exit 1
     fi
@@ -202,7 +213,7 @@ cmd_rollback() {
 
     log_warn "Reverting $LIVE_FILE to $bak_file..."
     cp "$bak_file" "$LIVE_FILE"
-    pkill -f "antigravity_bridge.py" || true
+    restart_bridge_process
     sleep 3
 
     if wait_for_health; then
@@ -215,16 +226,20 @@ cmd_rollback() {
 
 cmd_status() {
     log_info "📊 Current Service Status:"
-    systemctl status antigravity-bridge.service --no-pager | head -n 15 || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl status antigravity-bridge.service --no-pager | head -n 15 || true
+    else
+        ps aux | grep "[a]ntigravity_bridge.py" || true
+    fi
     echo ""
     local api_key
     api_key=$(get_api_key)
-    local auth_header=()
-    if [ -n "$api_key" ]; then
-        auth_header=(-H "Authorization: Bearer $api_key")
-    fi
     log_info "🩺 Health Check Endpoint Output:"
-    curl -s "${auth_header[@]}" "$HEALTH_URL" | python3 -m json.tool | head -n 25 || true
+    if [ -n "$api_key" ]; then
+        curl -s -H "Authorization: Bearer $api_key" "$HEALTH_URL" | python3 -m json.tool | head -n 25 || true
+    else
+        curl -s "$HEALTH_URL" | python3 -m json.tool | head -n 25 || true
+    fi
     echo ""
 }
 
