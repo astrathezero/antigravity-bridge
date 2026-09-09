@@ -127,7 +127,13 @@ server {
 ### 7. ตรวจสอบสถานะ
 
 ```bash
-# Health check
+# 1. ทดสอบและตรวจสอบสถานะ Docker + noVNC อัตโนมัติ:
+bash deploy/test-docker.sh
+
+# ดู logs ภายใน container:
+bash deploy/test-docker.sh --logs
+
+# Health check Bridge API
 curl http://127.0.0.1:8000/health | python3 -m json.tool | grep -E "web_connected|account_email"
 
 # Extension status

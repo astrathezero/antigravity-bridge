@@ -201,7 +201,7 @@
       } catch {}
     }
     const allButtons = Array.from(document.querySelectorAll('button'));
-    return allButtons.find(btn => (btn.offsetParent !== null || btn.getBoundingClientRect().width > 0) && isLikelySendButton(btn)) || null;
+    return allButtons.find(btn => isElementVisible(btn) && isLikelySendButton(btn)) || null;
   }
 
   // 4. Check if Gemini is actively generating a response (Stop button present)
@@ -707,7 +707,7 @@
     ];
 
     const menuItems = Array.from(document.querySelectorAll(itemSelectors.join(',')))
-      .filter(it => it.offsetParent !== null || it.getBoundingClientRect().width > 0);
+      .filter(it => isElementVisible(it));
 
     if (menuItems.length === 0) {
       document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
@@ -991,22 +991,31 @@
       if (!current) return;
       sawAnyText = true;
 
+      // If emittedText contains a <think> block that has since collapsed from the on-screen DOM,
+      // re-anchor current with that <think> block so the shared prefix comparison remains stable
+      // and doesn't fall back to shared=0 (which would re-slice and duplicate the answer text).
+      let normalizedCurrent = current;
+      const thinkMatch = /^<think>[\s\S]*?<\/think>\n\n/.exec(emittedText);
+      if (thinkMatch && !normalizedCurrent.startsWith('<think>')) {
+        normalizedCurrent = thinkMatch[0] + normalizedCurrent;
+      }
+
       // `emittedText` is a high-water mark, never rewound. Gemini rewrites text in place as
       // well as appending — the thoughts panel edits itself while it reasons, and markdown
       // re-renders — so the screen regularly holds *less* than we have already streamed.
       // Nothing new to say in that case; the authoritative text goes out with AG_JOB_DONE.
-      if (current.length <= emittedText.length) {
-        if (current !== emittedText) sawRerender = true;
+      if (normalizedCurrent.length <= emittedText.length) {
+        if (normalizedCurrent !== emittedText) sawRerender = true;
         return;
       }
 
       // There is more text on screen than we have sent. Resynchronise on the common prefix
       // rather than slicing at the old offset: after an in-place edit the two strings diverge
       // partway through, and slicing at the stale offset splices a chunk out of the answer.
-      const shared = commonPrefixLength(emittedText, current);
+      const shared = commonPrefixLength(emittedText, normalizedCurrent);
       if (shared < emittedText.length) sawRerender = true;
-      const delta = current.slice(shared);
-      emittedText = current;
+      const delta = normalizedCurrent.slice(shared);
+      emittedText = normalizedCurrent;
       window.postMessage({ type: 'AG_JOB_DELTA', jobId, delta }, '*');
     };
 
@@ -1099,11 +1108,19 @@
         warnStopDetectionOnce();
       }
 
-      // Completion Condition 3: Absolute text stall (no change for 5s)
+      // Completion Condition 3: Absolute text stall. If Stop button is still visible,
+      // allow deep-thinking models more time (up to 15s) before treating zero change as a stall.
       if (sawAnyText && timeSinceChange > 5000) {
-        clearInterval(pollInterval);
-        finishJob();
-        return;
+        if (!isGenerating()) {
+          clearInterval(pollInterval);
+          finishJob();
+          return;
+        } else if (timeSinceChange > 15000) {
+          console.warn(`[Antigravity Page] Job ${jobId}: generation stalled with stop button still visible (>15s without change). Finishing job.`);
+          clearInterval(pollInterval);
+          finishJob();
+          return;
+        }
       }
 
       // Failure Condition: Gemini has clearly finished (action buttons rendered) but the

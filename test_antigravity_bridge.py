@@ -1684,6 +1684,20 @@ class TestAntigravityBridge(unittest.TestCase):
 
             self.assertIsNone(antigravity_bridge.find_profile_by_email("charlie@gmail.com"))
 
+    def test_cli_execution_result_preserves_attributes(self):
+        """CLIExecutionResult must preserve .channel and .effective_model on the returned object."""
+        res = antigravity_bridge.CLIExecutionResult("Output text", "p1", "gemini-3.8-flash", channel="web")
+        self.assertEqual(res.channel, "web")
+        self.assertEqual(res.effective_model, "gemini-3.8-flash")
+        self.assertEqual(res[0], "Output text")
+        self.assertEqual(res[1], "p1")
+        # Ensure tuple unpacking works without breaking attribute access on the original instance
+        out, prof = res
+        self.assertEqual(out, "Output text")
+        self.assertEqual(prof, "p1")
+        self.assertEqual(getattr(res, "channel", None), "web")
+        self.assertEqual(getattr(res, "effective_model", None), "gemini-3.8-flash")
+
 
 if __name__ == "__main__":
     unittest.main()

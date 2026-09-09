@@ -126,11 +126,15 @@ try:
 except: pass
 " 2>/dev/null || true)
 
-        # Re-open any missing accounts
+        # Re-open any missing accounts (matches both /app and /canvas)
         for i in $(seq 0 $((CHROME_ACCOUNTS - 1))); do
             URL="${CUSTOM_URL_LIST[$i]:-${DEFAULT_URLS[$i]}}"
-            BASE_PATH=$(echo "$URL" | sed 's|https://gemini.google.com||')
-            if ! echo "$OPEN_URLS" | grep -q "gemini.google.com${BASE_PATH}"; then
+            if [ "$i" -eq 0 ]; then
+                ACCOUNT_PATTERN="gemini\.google\.com/(app|canvas)"
+            else
+                ACCOUNT_PATTERN="gemini\.google\.com/u/${i}/(app|canvas)"
+            fi
+            if ! echo "$OPEN_URLS" | grep -Eq "$ACCOUNT_PATTERN"; then
                 echo "[start-browser] health-check: re-opening missing tab → $URL"
                 curl -sf -X PUT "http://127.0.0.1:9222/json/new?${URL}" > /dev/null 2>&1 || true
             fi

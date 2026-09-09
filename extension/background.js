@@ -32,7 +32,9 @@ const emailByAccountIndex = new Map();
 
 function accountIndexFromUrl(url) {
   const m = /\/u\/(\d+)\//.exec(url || '');
-  return m ? Number(m[1]) : null;
+  if (m) return Number(m[1]);
+  if (/gemini\.google\.com\/(?:app|canvas)/.test(url || '')) return 0;
+  return null;
 }
 
 // The /u/N/ index whose signed-in email matches this profile, or null if never observed.
@@ -255,6 +257,9 @@ async function ensureConnectionForProfile(profile, email) {
     // Cycle connection every 4 minutes before browser stream timeout
     conn.cycleTimer = setTimeout(() => {
       console.log(`[Antigravity BG] [${profile}] Proactively cycling SSE connection...`);
+      if (conn.controller) {
+        try { conn.controller.abort(); } catch {}
+      }
       ensureConnectionForProfile(profile, conn.email);
     }, CYCLE_MS);
 

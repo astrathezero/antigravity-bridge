@@ -5586,8 +5586,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 or (req_json.get("channel") if isinstance(req_json.get("channel"), str) else "auto")
             )
 
+            exec_result = None
             try:
-                output_text, used_profile = execute_cli_with_fallback(
+                exec_result = execute_cli_with_fallback(
                     custom_tpl,
                     prompt_text,
                     timeout=prof_timeout,
@@ -5599,7 +5600,9 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     stall_timeout=stall_timeout,
                     channel=req_channel,
                 )
-                actual_model = getattr(output_text, "effective_model", None) or profile_manager.get_last_execution_model(used_profile) or model
+                output_text = exec_result[0] if isinstance(exec_result, tuple) else exec_result
+                used_profile = exec_result[1] if isinstance(exec_result, tuple) and len(exec_result) > 1 else None
+                actual_model = getattr(exec_result, "effective_model", None) or profile_manager.get_last_execution_model(used_profile) or model
                 logger.info(
                     "Successfully executed CLI using profile: %s (model=%s, effective_model=%s, timeout=%.1fs, stall_timeout=%.1fs)",
                     used_profile or "default",
@@ -5780,13 +5783,24 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 openai_tool_calls = None
                 finish_reason = "stop"
 
+            # Determine channel from result object (cli or web)
+            _exec_channel = getattr(exec_result, "channel", None) if exec_result is not None else None
+            _exec_channel = _exec_channel or ("web" if (model and "web" in model) else "cli")
+            _channel_suffix = f"-{_exec_channel}"  # e.g. "-cli" or "-web"
+            _profile_used = used_profile or "default"
+            _effective_model = actual_model or model or "default"
+            # Model field: append channel suffix so clients can see routing at a glance
+            _response_model = f"{_effective_model}{_channel_suffix}"
+            _system_fingerprint = f"agy-{_exec_channel}|profile:{_profile_used}|model:{_effective_model}"
+
             if stream:
                 if parsed_tool_calls:
                     chunk_start = {
                         "id": completion_id,
                         "object": "chat.completion.chunk",
                         "created": created_ts,
-                        "model": model,
+                        "model": _response_model,
+                        "system_fingerprint": _system_fingerprint,
                         "choices": [
                             {
                                 "index": 0,
@@ -5815,7 +5829,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                         "id": completion_id,
                         "object": "chat.completion.chunk",
                         "created": created_ts,
-                        "model": model,
+                        "model": _response_model,
+                        "system_fingerprint": _system_fingerprint,
                         "choices": [
                             {
                                 "index": 0,
@@ -5829,7 +5844,8 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created_ts,
-                    "model": model,
+                    "model": _response_model,
+                    "system_fingerprint": _system_fingerprint,
                     "choices": [
                         {
                             "index": 0,
@@ -5855,21 +5871,12 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
             if openai_tool_calls:
                 message_obj["tool_calls"] = openai_tool_calls
 
-            # Determine channel from result object (cli or web)
-            _exec_channel = getattr(output_text, "channel", None) if output_text is not None else None
-            _exec_channel = _exec_channel or ("web" if (model and "web" in model) else "cli")
-            _channel_suffix = f"-{_exec_channel}"  # e.g. "-cli" or "-web"
-            _profile_used = used_profile or "default"
-            _effective_model = actual_model or model or "default"
-            # Model field: append channel suffix so clients can see routing at a glance
-            _response_model = f"{_effective_model}{_channel_suffix}"
-
             response_payload = {
                 "id": completion_id,
                 "object": "chat.completion",
                 "created": created_ts,
                 "model": _response_model,
-                "system_fingerprint": f"agy-{_exec_channel}|profile:{_profile_used}|model:{_effective_model}",
+                "system_fingerprint": _system_fingerprint,
                 "choices": [
                     {
                         "index": 0,
