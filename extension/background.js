@@ -132,7 +132,16 @@ async function fetchBridgeProfiles() {
     const res = await fetch(url);
     if (res.ok) {
       const data = await res.json();
-      cachedBridgeProfiles = data.profiles || [];
+      if (Array.isArray(data.profiles)) {
+        cachedBridgeProfiles = data.profiles;
+      } else if (data.profiles && typeof data.profiles === 'object') {
+        cachedBridgeProfiles = Object.entries(data.profiles).map(([name, prof]) => ({
+          name,
+          ...(typeof prof === 'object' ? prof : {})
+        }));
+      } else {
+        cachedBridgeProfiles = [];
+      }
       lastProfileFetchTime = Date.now();
       return cachedBridgeProfiles;
     }
@@ -144,46 +153,54 @@ async function fetchBridgeProfiles() {
 
 // 5. Intelligent Profile Resolution from Email & URL
 function resolveProfile(email, url) {
-  const cleanEmail = (email || '').toLowerCase().trim();
+  try {
+    const cleanEmail = (email || '').toLowerCase().trim();
+    const profiles = Array.isArray(cachedBridgeProfiles) ? cachedBridgeProfiles : [];
 
-  // 1. Exact match by account_email in bridge profiles
-  if (cleanEmail && cachedBridgeProfiles.length > 0) {
-    const exact = cachedBridgeProfiles.find(p =>
-      p.account_email && p.account_email.toLowerCase().trim() === cleanEmail
-    );
-    if (exact) return exact.name;
-
-    // 2. Match by email username portion
-    const userPart = cleanEmail.split('@')[0];
-    const partial = cachedBridgeProfiles.find(p =>
-      p.name.toLowerCase() === userPart || userPart.includes(p.name.toLowerCase())
-    );
-    if (partial) return partial.name;
-  }
-
-  // 3. Match by the Google account index in the URL (/u/N/), using the email we have
-  //    previously observed at that index in this browser. This replaces a hardcoded account
-  //    name that mapped every /u/1/ tab onto one specific person's profile, which silently
-  //    routed other users' jobs to the wrong Google account.
-  const idx = accountIndexFromUrl(url);
-  if (idx !== null) {
-    const knownEmail = emailByAccountIndex.get(idx);
-    if (knownEmail) {
-      const byIndex = cachedBridgeProfiles.find(p =>
-        p.account_email && p.account_email.toLowerCase().trim() === knownEmail
+    // 1. Exact match by account_email in bridge profiles
+    if (cleanEmail && profiles.length > 0) {
+      const exact = profiles.find(p =>
+        p.account_email && p.account_email.toLowerCase().trim() === cleanEmail
       );
-      if (byIndex) return byIndex.name;
+      if (exact) return exact.name;
+
+      // 2. Match by email username portion
+      const userPart = cleanEmail.split('@')[0];
+      const partial = profiles.find(p =>
+        p.name && (p.name.toLowerCase() === userPart || userPart.includes(p.name.toLowerCase()))
+      );
+      if (partial) return partial.name;
     }
-  }
 
-  // 4. Default to username portion if email present
-  if (cleanEmail) {
-    return cleanEmail.split('@')[0];
-  }
+    // 3. Match by the Google account index in the URL (/u/N/)
+    const idx = accountIndexFromUrl(url);
+    if (idx !== null && profiles.length > 0) {
+      const knownEmail = emailByAccountIndex.get(idx);
+      if (knownEmail) {
+        const byIndex = profiles.find(p =>
+          p.account_email && p.account_email.toLowerCase().trim() === knownEmail
+        );
+        if (byIndex) return byIndex.name;
+      }
+    }
 
-  // No email detected yet. Returning a guess here would open an SSE for a profile this tab
-  // may not belong to, so report "unknown" and let the DETECTED_EMAIL message resolve it.
-  return '';
+    // 4. If exactly one bridge profile exists, map to it directly
+    if (profiles.length === 1 && profiles[0]?.name) {
+      return profiles[0].name;
+    }
+
+    // 5. Default to username portion if email present
+    if (cleanEmail) {
+      return cleanEmail.split('@')[0];
+    }
+
+    // No email detected yet. Returning a guess here would open an SSE for a profile this tab
+    // may not belong to, so report "unknown" and let the DETECTED_EMAIL message resolve it.
+    return '';
+  } catch (err) {
+    console.warn('[Antigravity BG] Error resolving profile:', err);
+    return 'default';
+  }
 }
 
 // 6. Multi-Profile SSE Connection Management

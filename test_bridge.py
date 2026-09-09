@@ -213,8 +213,21 @@ def test_extension_status(client: BridgeClient) -> bool:
             for c in data.get("clients", []):
                 print(f"    • Client ID: {c.get('client_id')} | Profile: {c.get('profile')} | Tab: {c.get('tab_id')} | URL: {c.get('url')}")
         else:
-            print_info("No Chrome Extension tabs currently connected (Normal if browser is closed).")
+            print_info(f"No Chrome Extension tabs currently connected on {client.base_url}.")
             print_info("👉 To connect: Open Chrome with the Antigravity extension enabled on https://gemini.google.com")
+
+            # Check if Docker bridge has connected extension clients
+            if ":8000" in client.base_url:
+                d_url = get_docker_bridge_url()
+                try:
+                    d_client = BridgeClient(base_url=d_url)
+                    d_data = d_client.get("/extension/status")
+                    if d_data.get("connected_clients_count", 0) > 0:
+                        print()
+                        print_ok(f"💡 Found {d_data.get('connected_clients_count')} extension connection(s) on Docker Bridge ({d_url})!")
+                        print_info(f"👉 Run with: {BOLD}python3 test_bridge.py --docker --extension{RESET}")
+                except Exception:
+                    pass
         return True
     except Exception as e:
         print_err(f"Extension status check failed: {e}")
@@ -312,13 +325,33 @@ def test_anthropic_messages(
         return False
 
 
+def get_docker_bridge_url() -> str:
+    """Resolve Docker bridge port from deploy/.env (default: 8080)."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deploy", ".env")
+    port = 8080
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("BRIDGE_PORT="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val.isdigit():
+                            port = int(val)
+                            break
+        except Exception:
+            pass
+    return f"http://127.0.0.1:{port}"
+
+
 # ---------------------------------------------------------------------------
 # Interactive Menu & Entrypoint
 # ---------------------------------------------------------------------------
 
 def run_interactive(client: BridgeClient) -> None:
     while True:
-        print_header("Antigravity Bridge - Interactive Diagnostics & Test Menu")
+        target_name = "Docker Container" if ":8080" in client.base_url else "Local Host"
+        print_header(f"Antigravity Bridge Diagnostics | Target: {client.base_url} ({target_name})")
         print("  1. 🩺 Full System Health & Quota Overview")
         print("  2. 🤖 List Registered Models")
         print("  3. 🔌 Check Browser Web Extension Status")
@@ -328,11 +361,12 @@ def run_interactive(client: BridgeClient) -> None:
         print("  7. 🖥️  Test CLI Channel (channel='cli')")
         print("  8. 🅰️  Test Anthropic Messages Endpoint (/v1/messages)")
         print("  9. 🚀 Run ALL Tests Sequentially")
+        print(f"  T. 🔄 Toggle Target (Current: {client.base_url} → Switch to {'Local :8000' if ':8080' in client.base_url else 'Docker :8080'})")
         print("  0. 🚪 Exit")
         print()
 
         try:
-            choice = input(f"{BOLD}Select an option [0-9]: {RESET}").strip()
+            choice = input(f"{BOLD}Select an option [0-9, T]: {RESET}").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting.")
             break
@@ -359,6 +393,12 @@ def run_interactive(client: BridgeClient) -> None:
             test_extension_status(client)
             test_chat_completion(client)
             test_anthropic_messages(client)
+        elif choice.lower() == "t":
+            if ":8080" in client.base_url:
+                client.base_url = "http://127.0.0.1:8000"
+            else:
+                client.base_url = get_docker_bridge_url()
+            print_ok(f"Switched target bridge to: {client.base_url}")
         elif choice in ("0", "q", "exit"):
             print("\nGoodbye!\n")
             break
@@ -369,8 +409,12 @@ def run_interactive(client: BridgeClient) -> None:
 
 
 def main():
+    docker_url = get_docker_bridge_url()
+
     parser = argparse.ArgumentParser(description="Antigravity Bridge Automated & Interactive Test Client")
-    parser.add_argument("--url", default=os.environ.get("ANTIGRAVITY_BASE_URL", "http://127.0.0.1:8000"), help="Base URL of Antigravity Bridge")
+    parser.add_argument("--url", default=None, help="Base URL of Antigravity Bridge (e.g. http://127.0.0.1:8000)")
+    parser.add_argument("--port", type=int, default=None, help="Target port on 127.0.0.1 (e.g. 8080 for Docker, 8000 for Local)")
+    parser.add_argument("--docker", action="store_true", help=f"Target the Docker bridge container ({docker_url})")
     parser.add_argument("--key", default=os.environ.get("ANTIGRAVITY_API_KEY"), help="Optional API Key for authentication")
     parser.add_argument("--all", action="store_true", help="Run all diagnostic tests non-interactively")
     parser.add_argument("--health", action="store_true", help="Run health & quota check only")
@@ -383,7 +427,18 @@ def main():
     parser.add_argument("--anthropic", action="store_true", help="Test Anthropic /v1/messages format")
 
     args = parser.parse_args()
-    client = BridgeClient(base_url=args.url, api_key=args.key)
+
+    # Determine target URL
+    if args.docker:
+        target_url = docker_url
+    elif args.port:
+        target_url = f"http://127.0.0.1:{args.port}"
+    elif args.url:
+        target_url = args.url
+    else:
+        target_url = os.environ.get("ANTIGRAVITY_BASE_URL", "http://127.0.0.1:8000")
+
+    client = BridgeClient(base_url=target_url, api_key=args.key)
 
     # Specific flag checks
     if args.health:

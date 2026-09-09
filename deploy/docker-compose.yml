@@ -18,6 +18,8 @@ services:
       - ../extension:/app/extension:ro
       # Bridge server (read-only — use safe_deploy.sh on host to update)
       - ../antigravity_bridge.py:/app/antigravity_bridge.py:ro
+      # Test suite (read-only — for running tests inside container)
+      - ../test_bridge.py:/app/test_bridge.py:ro
       # Bridge config (profiles, routing, etc.)
       - ../bridge_config.json:/app/bridge_config.json
       # Gemini CLI profiles (agy) — optional, for CLI fallback

@@ -978,6 +978,19 @@
 
     const emitDeltas = () => {
       if (!isCurrentJob()) return;
+
+      // If targetResponseEl is missing or was detached by an SPA navigation/re-render, re-acquire
+      if (!targetResponseEl || !targetResponseEl.isConnected) {
+        const currentBlocks = getAllResponseBlocks();
+        if (currentBlocks.length > 0) {
+          targetResponseEl = currentBlocks[currentBlocks.length - 1];
+          if (activeObserver) {
+            try { activeObserver.disconnect(); } catch {}
+            activeObserver.observe(targetResponseEl, { childList: true, subtree: true, characterData: true });
+          }
+        }
+      }
+
       const current = extractCleanText(targetResponseEl);
 
       // Any change at all counts as activity, including the text getting shorter. The old
@@ -1124,24 +1137,35 @@
       }
 
       // Failure Condition: Gemini has clearly finished (action buttons rendered) but the
-      // extractor never produced a single character. Previously this fell through the
-      // "not generating" branch and reported success with an empty string, which the bridge
-      // accepted as a valid completion. Report it as an error instead so the caller can fall
-      // back to another profile or channel rather than receiving a silent empty answer.
-      if (!sawAnyText && hasResponseFinished(targetResponseEl) && Date.now() - startTime > 15000) {
-        clearInterval(pollInterval);
-        cleanupActiveJob();
-        isFinished = true;
-        console.warn(`[Antigravity Page] Job ${jobId}: response appears complete but extraction returned no text.`);
-        window.postMessage({
-          type: 'AG_JOB_ERROR',
-          jobId,
-          error: `Gemini finished responding but no text could be extracted from the page ` +
-                 `(url=${window.location.pathname}, canvas=${job.canvas !== false}). ` +
-                 `The response DOM selectors in page.js are likely out of date.`
-        }, '*');
-        activeJobId = null;
-        return;
+      // extractor never produced a single character.
+      if (!sawAnyText && Date.now() - startTime > 15000) {
+        // Last-chance check: see if any response block in the page has finished text
+        const latestBlocks = getAllResponseBlocks();
+        const latestEl = latestBlocks.length > 0 ? latestBlocks[latestBlocks.length - 1] : null;
+        const lastChance = latestEl ? extractCleanText(latestEl) : '';
+        if (lastChance) {
+          targetResponseEl = latestEl;
+          sawAnyText = true;
+          clearInterval(pollInterval);
+          finishJob();
+          return;
+        }
+
+        if (hasResponseFinished(targetResponseEl) || (latestEl && hasResponseFinished(latestEl))) {
+          clearInterval(pollInterval);
+          cleanupActiveJob();
+          isFinished = true;
+          console.warn(`[Antigravity Page] Job ${jobId}: response appears complete but extraction returned no text.`);
+          window.postMessage({
+            type: 'AG_JOB_ERROR',
+            jobId,
+            error: `Gemini finished responding but no text could be extracted from the page ` +
+                   `(url=${window.location.pathname}, canvas=${job.canvas !== false}). ` +
+                   `The response DOM selectors in page.js are likely out of date.`
+          }, '*');
+          activeJobId = null;
+          return;
+        }
       }
 
       if (Date.now() - startTime > timeoutMs) {
