@@ -125,7 +125,7 @@ echo "[start-browser] launching $BROWSER_BIN (accounts=$CHROME_ACCOUNTS, scale=$
     --high-dpi-support=1 \
     --disable-background-timer-throttling \
     --disable-backgrounding-occluded-windows \
-    --disable-renderer-backgrounding \
+    --disable-sync \
     --disable-features=TranslateUI,DeviceBoundSessions \
     --window-size=1280,800 \
     --start-maximized \

@@ -1,4 +1,6 @@
 {
+  "SigninAllowed": false,
+  "SyncDisabled": true,
   "RestoreOnStartup": 1,
   "DefaultCookiesSetting": 1,
   "BlockThirdPartyCookies": false,
