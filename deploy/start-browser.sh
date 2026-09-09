@@ -61,7 +61,10 @@ IFS=',' read -ra CUSTOM_URL_LIST <<< "${CHROME_URLS:-}"
 # First URL to open at launch (the rest will be opened via CDP after Chrome starts)
 FIRST_URL="${CUSTOM_URL_LIST[0]:-${DEFAULT_URLS[0]}}"
 
-echo "[start-browser] launching $BROWSER_BIN (accounts=$CHROME_ACCOUNTS)..."
+# UI and window scaling (default 0.8 = 80%)
+CHROME_SCALE="${CHROME_SCALE:-0.8}"
+
+echo "[start-browser] launching $BROWSER_BIN (accounts=$CHROME_ACCOUNTS, scale=$CHROME_SCALE)..."
 
 "$BROWSER_BIN" \
     --no-sandbox \
@@ -72,6 +75,13 @@ echo "[start-browser] launching $BROWSER_BIN (accounts=$CHROME_ACCOUNTS)..."
     --load-extension=/app/extension \
     --no-first-run \
     --no-default-browser-check \
+    --password-store=basic \
+    --use-mock-keychain \
+    --disable-session-crashed-bubble \
+    --hide-crash-restore-bubble \
+    --restore-last-session \
+    --force-device-scale-factor="$CHROME_SCALE" \
+    --high-dpi-support=1 \
     --disable-background-timer-throttling \
     --disable-backgrounding-occluded-windows \
     --disable-renderer-backgrounding \
@@ -93,17 +103,23 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Open additional Gemini tabs for accounts 1..N via CDP
+# Open additional Gemini tabs for accounts 1..N via CDP (only if not already restored)
 if [ "$CHROME_ACCOUNTS" -gt 1 ]; then
-    echo "[start-browser] opening $((CHROME_ACCOUNTS - 1)) additional Gemini tab(s)..."
+    echo "[start-browser] ensuring $CHROME_ACCOUNTS Gemini tab(s) are active..."
+    EXISTING_TABS=$(curl -sf http://127.0.0.1:9222/json/list 2>/dev/null || echo "[]")
     for i in $(seq 1 $((CHROME_ACCOUNTS - 1))); do
         URL="${CUSTOM_URL_LIST[$i]:-${DEFAULT_URLS[$i]}}"
-        echo "[start-browser] opening tab $i → $URL"
-        curl -sf -X PUT "http://127.0.0.1:9222/json/new?${URL}" > /dev/null 2>&1 || \
-            echo "[start-browser] warning: could not open tab for $URL"
-        sleep 2
+        ALREADY_OPEN=$(echo "$EXISTING_TABS" | grep -E "gemini\.google\.com/u/${i}/(app|canvas)" || true)
+        if [ -z "$ALREADY_OPEN" ]; then
+            echo "[start-browser] opening tab $i → $URL"
+            curl -sf -X PUT "http://127.0.0.1:9222/json/new?${URL}" > /dev/null 2>&1 || \
+                echo "[start-browser] warning: could not open tab for $URL"
+            sleep 2
+        else
+            echo "[start-browser] tab $i ($URL) already restored from previous session"
+        fi
     done
-    echo "[start-browser] all $CHROME_ACCOUNTS Gemini tabs opened"
+    echo "[start-browser] all $CHROME_ACCOUNTS Gemini tabs confirmed"
 fi
 
 # Health-check loop: re-open any missing Gemini tabs every 5 minutes

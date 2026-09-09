@@ -12,8 +12,12 @@ services:
       # Antigravity Bridge API (use BRIDGE_PORT=8080 if 8000 is running locally)
       - "127.0.0.1:${BRIDGE_PORT:-8000}:8000"
     volumes:
-      # Chrome profile per-account (persistent login sessions)
-      - chrome-data:/app/chrome-data
+      # Chrome profile per-account (persistent login sessions on host)
+      - ./chrome-data:/app/chrome-data
+      # Startup scripts (mount live so changes take effect on restart)
+      - ./supervisord.conf:/app/deploy/supervisord.conf:ro
+      - ./start-browser.sh:/app/deploy/start-browser.sh:ro
+      - ./start-vnc.sh:/app/deploy/start-vnc.sh:ro
       # Extension (read-only — reload container to pick up changes)
       - ../extension:/app/extension:ro
       # Bridge server (read-only — use safe_deploy.sh on host to update)
@@ -27,6 +31,8 @@ services:
     environment:
       - NOVNC_PASSWORD=${NOVNC_PASSWORD:-changeme}
       - PYTHONUNBUFFERED=1
+      # Window and UI scaling for Chromium in noVNC (0.8 = 80%, 1.0 = 100%)
+      - CHROME_SCALE=${CHROME_SCALE:-0.8}
       # Number of Chrome windows to open at startup (one per Google account slot)
       - CHROME_ACCOUNTS=${CHROME_ACCOUNTS:-2}
       # Comma-separated list of Gemini URLs for each Chrome window
@@ -35,7 +41,3 @@ services:
     shm_size: '2gb'
     security_opt:
       - seccomp:unconfined
-
-volumes:
-  chrome-data:
-    driver: local

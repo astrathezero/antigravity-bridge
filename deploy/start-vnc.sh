@@ -8,6 +8,27 @@ for i in {1..30}; do
     sleep 0.5
 done
 
+# Ensure noVNC index.html redirects to auto-connect with viewport auto-scaling
+if [ -d /usr/share/novnc ]; then
+    rm -f /usr/share/novnc/index.html
+    cat << 'EOF' > /usr/share/novnc/index.html
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=true&resize=scale">
+  <title>Antigravity Bridge - noVNC Desktop</title>
+</head>
+<body style="background:#1a1b26;color:#c0caf5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="text-align:center;">
+    <h2>Connecting to Antigravity Bridge noVNC...</h2>
+    <p><a href="vnc.html?autoconnect=true&resize=scale" style="color:#7aa2f7;">Click here if not redirected automatically</a></p>
+  </div>
+</body>
+</html>
+EOF
+fi
+
 # Check for password from environment or /app/.env
 VNC_PASS="${noVNC_PASSWORD:-${NOVNC_PASSWORD:-}}"
 if [ -z "$VNC_PASS" ] && [ -f "/app/.env" ]; then
