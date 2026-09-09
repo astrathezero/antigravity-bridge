@@ -5,6 +5,7 @@ services:
       dockerfile: deploy/Dockerfile
     image: antigravity-bridge:latest
     container_name: antigravity-bridge
+    hostname: antigravity-bridge
     restart: unless-stopped
     ports:
       # noVNC web desktop (Nginx reverse proxy handles SSL termination externally)
@@ -12,6 +13,9 @@ services:
       # Antigravity Bridge API (use BRIDGE_PORT=8080 if 8000 is running locally)
       - "127.0.0.1:${BRIDGE_PORT:-8000}:8000"
     volumes:
+      # Machine ID (fixed identity across container recreates)
+      - ./machine-id:/etc/machine-id:ro
+      - ./machine-id:/var/lib/dbus/machine-id:ro
       # Chrome profile per-account (persistent login sessions on host)
       - ./chrome-data:/app/chrome-data
       # Startup scripts (mount live so changes take effect on restart)
