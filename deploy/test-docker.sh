@@ -176,6 +176,22 @@ else
     warn "Extension status endpoint did not respond"
 fi
 
+# Check that the bridge_config.json bind mount is still live inside the container.
+# Docker binds a single file by inode, so anything that REPLACES the host file rather than
+# rewriting it in place (git checkout, git stash, an editor that writes atomically via rename)
+# silently detaches the mount: the host file looks fine while the container sees nothing. The
+# bridge then falls back to one "default" profile and loses its email->profile mapping, which
+# is easy to miss because requests still work.
+CFG_OUT=$($DOCKER_BIN exec "$CONTAINER_NAME" cat /app/bridge_config.json 2>/dev/null || true)
+if echo "$CFG_OUT" | grep -q '"profiles"'; then
+    CFG_PROFILES=$(echo "$CFG_OUT" | tr ',' '\n' | grep -c 'account_email' || echo "0")
+    pass "bridge_config.json is readable inside the container (${CFG_PROFILES} profile(s) with an account_email)"
+else
+    fail "bridge_config.json is NOT readable inside '$CONTAINER_NAME' — the bind mount is detached."
+    echo "  Fix: cd deploy && $COMPOSE_CMD up -d --force-recreate"
+    ERRORS=$((ERRORS + 1))
+fi
+
 # Check Chrome Remote Debugging port inside container
 CDP_OUT=$($DOCKER_BIN exec "$CONTAINER_NAME" curl -sf -m 3 http://127.0.0.1:9222/json/version 2>/dev/null || true)
 if [ -n "$CDP_OUT" ]; then
