@@ -144,9 +144,56 @@ for i in {1..30}; do
     sleep 1
 done
 
+# Close duplicate Gemini tabs.
+#
+# Chromium restores the previous session (RestoreOnStartup=1 in policies.json, kept so Google
+# session cookies survive a restart) *and* opens the URLs passed on the command line above, so
+# every container restart leaves a second copy of each account's tab behind — 3 accounts became
+# 6 tabs after one restart, 9 after two. Extra tabs are not cosmetic: the extension picks one
+# tab per account, and a leftover tab still sitting in an old thread can win that choice, so the
+# prompt is typed into a stale conversation. Keep one tab per /u/N/ account index, preferring a
+# clean /app or /canvas tab over one parked on a thread URL.
+dedupe_tabs() {
+    curl -sf http://127.0.0.1:9222/json/list 2>/dev/null | python3 -c "
+import json, re, sys, urllib.request
+try:
+    tabs = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+best = {}
+close = []
+for t in tabs:
+    if t.get('type') != 'page':
+        continue
+    url = t.get('url', '')
+    if 'gemini.google.com' not in url:
+        continue
+    m = re.search(r'/u/(\\d+)/', url)
+    idx = m.group(1) if m else '0'
+    on_thread = bool(re.search(r'/(?:app|canvas)/[A-Za-z0-9_-]+', url))
+    prev = best.get(idx)
+    if prev is None:
+        best[idx] = (t, on_thread)
+    elif prev[1] and not on_thread:
+        close.append(prev[0]['id'])
+        best[idx] = (t, on_thread)
+    else:
+        close.append(t['id'])
+for tid in close:
+    try:
+        urllib.request.urlopen('http://127.0.0.1:9222/json/close/' + tid, timeout=3).read()
+    except Exception:
+        pass
+print(len(close))
+" 2>/dev/null || echo 0
+}
+
 # Wait for initial tabs to finish loading
 echo "[start-browser] waiting 8s for initial tabs to settle..."
 sleep 8
+
+CLOSED=$(dedupe_tabs)
+echo "[start-browser] closed ${CLOSED:-0} duplicate Gemini tab(s) after startup"
 
 # Health-check loop: only re-open tabs if count of Gemini tabs is less than CHROME_ACCOUNTS
 echo "[start-browser] starting tab health monitor..."
@@ -155,6 +202,9 @@ echo "[start-browser] starting tab health monitor..."
         sleep 300
         # Check if Chrome is still alive
         kill -0 $BROWSER_PID 2>/dev/null || break
+
+        # Drop any duplicates that accumulated since the last sweep before counting.
+        dedupe_tabs > /dev/null
 
         # Get current open Gemini URLs
         OPEN_URLS=$(curl -sf http://127.0.0.1:9222/json/list 2>/dev/null | \

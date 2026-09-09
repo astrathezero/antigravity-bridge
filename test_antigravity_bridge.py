@@ -1730,6 +1730,87 @@ class TestAntigravityBridge(unittest.TestCase):
             ordered = mgr.get_ordered_profiles(model="gemini-3.8-flash", channel="auto")
             self.assertEqual(ordered[0], "p_web")
 
+    # ------------------------------------------------------------------
+    # Web Extension channel regressions
+    # ------------------------------------------------------------------
+
+    def test_is_thinking_only_text(self):
+        """A response holding nothing but a <think> block is not an answer."""
+        self.assertTrue(antigravity_bridge.is_thinking_only_text("<think>\nInitiating the Calculation\n</think>"))
+        self.assertTrue(antigravity_bridge.is_thinking_only_text("  <think>a</think>  "))
+        self.assertFalse(antigravity_bridge.is_thinking_only_text("<think>a</think>\n\n42"))
+        self.assertFalse(antigravity_bridge.is_thinking_only_text("42"))
+        self.assertFalse(antigravity_bridge.is_thinking_only_text(""))
+        self.assertFalse(antigravity_bridge.is_thinking_only_text(None))
+
+    def test_execute_web_command_rejects_thinking_only_result(self):
+        """A thinking placeholder must raise so the fallback chain can try elsewhere."""
+        mgr = antigravity_bridge.GLOBAL_WEB_CLIENT_MANAGER
+        client = mgr.register_client(profile="p_think", email="t@example.com")
+        try:
+            def fake_dispatch(job):
+                job.final_output = "<think>\nInitiating the Calculation\n</think>"
+                job.delta_queue.put(None)
+                job.done_event.set()
+                return True
+
+            with patch.object(mgr, "dispatch_job", side_effect=fake_dispatch), \
+                 patch.object(antigravity_bridge, "is_profile_web_enabled", return_value=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    antigravity_bridge.execute_web_command(
+                        prompt_text="2+2", profile="p_think", model_name="gemini-web", timeout=5.0
+                    )
+                self.assertIn("thinking placeholder", str(ctx.exception))
+        finally:
+            mgr.unregister_client(client.client_id)
+
+    def test_default_profile_not_connected_via_unrelated_client(self):
+        """'default' must not report connected just because some other profile has a client."""
+        mgr = antigravity_bridge.WebClientManager()
+        mgr.register_client(profile="someone_else", email="other@example.com")
+        with patch.object(antigravity_bridge, "get_profile_account_email", return_value="owner@example.com"):
+            self.assertFalse(mgr.is_profile_connected("default"))
+
+    def test_default_profile_connected_via_configured_email(self):
+        """A client whose email matches default's configured account counts as connected."""
+        mgr = antigravity_bridge.WebClientManager()
+        mgr.register_client(profile="attasitusa", email="owner@example.com")
+        with patch.object(antigravity_bridge, "get_profile_account_email", return_value="owner@example.com"):
+            self.assertTrue(mgr.is_profile_connected("default"))
+
+    def test_unregister_client_leaves_other_clients_jobs_alone(self):
+        """One tab's stream ending must not tear down a job another live client owns."""
+        mgr = antigravity_bridge.WebClientManager()
+        c1 = mgr.register_client(profile="pA", email="a@example.com")
+        c2 = mgr.register_client(profile="pB", email="b@example.com")
+
+        job_a = antigravity_bridge.WebJob(job_id="ja", profile="pA", prompt="x", model="gemini-web")
+        job_b = antigravity_bridge.WebJob(job_id="jb", profile="pB", prompt="y", model="gemini-web")
+        mgr.dispatch_job(job_a)
+        mgr.dispatch_job(job_b)
+        self.assertEqual(job_a.client_id, c1.client_id)
+        self.assertEqual(job_b.client_id, c2.client_id)
+
+        mgr.unregister_client(c1.client_id)
+        # pB's job is untouched and still tracked
+        self.assertIn("jb", mgr.jobs)
+        self.assertIsNone(job_b.error)
+        self.assertFalse(job_b.done_event.is_set())
+
+    def test_register_client_does_not_retire_busy_client(self):
+        """The 4-minute SSE cycle must not evict a client that is mid-answer."""
+        mgr = antigravity_bridge.WebClientManager()
+        first = mgr.register_client(profile="pX", email="x@example.com")
+        job = antigravity_bridge.WebJob(job_id="jx", profile="pX", prompt="x", model="gemini-web")
+        mgr.dispatch_job(job)
+
+        second = mgr.register_client(profile="pX", email="x@example.com")
+        # The busy client survives alongside the new one, so its result still has a home.
+        self.assertIn(first.client_id, mgr.clients)
+        self.assertTrue(mgr.clients[first.client_id].is_alive)
+        self.assertIn(second.client_id, mgr.clients)
+        self.assertIsNone(job.error)
+
 
 if __name__ == "__main__":
     unittest.main()

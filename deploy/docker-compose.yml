@@ -1,16 +1,18 @@
+name: antigravity-bridge2
+
 services:
   antigravity-bridge:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: antigravity-bridge:latest
-    container_name: antigravity-bridge
-    hostname: antigravity-bridge
+    image: antigravity-bridge2:latest
+    container_name: antigravity-bridge2
+    hostname: antigravity-bridge2
     restart: unless-stopped
     ports:
       # noVNC web desktop (Nginx reverse proxy handles SSL termination externally)
       - "127.0.0.1:${NOVNC_PORT:-6080}:6080"
-      # Antigravity Bridge API (use BRIDGE_PORT=8080 if 8000 is running locally)
+      # Antigravity Bridge API (BRIDGE_PORT set in deploy/.env; 8002 here)
       - "127.0.0.1:${BRIDGE_PORT:-8000}:8000"
     volumes:
       # Machine ID (fixed identity across container recreates)

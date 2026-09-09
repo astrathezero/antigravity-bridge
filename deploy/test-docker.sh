@@ -13,6 +13,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Port and container name come from deploy/.env so this script follows the stack it is testing
+# instead of the defaults it was originally written against.
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/.env"
+    set +a
+fi
+BRIDGE_PORT="${BRIDGE_PORT:-8000}"
+NOVNC_PORT="${NOVNC_PORT:-6080}"
+CONTAINER_NAME="${CONTAINER_NAME:-antigravity-bridge2}"
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -124,8 +136,7 @@ fi
 
 # 5. Check running container status
 info "Step 4: Checking running container & service endpoints..."
-CONTAINER_NAME="antigravity-bridge"
-CONTAINER_ID=$($DOCKER_BIN ps -q -f "name=$CONTAINER_NAME" || true)
+CONTAINER_ID=$($DOCKER_BIN ps -q -f "name=^${CONTAINER_NAME}$" || true)
 
 if [ -z "$CONTAINER_ID" ]; then
     warn "Container '$CONTAINER_NAME' is not currently running."
@@ -137,27 +148,29 @@ fi
 
 pass "Container '$CONTAINER_NAME' is RUNNING (ID: ${CONTAINER_ID:0:12})"
 
-# Check noVNC HTTP Port (6080)
-if curl -sf -o /dev/null -m 5 "http://127.0.0.1:6080/"; then
-    pass "noVNC web interface is UP on http://127.0.0.1:6080"
+# Check noVNC HTTP Port
+if curl -sf -o /dev/null -m 5 "http://127.0.0.1:${NOVNC_PORT}/"; then
+    pass "noVNC web interface is UP on http://127.0.0.1:${NOVNC_PORT}"
 else
-    fail "noVNC port 6080 is not responding on 127.0.0.1:6080"
+    fail "noVNC port ${NOVNC_PORT} is not responding on 127.0.0.1:${NOVNC_PORT}"
     ERRORS=$((ERRORS + 1))
 fi
 
-# Check Bridge API Port (8000)
-HEALTH_OUT=$(curl -sf -m 5 "http://127.0.0.1:8000/health" 2>/dev/null || true)
+# Check Bridge API Port
+HEALTH_OUT=$(curl -sf -m 5 "http://127.0.0.1:${BRIDGE_PORT}/health" 2>/dev/null || true)
 if [ -n "$HEALTH_OUT" ]; then
-    pass "Antigravity Bridge API is HEALTHY on http://127.0.0.1:8000"
+    pass "Antigravity Bridge API is HEALTHY on http://127.0.0.1:${BRIDGE_PORT}"
 else
-    fail "Bridge API /health is not responding on 127.0.0.1:8000"
+    fail "Bridge API /health is not responding on 127.0.0.1:${BRIDGE_PORT}"
     ERRORS=$((ERRORS + 1))
 fi
 
 # Check Extension Status
-EXT_OUT=$(curl -sf -m 5 "http://127.0.0.1:8000/extension/status" 2>/dev/null || true)
+EXT_OUT=$(curl -sf -m 5 "http://127.0.0.1:${BRIDGE_PORT}/extension/status" 2>/dev/null || true)
 if [ -n "$EXT_OUT" ]; then
-    CLIENTS_COUNT=$(echo "$EXT_OUT" | grep -o '"connected_clients_count":[0-9]*' | cut -d':' -f2 || echo "0")
+    # The bridge pretty-prints its JSON, so the value is preceded by a space; the old pattern
+    # never matched and this always reported 0 connected extension clients.
+    CLIENTS_COUNT=$(echo "$EXT_OUT" | grep -o '"connected_clients_count"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*$' || echo "0")
     pass "Extension status endpoint OK (connected_clients: ${CLIENTS_COUNT:-0})"
 else
     warn "Extension status endpoint did not respond"

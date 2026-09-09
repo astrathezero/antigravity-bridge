@@ -193,9 +193,23 @@ function resolveProfile(email, url) {
       }
     }
 
-    // 5. Default to username portion if email present (guarantees isolated profile per user)
-    if (cleanEmail) {
+    // 5. Default to username portion if email present (guarantees isolated profile per user).
+    // Only safe once we actually know what the bridge has: this worker is an MV3 service
+    // worker that Chrome restarts constantly, and a tab reporting its account before
+    // fetchBridgeProfiles() has refilled the cache would otherwise register a profile name
+    // that exists nowhere in bridge_config.json (e.g. "attasitusa" beside the real
+    // "default"). Those phantom clients hold an SSE slot no job is ever routed to, so wait
+    // for the profile list instead of guessing.
+    if (cleanEmail && profiles.length > 0) {
       return cleanEmail.split('@')[0];
+    }
+    if (cleanEmail) {
+      console.warn(
+        `[Antigravity BG] Bridge profile list not loaded yet — deferring profile resolution ` +
+        `for ${cleanEmail} instead of guessing a name.`
+      );
+      fetchBridgeProfiles();
+      return '';
     }
 
     // No email detected yet. Returning a guess here would open an SSE for a profile this tab

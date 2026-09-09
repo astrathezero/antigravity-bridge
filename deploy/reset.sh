@@ -6,6 +6,16 @@ set -e
 
 ACTION="${1:-restart}"
 
+# Follow whichever stack deploy/.env describes rather than a hardcoded container name.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/.env"
+    set +a
+fi
+CONTAINER_NAME="${CONTAINER_NAME:-antigravity-bridge2}"
+
 if [ "$ACTION" = "clean" ]; then
     echo "WARNING: This will remove all saved Chrome login sessions!"
     read -p "Are you sure? (y/N) " confirm
@@ -20,10 +30,10 @@ if [ "$ACTION" = "clean" ]; then
     fi
 elif [ "$ACTION" = "restart" ]; then
     echo "Restarting Chromium inside container..."
-    docker exec antigravity-bridge supervisorctl restart browser
+    docker exec "$CONTAINER_NAME" supervisorctl restart browser
     echo "Chromium restarted."
 elif [ "$ACTION" = "logs" ]; then
-    docker logs -f antigravity-bridge
+    docker logs -f "$CONTAINER_NAME"
 else
     echo "Usage: $0 [restart|clean|logs]"
     exit 1

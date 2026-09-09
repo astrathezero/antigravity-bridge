@@ -1537,6 +1537,9 @@ class WebJob:
         self.final_output = ""
         self.error: Optional[str] = None
         self.effective_model = model or "gemini-web"
+        # Which extension client is currently executing this job. Set by dispatch_job() and
+        # re-set on re-dispatch, so a disconnect only tears down the jobs that client owned.
+        self.client_id: Optional[str] = None
 
 
 class WebClient:
@@ -1563,8 +1566,16 @@ class WebClientManager:
         with self.lock:
             cid = client_id or f"web_{uuid.uuid4().hex[:8]}"
             prof = profile or "default"
-            # Proactively retire older zombie clients for this profile so jobs are never sent to stale SSE queues
+            # Proactively retire older zombie clients for this profile so jobs are never sent
+            # to stale SSE queues. A client still executing a job is not a zombie, though: the
+            # extension cycles its SSE stream every 4 minutes, and retiring the owner of an
+            # in-flight job mid-answer left the job with no client to report back to.
+            busy_cids = {j.client_id for j in self.jobs.values() if j.client_id}
+            kept: Set[str] = set()
             for old_cid in list(self.profile_to_client_ids.get(prof, set())):
+                if old_cid in busy_cids and old_cid in self.clients:
+                    kept.add(old_cid)
+                    continue
                 old_client = self.clients.get(old_cid)
                 if old_client:
                     old_client.is_alive = False
@@ -1573,7 +1584,7 @@ class WebClientManager:
                     except Exception:
                         pass
                 self.clients.pop(old_cid, None)
-            self.profile_to_client_ids[prof] = set()
+            self.profile_to_client_ids[prof] = kept
 
             client = WebClient(client_id=cid, profile=prof, email=email)
             self.clients[cid] = client
@@ -1591,12 +1602,16 @@ class WebClientManager:
                 if not cids:
                     self.profile_to_client_ids.pop(client.profile, None)
                 logger.info("[WEB EXTENSION] Unregistered client '%s' for profile '%s'", client_id, client.profile)
-                # Clean up or re-dispatch in-flight jobs for this client/profile
+                # Clean up or re-dispatch in-flight jobs owned by THIS client.
+                # Matching on profile alone tore down every concurrent job on the profile
+                # whenever one tab's stream ended — including jobs another live client was
+                # still executing, whose results then arrived for a job id already discarded.
                 for jid, job in list(self.jobs.items()):
-                    if job.profile == client.profile:
+                    if job.client_id == client_id or (job.client_id is None and job.profile == client.profile):
                         other = self.get_client_for_profile(job.profile)
                         if other:
                             logger.info("[WEB EXTENSION] Re-dispatching in-flight job '%s' to client '%s'", jid, other.client_id)
+                            job.client_id = other.client_id
                             other.queue.put({
                                 "event": "job",
                                 "data": {
@@ -1620,9 +1635,20 @@ class WebClientManager:
             cids = self.profile_to_client_ids.get(prof, set())
             if any(self.clients.get(cid) and self.clients[cid].is_alive for cid in cids):
                 return True
-            # If profile is None, empty, or "default", return True if ANY client is alive
+            # "default" used to report connected whenever ANY client was alive, so a profile
+            # whose own tab had gone still looked web-executable and its jobs were dispatched
+            # into a queue nobody was reading. Only claim "default" when a client actually
+            # belongs to it — by name, or by the account email configured for it.
             if prof == "default":
-                return any(c.is_alive for c in self.clients.values())
+                default_email = (get_profile_account_email("default") or "").strip().lower()
+                for c in self.clients.values():
+                    if not c.is_alive:
+                        continue
+                    if c.profile == "default":
+                        return True
+                    if default_email and default_email not in ("", "not logged in") \
+                            and (c.email or "").strip().lower() == default_email:
+                        return True
             return False
 
     def get_connected_profiles(self) -> List[str]:
@@ -1658,6 +1684,7 @@ class WebClientManager:
             # If job had a generic profile but was routed to a concrete client, align job.profile
             if job.profile == "default" and client.profile != "default":
                 job.profile = client.profile
+            job.client_id = client.client_id
             self.jobs[job.job_id] = job
             client.queue.put({
                 "event": "job",
@@ -3797,6 +3824,18 @@ class CLIExecutionResult(tuple):
         self.channel = channel  # "cli" or "web"
 
 
+# Matches a response whose entire content is the <think>...</think> block Gemini shows while
+# reasoning, with no answer after it.
+_THINK_ONLY_RE = re.compile(r"^\s*<think>[\s\S]*?</think>\s*$", re.IGNORECASE)
+
+
+def is_thinking_only_text(text: Optional[str]) -> bool:
+    """True if text carries a thinking placeholder but no actual answer."""
+    if not text or not text.strip():
+        return False
+    return bool(_THINK_ONLY_RE.match(text.strip()))
+
+
 def execute_web_command(
     prompt_text: str,
     profile: Optional[str] = None,
@@ -3858,6 +3897,18 @@ def execute_web_command(
     # result that reaches the API caller.
     streamed_text = "".join(accumulated)
     result_text = streamed_text if len(streamed_text) >= len(job.final_output) else job.final_output
+
+    # Gemini renders no response container at all during an extended reasoning phase, so a job
+    # can come back holding nothing but the thinking header ("<think>Initiating the
+    # Calculation</think>"). page.js no longer completes such a job, but treat it as a failure
+    # here too: returning it as the answer hands the caller a confident non-answer, while
+    # raising lets the normal fallback chain try another profile or the CLI channel.
+    if is_thinking_only_text(result_text):
+        raise RuntimeError(
+            f"Web Extension returned only a thinking placeholder with no answer text "
+            f"(profile={prof}, chars={len(result_text)})"
+        )
+
     return CLIExecutionResult(result_text, prof, effective_model=model_name or "gemini-web", channel="web")
 
 
@@ -4973,7 +5024,19 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 })
                 return
 
-            if not self._authorized():
+            # The Chrome extension talks to the bridge from inside the same host (in Docker,
+            # from the very same container) and has no way to carry an API key: it opens the
+            # SSE stream and reads /v1/profiles with a plain fetch. do_POST already exempts
+            # the extension's callbacks on loopback; without the matching exemption here,
+            # configuring ANTIGRAVITY_BRIDGE_API_KEY* silently 401s the SSE stream, no web
+            # client ever registers, and every request falls through to CLI and times out.
+            is_loopback = getattr(self, "client_address", ("",))[0] in ("127.0.0.1", "::1", "localhost")
+            is_ext_get = path in (
+                "/extension/events", "/api/web/events", "/events",
+                "/extension/status", "/api/web/status",
+                "/v1/profiles", "/profiles",
+            )
+            if not (is_ext_get and is_loopback) and not self._authorized():
                 self._send_json_response(
                     {
                         "error": {
@@ -5045,10 +5108,22 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                 params = urllib.parse.parse_qs(query)
                 prof = params.get("profile", [None])[0] or "default"
                 acct_email = params.get("email", [""])[0]
-                if (not prof or prof == "default") and acct_email:
+                # bridge_config.json is the authority on which profile an account belongs to,
+                # so trust the email over the name the extension guessed. The extension caches
+                # /v1/profiles in a MV3 service worker that Chrome restarts constantly; when a
+                # tab reports its account before that cache refills, resolveProfile() falls back
+                # to the email's username and the tab registers under a profile that does not
+                # exist in config (e.g. "attasitusa" alongside the real "default"). Those
+                # phantom clients hold an SSE slot that no job is ever routed to.
+                if acct_email:
                     matched_prof = find_profile_by_email(acct_email)
-                    if matched_prof:
+                    if matched_prof and matched_prof != prof:
+                        logger.info(
+                            "[WEB EXTENSION] Remapped profile '%s' -> '%s' for Google account '%s' (bridge_config match)",
+                            prof, matched_prof, acct_email,
+                        )
                         prof = matched_prof
+                    elif matched_prof:
                         logger.info("[WEB EXTENSION] Auto-matched profile '%s' for Google account '%s'", prof, acct_email)
 
                 client = GLOBAL_WEB_CLIENT_MANAGER.register_client(profile=prof, email=acct_email)

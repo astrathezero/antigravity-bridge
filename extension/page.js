@@ -235,6 +235,14 @@
 
   const STOP_TOKENS = ['stop', 'หยุด', '停止', '중지', 'arrêter', 'detener', 'parar', 'anhalten'];
 
+  // How long the DOM may sit completely unchanged while the only text we hold is the thinking
+  // header before we re-examine the page. Reasoning models routinely go quiet for longer than
+  // the answer-phase stall windows, so this is deliberately generous.
+  const THINKING_STALL_MS = 45000;
+  // Hard ceiling on the reasoning phase. Past this we stop waiting even if Gemini still claims
+  // to be generating, so a wedged tab cannot hold the job open until the full job timeout.
+  const THINKING_MAX_MS = 300000;
+
   let stopButtonEverSeen = false;
   let stopDetectionWarned = false;
 
@@ -563,9 +571,13 @@
     if (!streamed) return onScreen;
     if (onScreen.startsWith(streamed)) return onScreen;
 
-    const think = /^<think>[\s\S]*?<\/think>\n\n/.exec(streamed);
+    // Match the thinking block whether or not a blank line follows it. Requiring "\n\n" meant
+    // a stream that ended right after </think> — every reasoning prompt, where the thinking
+    // header is all we hold when the answer lands — failed to match, so the answer was either
+    // glued straight onto </think> or discarded in favour of the longer thinking text.
+    const think = /^<think>[\s\S]*?<\/think>[ \t\r\n]*/.exec(streamed);
     if (think && !onScreen.startsWith('<think>')) {
-      return think[0] + onScreen;
+      return `${think[0].trimEnd()}\n\n${onScreen}`;
     }
     return onScreen.length >= streamed.length ? onScreen : streamed;
   }
@@ -1083,9 +1095,13 @@
       // re-anchor current with that <think> block so the shared prefix comparison remains stable
       // and doesn't fall back to shared=0 (which would re-slice and duplicate the answer text).
       let normalizedCurrent = current;
-      const thinkMatch = /^<think>[\s\S]*?<\/think>\n\n/.exec(emittedText);
+      // Same "\n\n"-optional match as reconcileFinalText: during a reasoning turn emittedText
+      // is often exactly "<think>...</think>" with nothing after it, and the stricter pattern
+      // skipped the re-anchor there — so the answer that replaced the collapsed thoughts panel
+      // looked shorter than what we had already streamed and was dropped entirely.
+      const thinkMatch = /^<think>[\s\S]*?<\/think>[ \t\r\n]*/.exec(emittedText);
       if (thinkMatch && !normalizedCurrent.startsWith('<think>')) {
-        normalizedCurrent = thinkMatch[0] + normalizedCurrent;
+        normalizedCurrent = `${thinkMatch[0].trimEnd()}\n\n${normalizedCurrent}`;
       }
 
       // `emittedText` is a high-water mark, never rewound. Gemini rewrites text in place as
@@ -1105,6 +1121,41 @@
       const delta = normalizedCurrent.slice(shared);
       emittedText = normalizedCurrent;
       window.postMessage({ type: 'AG_JOB_DELTA', jobId, delta }, '*');
+    };
+
+    // Last-resort re-acquisition for a job that holds nothing but the thinking header.
+    //
+    // emitDeltas() only re-acquires when the current element is detached or in the baseline,
+    // and its "did the block count grow?" test compares counts that can come from different
+    // selector families: before the answer exists getAllResponseBlocks() falls through to
+    // `.conversation-container` (count 1), and after the SPA navigates it returns
+    // `model-response` (also count 1). The count never grows, so the job stays pinned to the
+    // placeholder. This scans by content instead of by count: any fresh block that yields
+    // real answer text wins.
+    const rescueAnswerFromFreshBlocks = () => {
+      try {
+        const blocks = getAllResponseBlocks();
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          const el = blocks[i];
+          if (!el || el === targetResponseEl) continue;
+          const text = extractCleanText(el);
+          if (!text || isOnlyThinkingSoFar(text)) continue;
+          if (baselineSet.has(el)) continue;
+          if (baselineTexts.has((el.innerText || '').slice(0, 120).trim())) continue;
+
+          targetResponseEl = el;
+          sawAnyText = true;
+          if (activeObserver) {
+            try { activeObserver.disconnect(); } catch {}
+            activeObserver.observe(targetResponseEl, { childList: true, subtree: true, characterData: true });
+          }
+          emitDeltas();
+          return true;
+        }
+      } catch (err) {
+        console.warn('[Antigravity Page] rescueAnswerFromFreshBlocks failed:', err);
+      }
+      return false;
     };
 
     let isFinished = false;
@@ -1216,9 +1267,53 @@
       // Completion Condition 3: Absolute text stall.
       // If we are in the thinking phase, allow up to 45s of reasoning before considering it stalled.
       // If we already have the answer text, allow 10s (or 20s if stop button visible).
-      const stallThreshold = isOnlyThinkingSoFar(emittedText) ? 45000 : (isGenerating() ? 20000 : 10000);
+      const thinkingOnly = isOnlyThinkingSoFar(emittedText);
+      const stallThreshold = thinkingOnly ? THINKING_STALL_MS : (isGenerating() ? 20000 : 10000);
       if (sawAnyText && timeSinceChange > stallThreshold) {
-        console.warn(`[Antigravity Page] Job ${jobId}: generation stalled (no change for ${timeSinceChange}ms, thinkingOnly=${isOnlyThinkingSoFar(emittedText)}). Finishing job.`);
+        // A stall while the only text we hold is the thinking header is NOT completion.
+        // During an extended reasoning phase Gemini renders no response container at all —
+        // the answer materialises only when the SPA navigates /app -> /app/<threadId> — so
+        // the extractor sits on a placeholder whose text never changes while the Stop button
+        // is still on screen. Finishing here is what shipped "<think>Initiating the
+        // Calculation</think>" to callers as the entire answer on every reasoning prompt.
+        if (thinkingOnly) {
+          // The answer may already have landed in a block we are not pointed at (the SPA
+          // swaps containers on navigation), so re-scan before giving up on this job.
+          if (rescueAnswerFromFreshBlocks()) {
+            console.log(`[Antigravity Page] Job ${jobId}: recovered answer from a fresh response block after thinking stall.`);
+            clearInterval(pollInterval);
+            finishJob();
+            return;
+          }
+
+          // Gemini is demonstrably still working, so a quiet DOM just means it is reasoning.
+          // Restart the stall window and keep waiting, bounded by THINKING_MAX_MS below and
+          // the job timeout above so this can never wait forever.
+          if (isGenerating() && Date.now() - startTime < THINKING_MAX_MS) {
+            lastTextChangeTime = Date.now();
+            return;
+          }
+
+          // Generation is over (or the reasoning ceiling was hit) and no answer ever
+          // appeared. Report that instead of passing the thinking header off as the answer:
+          // the bridge can then fall back to another profile or channel.
+          clearInterval(pollInterval);
+          cleanupActiveJob();
+          isFinished = true;
+          console.warn(`[Antigravity Page] Job ${jobId}: thinking phase ended with no answer text.`);
+          window.postMessage({
+            type: 'AG_JOB_ERROR',
+            jobId,
+            error: `Gemini finished the thinking phase but never rendered an answer ` +
+                   `(url=${window.location.pathname}, elapsed=${Math.round((Date.now() - startTime) / 1000)}s, ` +
+                   `isGenerating=${isGenerating()}, stopDetectionReliable=${isGeneratingDetectionReliable()}). ` +
+                   `Only the thinking header was extracted, so no answer is being returned.`
+          }, '*');
+          activeJobId = null;
+          return;
+        }
+
+        console.warn(`[Antigravity Page] Job ${jobId}: generation stalled (no change for ${timeSinceChange}ms, thinkingOnly=${thinkingOnly}). Finishing job.`);
         clearInterval(pollInterval);
         finishJob();
         return;
