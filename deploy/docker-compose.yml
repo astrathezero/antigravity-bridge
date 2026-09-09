@@ -44,6 +44,8 @@ services:
       # Comma-separated list of Gemini URLs for each Chrome window
       # Format: "url1,url2,url3,..." — defaults to /app and /u/1/app ... /u/9/app
       - CHROME_URLS=${CHROME_URLS:-}
+      # Prioritize Web Extension channel over CLI in Docker (auto routes all clients like Hermes to web)
+      - ANTIGRAVITY_WEB_PRIORITY=${ANTIGRAVITY_WEB_PRIORITY:-true}
     shm_size: '2gb'
     security_opt:
       - seccomp:unconfined
