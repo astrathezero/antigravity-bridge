@@ -222,12 +222,15 @@
     'button[aria-label*="Stop generating" i]',
     'button[aria-label="Stop" i]',
     'button[aria-label*="หยุดการตอบกลับ" i]',
+    'button[aria-label*="หยุดการสร้าง" i]',
     'button[aria-label*="หยุดสร้าง" i]',
     'button[aria-label="หยุด" i]',
     'button[data-test-id*="stop" i]',
     'button[data-testid*="stop" i]',
     'button:has(mat-icon[fonticon="stop"])',
-    'button:has([data-mat-icon-name="stop"])'
+    'button:has([data-mat-icon-name="stop"])',
+    'button:has(mat-icon[fonticon="pause"])',
+    'button:has([data-mat-icon-name="pause"])'
   ];
 
   const STOP_TOKENS = ['stop', 'หยุด', '停止', '중지', 'arrêter', 'detener', 'parar', 'anhalten'];
@@ -322,15 +325,32 @@
     );
   }
 
-  // 4.1 Check if Gemini has rendered final response action buttons (Copy / Feedback)
+  // 4.1 Check if Gemini has rendered final response action buttons (Copy / Feedback / Complete)
   function hasResponseFinished(targetEl) {
     if (!targetEl) return false;
-    const hasActions = targetEl.querySelector(
-      'button[aria-label*="Copy" i], button[aria-label*="คัดลอก" i], ' +
-      'button[aria-label*="Good response" i], button[aria-label*="คำตอบที่ดี" i], ' +
-      'response-action-buttons, .response-container-footer, message-actions'
-    );
-    return Boolean(hasActions);
+
+    // Check for actual final action buttons that are rendered and visible to the user:
+    // (Note: static containers like .response-container-footer and message-actions are present
+    // from turn start in Angular templates and MUST NOT be treated as completion indicators)
+    const copyBtn = targetEl.querySelector('button[aria-label*="Copy" i], button[aria-label*="คัดลอก" i]');
+    if (copyBtn && isElementVisible(copyBtn)) return true;
+
+    const goodBtn = targetEl.querySelector('button[aria-label*="Good response" i], button[aria-label*="คำตอบดี" i]');
+    if (goodBtn && isElementVisible(goodBtn)) return true;
+
+    const completeFooter = targetEl.querySelector('.response-footer.complete, .complete');
+    if (completeFooter && isElementVisible(completeFooter)) return true;
+
+    return false;
+  }
+
+  // Check if text is only an ephemeral thinking state indicator and lacks actual answer content
+  function isOnlyThinkingSoFar(text) {
+    if (!text) return true;
+    const textWithoutThink = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    if (textWithoutThink.length === 0) return true;
+    const thinkingHeadersRegex = /^(?:Interpreting the Prompt|Assessing the Prompt|Reviewing the Input|Considering the Prompt|Evaluating the Math|Formulating the Response|Thinking\.{0,3}|กำลังคิด\.{0,3})$/i;
+    return thinkingHeadersRegex.test(textWithoutThink);
   }
 
   // Markers that identify a block as the user's own prompt rather than Gemini's answer.
@@ -399,6 +419,7 @@
     const target = mdChild || el;
 
     const thoughtSelectors = [
+      'thinking-overlay',
       '.thought-content',
       '.thoughts-container',
       '[data-test-id*="thought"]',
@@ -427,7 +448,8 @@
       const clone = target.cloneNode(true);
       const buttonsAndToolbars = clone.querySelectorAll(
         'button, mat-icon, response-action-buttons, message-actions, .response-container-footer, .action-button, ' +
-        '.thought-content, .thoughts-container, [data-test-id*="thought"], .thinking-process, details.thought, .collapse-thought, ' +
+        'thinking-overlay, .thought-content, .thoughts-container, [data-test-id*="thought"], .thinking-process, details.thought, .collapse-thought, ' +
+        '.model-response-label-announcer, [class*="model-response-label"], [class*="screen-reader"], ' +
         '.visually-hidden, [class*="visually-hidden"], [class*="sr-only"], .speaker-label, [aria-hidden="true"]'
       );
       buttonsAndToolbars.forEach(b => b.remove());
@@ -441,7 +463,10 @@
     }
 
     // Strip out any remaining localized speaker indicator like "Gemini บอกว่า" or "Gemini says:"
-    mainText = mainText.replace(/^(?:Gemini\s*(?:บอกว่า|says)[\s:]*)+/i, '').trim();
+    mainText = mainText.replace(/(?:Gemini\s*(?:บอกว่า|says)[\s:]*)/gi, '').trim();
+
+    // Strip ephemeral thinking state headers (e.g., "Interpreting the Prompt", "Assessing the Prompt", "Reviewing the Input")
+    mainText = mainText.replace(/^(?:Interpreting the Prompt|Assessing the Prompt|Reviewing the Input|Considering the Prompt|Evaluating the Math|Formulating the Response|Thinking\.{0,3}|กำลังคิด\.{0,3})\s*/i, '').trim();
 
     // Strip Antigravity status footer that Gemini may append when Canvas session has prior context
     // Pattern: "\n---\n> ⚡ Antigravity Profile: ..." or similar blockquote separator footers
@@ -450,7 +475,7 @@
     mainText = mainText.replace(/(\n>[ \t]*[⚡🔋📊🟢].+)+$/g, '').trim();
 
     if (thoughtText && !mainText.startsWith('<think>')) {
-      mainText = `<think>\n${thoughtText}\n</think>\n\n${mainText}`;
+      mainText = `<think>\n${thoughtText}\n</think>\n\n${mainText}`.trim();
     }
 
     // Extract Canvas Workspace Content (if open and contains document/code)
@@ -1067,11 +1092,13 @@
       if (!isCurrentJob()) return;
       emitDeltas();
 
-      if (hasResponseFinished(targetResponseEl) && sawAnyText) {
+      if (hasResponseFinished(targetResponseEl) && sawAnyText && !isOnlyThinkingSoFar(emittedText)) {
         if (!idleTimer) {
           idleTimer = setTimeout(() => {
-            finishJob();
-          }, 400);
+            if (hasResponseFinished(targetResponseEl) && !isOnlyThinkingSoFar(emittedText)) {
+              finishJob();
+            }
+          }, 800);
         }
         return;
       }
@@ -1082,10 +1109,10 @@
       // renamed Stop button from reading as "finished" on the very first mutation.
       // The other three completion conditions in the poll below already carry the first
       // guard; this branch was the only one missing it.
-      if (sawAnyText && isGeneratingDetectionReliable() && !isGenerating()) {
+      if (sawAnyText && isGeneratingDetectionReliable() && !isGenerating() && !isOnlyThinkingSoFar(emittedText)) {
         if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(() => {
-          if (!isGenerating()) {
+          if (!isGenerating() && !isOnlyThinkingSoFar(emittedText)) {
             finishJob();
           }
         }, 1200);
@@ -1106,17 +1133,15 @@
       const timeSinceChange = Date.now() - lastTextChangeTime;
 
       // Completion Condition 1: Action buttons have appeared (definitive indicator that Gemini finished)
-      if (hasResponseFinished(targetResponseEl) && sawAnyText && timeSinceChange > 500) {
+      // and we have actual answer content (not just thinking header)
+      if (hasResponseFinished(targetResponseEl) && sawAnyText && !isOnlyThinkingSoFar(emittedText) && timeSinceChange > 800) {
         clearInterval(pollInterval);
         finishJob();
         return;
       }
 
-      // Completion Condition 2: Not generating and no new text for 2.0s.
-      // Only usable once a Stop button has actually been seen — otherwise `!isGenerating()`
-      // is true from the first tick and cuts the answer off after 2s. When detection is
-      // unreliable we skip this and let Condition 3 (pure text stall) finish the job.
-      if (sawAnyText && isGeneratingDetectionReliable() && !isGenerating() && timeSinceChange > 2000) {
+      // Completion Condition 2: Not generating and no new text for 2.5s (only if not in pure thinking phase)
+      if (sawAnyText && isGeneratingDetectionReliable() && !isGenerating() && !isOnlyThinkingSoFar(emittedText) && timeSinceChange > 2500) {
         clearInterval(pollInterval);
         finishJob();
         return;
@@ -1125,19 +1150,15 @@
         warnStopDetectionOnce();
       }
 
-      // Completion Condition 3: Absolute text stall. If Stop button is still visible,
-      // allow deep-thinking models more time (up to 15s) before treating zero change as a stall.
-      if (sawAnyText && timeSinceChange > 5000) {
-        if (!isGenerating()) {
-          clearInterval(pollInterval);
-          finishJob();
-          return;
-        } else if (timeSinceChange > 15000) {
-          console.warn(`[Antigravity Page] Job ${jobId}: generation stalled with stop button still visible (>15s without change). Finishing job.`);
-          clearInterval(pollInterval);
-          finishJob();
-          return;
-        }
+      // Completion Condition 3: Absolute text stall.
+      // If we are in the thinking phase, allow up to 45s of reasoning before considering it stalled.
+      // If we already have the answer text, allow 10s (or 20s if stop button visible).
+      const stallThreshold = isOnlyThinkingSoFar(emittedText) ? 45000 : (isGenerating() ? 20000 : 10000);
+      if (sawAnyText && timeSinceChange > stallThreshold) {
+        console.warn(`[Antigravity Page] Job ${jobId}: generation stalled (no change for ${timeSinceChange}ms, thinkingOnly=${isOnlyThinkingSoFar(emittedText)}). Finishing job.`);
+        clearInterval(pollInterval);
+        finishJob();
+        return;
       }
 
       // Failure Condition: Gemini has clearly finished (action buttons rendered) but the
