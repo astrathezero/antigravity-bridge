@@ -67,9 +67,9 @@ for p in ['/app/chrome-data/Default/Preferences', '/app/chrome-data/Local State'
         except Exception: pass
 " 2>/dev/null || true
 
-# Detect Chromium binary
+# Detect Chromium binary (prioritize native ELF binary over wrapper script)
 BROWSER_BIN=""
-for bin in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome; do
+for bin in /usr/lib/chromium/chromium /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome; do
     [ -x "$bin" ] && { BROWSER_BIN="$bin"; break; }
 done
 if [ -z "$BROWSER_BIN" ]; then
@@ -142,6 +142,23 @@ for i in {1..30}; do
         break
     fi
     sleep 1
+done
+
+# Ensure all configured Gemini account tabs are active
+echo "[start-browser] checking open account tabs..."
+EXISTING_TABS=$(curl -sf http://127.0.0.1:9222/json/list 2>/dev/null || echo "[]")
+for i in $(seq 0 $((CHROME_ACCOUNTS - 1))); do
+    URL="${CUSTOM_URL_LIST[$i]:-${DEFAULT_URLS[$i]}}"
+    if [ "$i" -eq 0 ]; then
+        PAT="gemini\.google\.com/(app|canvas)"
+    else
+        PAT="gemini\.google\.com/u/${i}/(app|canvas)"
+    fi
+    if ! echo "$EXISTING_TABS" | grep -Eq "$PAT"; then
+        echo "[start-browser] opening missing account tab $i → $URL"
+        curl -sf -X PUT "http://127.0.0.1:9222/json/new?${URL}" > /dev/null 2>&1 || true
+        sleep 1
+    fi
 done
 
 # Health-check loop: only re-open tabs if count of Gemini tabs is less than CHROME_ACCOUNTS
