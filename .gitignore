@@ -1,0 +1,33 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+.venv/
+venv/
+scatch/
+scratch/
+*auth*.json
+*.png
+*.jpg
+*.jpeg
+
+# Private Environment & Configs (Ignored by Git)
+.env
+.env.*
+!.env.example
+deploy.env
+*.local.*
+deploy.local.sh
+local_patch.*
+*.service.local
+
+# Staging & Backup Files
+*.staging
+*.bak
+*.bak.*
+deploy/
+antigravity-bridge-bundle*
+
+
+# test scratch
+tests/.tmp-sandbox/

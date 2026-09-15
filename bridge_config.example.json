@@ -1,0 +1,15 @@
+{
+  "profiles": [
+    "default"
+  ],
+  "fallback_chains": {
+    "gemini-3.8-flash-high": [
+      "claude-opus-4-6-thinking",
+      "gpt-oss-120b-medium"
+    ],
+    "default": [
+      "claude-opus-4-6-thinking",
+      "gpt-oss-120b-medium"
+    ]
+  }
+}

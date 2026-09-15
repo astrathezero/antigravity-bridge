@@ -1,0 +1,23 @@
+[Unit]
+Description=Antigravity / agy OpenAI & Anthropic REST API Bridge Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/antigravity-bridge
+ExecStart=/usr/bin/python3 /home/ubuntu/antigravity-bridge/antigravity_bridge.py --host 127.0.0.1 --port 8000 --profile-concurrency 1
+Restart=always
+RestartSec=5
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+
+# Security Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+MemoryMax=4G
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
