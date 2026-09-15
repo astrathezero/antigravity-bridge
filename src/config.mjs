@@ -416,13 +416,23 @@ export const API_MODE_PREAMBLE = [
   "[Bridge Mode: API backend]",
   "You are answering a request relayed by Antigravity Bridge. Behave as a plain language-model API:",
   "- Do NOT use your own built-in agent tools (run_command / terminal, file read/write/list, browser, web fetch, subagents). Never run commands or read files to gather context.",
-  "- Reply with text only. If the request below defines client-side tools and one is needed, output the tool call JSON exactly as instructed and stop; the client will execute it and send the result back.",
+  "- Reply with text only. If the request below defines client-side tools and one is needed, output the tool call JSON exactly as instructed and stop; the client will execute it and send the result back. Tool results already present in the conversation are real outputs: use them, never call the same tool again to re-read them, and once they are sufficient answer the user in plain text.",
   "- If the task cannot be completed without acting on a machine, say so briefly instead of acting.",
 ].join("\n");
 
 export function apiModePreamble() {
   return cliToolsAllowed() ? "" : API_MODE_PREAMBLE;
 }
+
+function envInt(name, dflt) {
+  const v = parseInt((process.env[name] || "").trim(), 10);
+  return Number.isFinite(v) && v > 0 ? v : dflt;
+}
+// Context budget for the prompt handed to agy. Tool results are what the model needs to finish a
+// task; cutting them short makes it re-run the same tool forever (seen with Hermes).
+export const DEFAULT_MAX_PROMPT_CHARS = envInt("ANTIGRAVITY_MAX_PROMPT_CHARS", 160000);
+export const RECENT_TOOL_OUTPUT_CHARS = envInt("ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS", 20000);
+export const OLD_TOOL_OUTPUT_CHARS = envInt("ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS", 2000);
 
 export function shouldShowProfileStatus() {
   const envHide = (process.env.ANTIGRAVITY_HIDE_PROFILE_STATUS || "").trim().toLowerCase();

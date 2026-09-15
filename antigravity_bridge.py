@@ -393,6 +393,22 @@ def sanitize_header_value(value: Any, max_len: int = 512) -> str:
     return re.sub(r"[\r\n\x00-\x1f\x7f]", " ", str(value if value is not None else ""))[:max_len]
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(os.environ.get(name, "").strip() or default)
+        return v if v > 0 else default
+    except Exception:
+        return default
+
+
+# Context budget for the prompt handed to agy. Tool results are what the model needs to finish
+# a task; cutting them short makes it re-run the same tool forever (seen with Hermes).
+DEFAULT_MAX_PROMPT_CHARS = _env_int("ANTIGRAVITY_MAX_PROMPT_CHARS", 160000)
+RECENT_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS", 20000)   # last few tool results
+OLD_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS", 2000)          # older tool results
+SQUEEZED_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_SQUEEZED_TOOL_OUTPUT_CHARS", 5000)  # last resort when over budget
+
+
 def cli_tools_allowed() -> bool:
     """True when agy is allowed to execute its own tools (terminal, files, browser) during API requests.
     Default OFF: the bridge is a model gateway, and an agentic run can execute arbitrary commands on
@@ -406,7 +422,9 @@ API_MODE_PREAMBLE = (
     "- Do NOT use your own built-in agent tools (run_command / terminal, file read/write/list, browser, web fetch, subagents). "
     "Never run commands or read files to gather context.\n"
     "- Reply with text only. If the request below defines client-side tools and one is needed, output the tool call JSON "
-    "exactly as instructed and stop; the client will execute it and send the result back.\n"
+    "exactly as instructed and stop; the client will execute it and send the result back. Tool results already present "
+    "in the conversation are real outputs: use them, never call the same tool again to re-read them, and once they are "
+    "sufficient answer the user in plain text.\n"
     "- If the task cannot be completed without acting on a machine, say so briefly instead of acting."
 )
 
@@ -792,6 +810,12 @@ def format_tools_to_system_prompt(
         lines.append("If no tool needs to be called to answer the user's request, respond normally with plain text.")
 
     lines.append("Do NOT output conversational filler before or after the JSON block when calling a tool.")
+    lines.append(
+        "Tool results already in this conversation ([Tool Result] blocks) are the real outputs of your earlier calls. "
+        "Never call a tool again with the same arguments to re-read a result you already have. "
+        "When the results are sufficient, reply to the user with a normal text answer and no tool_calls. "
+        "Focus on the latest user message."
+    )
     return "\n".join(lines)
 
 
@@ -943,7 +967,10 @@ def compact_tool_output(content: Any, max_chars: int = 1500) -> Any:
         orig_len = len(content)
         head_part = content[:head_len]
         tail_part = content[-tail_len:] if tail_len > 0 else ""
-        return f"{head_part}\n\n... [Tool output truncated: original {orig_len} chars -> compacted to {max_chars} chars] ...\n\n{tail_part}"
+        return (
+            f"{head_part}\n\n... [Tool output truncated by the bridge: original {orig_len} chars, showing the first {head_len} "
+            f"and last {tail_len}. Do NOT re-run the same tool to see more; work with what is shown or ask the user.] ...\n\n{tail_part}"
+        )
     elif isinstance(content, list):
         new_list = []
         for item in content:
@@ -980,10 +1007,7 @@ def compact_messages(
         return []
 
     if max_total_chars is None:
-        try:
-            max_total_chars = int(os.environ.get("ANTIGRAVITY_MAX_PROMPT_CHARS", "40000"))
-        except Exception:
-            max_total_chars = 40000
+        max_total_chars = DEFAULT_MAX_PROMPT_CHARS
 
     def estimate_chars(msg_list: List[Dict[str, Any]]) -> int:
         total = 0
@@ -1017,6 +1041,11 @@ def compact_messages(
     if not non_system_msgs:
         return system_msgs
 
+    # Within budget: hand the conversation over untouched (apart from the system-message cap above).
+    # Compacting tool results that already fit only invites the model to re-run the same tools.
+    if estimate_chars(system_msgs + non_system_msgs) <= max_total_chars:
+        return system_msgs + [dict(m) for m in non_system_msgs]
+
     # Single or few messages: apply individual message compaction
     if len(non_system_msgs) <= recent_keep_count:
         compacted_non_sys: List[Dict[str, Any]] = []
@@ -1024,11 +1053,11 @@ def compact_messages(
             m_copy = dict(m)
             role = m_copy.get("role")
             if role == "tool" or m_copy.get("tool_call_id"):
-                m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=2500)
+                m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=RECENT_TOOL_OUTPUT_CHARS)
             elif isinstance(m_copy.get("content"), list):
-                m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=2500)
-            elif isinstance(m_copy.get("content"), str) and len(m_copy["content"]) > 4000:
-                m_copy["content"] = compact_tool_output(m_copy["content"], max_chars=3500)
+                m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=RECENT_TOOL_OUTPUT_CHARS)
+            elif isinstance(m_copy.get("content"), str) and len(m_copy["content"]) > RECENT_TOOL_OUTPUT_CHARS:
+                m_copy["content"] = compact_tool_output(m_copy["content"], max_chars=RECENT_TOOL_OUTPUT_CHARS)
             compacted_non_sys.append(m_copy)
 
         assembled = system_msgs + compacted_non_sys
@@ -1038,48 +1067,48 @@ def compact_messages(
         # If still exceeding, scale down largest content
         for m in compacted_non_sys:
             c = m.get("content", "")
-            if isinstance(c, str) and len(c) > 2000:
-                m["content"] = compact_tool_output(c, max_chars=1800)
+            if isinstance(c, str) and len(c) > SQUEEZED_TOOL_OUTPUT_CHARS:
+                m["content"] = compact_tool_output(c, max_chars=SQUEEZED_TOOL_OUTPUT_CHARS)
         return system_msgs + compacted_non_sys
 
     # We have older middle messages: non_system_msgs[0] is kickoff, non_system_msgs[-recent_keep_count:] is recent
     first_msg = dict(non_system_msgs[0])
     if first_msg.get("role") == "tool":
-        first_msg["content"] = compact_tool_output(first_msg.get("content", ""), max_chars=1500)
+        first_msg["content"] = compact_tool_output(first_msg.get("content", ""), max_chars=OLD_TOOL_OUTPUT_CHARS)
     elif isinstance(first_msg.get("content"), list):
-        first_msg["content"] = compact_tool_output(first_msg.get("content"), max_chars=1500)
-    elif isinstance(first_msg.get("content"), str) and len(first_msg["content"]) > 3000:
-        first_msg["content"] = compact_tool_output(first_msg["content"], max_chars=2500)
+        first_msg["content"] = compact_tool_output(first_msg.get("content"), max_chars=OLD_TOOL_OUTPUT_CHARS)
+    elif isinstance(first_msg.get("content"), str) and len(first_msg["content"]) > 6000:
+        first_msg["content"] = compact_tool_output(first_msg["content"], max_chars=5000)
 
     middle_msgs = non_system_msgs[1:-recent_keep_count]
     recent_msgs = non_system_msgs[-recent_keep_count:]
 
-    # Compact middle messages aggressively (800 chars for tool, 1200 chars for text)
+    # Compact middle (older) messages: tool results to OLD_TOOL_OUTPUT_CHARS, long text to 2000
     compacted_middle: List[Dict[str, Any]] = []
     for m in middle_msgs:
         m_copy = dict(m)
         role = m_copy.get("role")
         if role == "tool" or m_copy.get("tool_call_id"):
-            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=800)
+            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=OLD_TOOL_OUTPUT_CHARS)
         elif isinstance(m_copy.get("content"), str):
             c_str = m_copy["content"]
-            if len(c_str) > 1500:
-                m_copy["content"] = compact_tool_output(c_str, max_chars=1200)
+            if len(c_str) > 2500:
+                m_copy["content"] = compact_tool_output(c_str, max_chars=2000)
         elif isinstance(m_copy.get("content"), list):
-            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=800)
+            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=OLD_TOOL_OUTPUT_CHARS)
         compacted_middle.append(m_copy)
 
-    # Compact recent messages softly (2500 chars for tool, 3500 chars for text)
+    # Recent messages: the model must see its latest tool results in full (up to RECENT_TOOL_OUTPUT_CHARS)
     compacted_recent: List[Dict[str, Any]] = []
     for m in recent_msgs:
         m_copy = dict(m)
         role = m_copy.get("role")
         if role == "tool" or m_copy.get("tool_call_id"):
-            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=2500)
+            m_copy["content"] = compact_tool_output(m_copy.get("content", ""), max_chars=RECENT_TOOL_OUTPUT_CHARS)
         elif isinstance(m_copy.get("content"), list):
-            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=2500)
-        elif isinstance(m_copy.get("content"), str) and len(m_copy["content"]) > 4000:
-            m_copy["content"] = compact_tool_output(m_copy["content"], max_chars=3500)
+            m_copy["content"] = compact_tool_output(m_copy.get("content"), max_chars=RECENT_TOOL_OUTPUT_CHARS)
+        elif isinstance(m_copy.get("content"), str) and len(m_copy["content"]) > RECENT_TOOL_OUTPUT_CHARS:
+            m_copy["content"] = compact_tool_output(m_copy["content"], max_chars=RECENT_TOOL_OUTPUT_CHARS)
         compacted_recent.append(m_copy)
 
     assembled = system_msgs + [first_msg] + compacted_middle + compacted_recent
@@ -1096,12 +1125,13 @@ def compact_messages(
         ] + compacted_middle + compacted_recent
         total_len = estimate_chars(assembled)
 
-    # Final safety pass: if still exceeding max_total_chars, scale down recent messages
+    # Final safety pass: if still exceeding max_total_chars, squeeze recent messages (but never below
+    # SQUEEZED_TOOL_OUTPUT_CHARS, so the latest tool result stays usable)
     if total_len > max_total_chars:
         for m in compacted_recent:
             c = m.get("content", "")
-            if isinstance(c, str) and len(c) > 1500:
-                m["content"] = compact_tool_output(c, max_chars=1200)
+            if isinstance(c, str) and len(c) > SQUEEZED_TOOL_OUTPUT_CHARS:
+                m["content"] = compact_tool_output(c, max_chars=SQUEEZED_TOOL_OUTPUT_CHARS)
         assembled = system_msgs + [first_msg] + (
             [{"role": "user", "content": f"[... {pruned_count} older conversation turns compacted to optimize reasoning latency ...]"}]
             if pruned_count > 0 else []
@@ -1118,10 +1148,7 @@ def format_messages_to_prompt(
 ) -> str:
     """Format OpenAI/Anthropic messages list into a prompt string for CLI tools with auto-compaction."""
     if max_prompt_chars is None:
-        try:
-            max_prompt_chars = int(os.environ.get("ANTIGRAVITY_MAX_PROMPT_CHARS", "40000"))
-        except Exception:
-            max_prompt_chars = 40000
+        max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
 
     parts: List[str] = []
     preamble = api_mode_preamble()

@@ -1,4 +1,4 @@
-import { MAX_CLI_ARG_BYTES } from "../config.mjs";
+import { MAX_CLI_ARG_BYTES, RECENT_TOOL_OUTPUT_CHARS, OLD_TOOL_OUTPUT_CHARS } from "../config.mjs";
 
 export function sanitizePromptForCli(promptText, maxBytes = MAX_CLI_ARG_BYTES) {
   if (!promptText || typeof promptText !== "string") return "";
@@ -42,7 +42,7 @@ export function compactToolOutput(content, maxChars = 1500) {
   const headLen = Math.floor(maxChars * 0.4);
   const tailLen = Math.floor(maxChars * 0.4);
   const truncatedCount = text.length - headLen - tailLen;
-  return `${text.slice(0, headLen)}\n... [truncated ${truncatedCount} characters of tool output] ...\n${text.slice(-tailLen)}`;
+  return `${text.slice(0, headLen)}\n... [truncated ${truncatedCount} characters of tool output by the bridge (original ${text.length}). Do NOT re-run the same tool to see more; work with what is shown or ask the user.] ...\n${text.slice(-tailLen)}`;
 }
 
 export function compactMessages(messages, maxTotalChars = 280000) {
@@ -64,15 +64,15 @@ export function compactMessages(messages, maxTotalChars = 280000) {
     return messages;
   }
 
-  // Truncate tool results and earlier assistant/user messages
+  // Truncate older tool results / long text; the most recent tool results must stay readable in full
   return messages.map((m, idx) => {
-    // Keep last 3 messages and first 2 messages relatively untouched
-    const isEdge = idx < 2 || idx >= messages.length - 3;
+    const isRecent = idx >= messages.length - 4;
+    const isKickoff = idx < 2;
     if (m.role === "tool" || m.role === "function") {
-      return { ...m, content: compactToolOutput(m.content, isEdge ? 3000 : 800) };
+      return { ...m, content: compactToolOutput(m.content, isRecent ? RECENT_TOOL_OUTPUT_CHARS : OLD_TOOL_OUTPUT_CHARS) };
     }
-    if (!isEdge && typeof m.content === "string" && m.content.length > 2000) {
-      return { ...m, content: compactToolOutput(m.content, 1500) };
+    if (!isRecent && !isKickoff && typeof m.content === "string" && m.content.length > 2500) {
+      return { ...m, content: compactToolOutput(m.content, 2000) };
     }
     return m;
   });

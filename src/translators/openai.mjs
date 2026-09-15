@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { formatToolsToSystemPrompt, parseToolCallsFromResponse } from "./tools.mjs";
 import { compactMessages } from "./context-compactor.mjs";
-import { apiModePreamble } from "../config.mjs";
+import { apiModePreamble, DEFAULT_MAX_PROMPT_CHARS } from "../config.mjs";
 
 export function formatMessagesToPrompt(
   messages,
@@ -10,8 +10,7 @@ export function formatMessagesToPrompt(
   maxPromptChars = null
 ) {
   if (maxPromptChars === null) {
-    const envVal = parseInt(process.env.ANTIGRAVITY_MAX_PROMPT_CHARS || "40000", 10);
-    maxPromptChars = isNaN(envVal) ? 40000 : envVal;
+    maxPromptChars = DEFAULT_MAX_PROMPT_CHARS;
   }
 
   const parts = [];

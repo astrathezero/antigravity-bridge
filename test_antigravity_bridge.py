@@ -623,10 +623,19 @@ class TestAntigravityBridge(unittest.TestCase):
         self.assertEqual(compacted[1]["role"], "user")
         self.assertIn("Initial user goal", compacted[1]["content"])
 
-        # Check that middle tool output was compacted
-        middle_tool_msg = next(m for m in compacted if m.get("role") == "tool")
-        self.assertLess(len(middle_tool_msg["content"]), 2500)
-        self.assertIn("Tool output truncated", middle_tool_msg["content"])
+        # Over budget: every surviving tool output is shorter than the original and carries the
+        # bridge's truncation marker; older ones are squeezed hardest.
+        tool_msgs = [m for m in compacted if m.get("role") == "tool"]
+        self.assertTrue(tool_msgs)
+        for m in tool_msgs:
+            self.assertLess(len(m["content"]), 20000)
+            self.assertIn("Tool output truncated", m["content"])
+        # older turns get pruned first; whatever survives is squeezed to ~5k so it stays usable
+        self.assertLess(max(len(m["content"]) for m in tool_msgs), 6000)
+
+        # Within budget: nothing is truncated (the model must see full tool results)
+        untouched = compact_messages(messages, max_total_chars=200000, recent_keep_count=3)
+        self.assertEqual([m["content"] for m in untouched if m.get("role") == "tool"], [huge_tool_output, huge_tool_output])
 
         # Check format_messages_to_prompt produces compacted string
         prompt = format_messages_to_prompt(messages, max_prompt_chars=10000)

@@ -398,6 +398,7 @@ Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดั�
 | **`ANTIGRAVITY_NO_PROXY`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบตรวจจับ Proxy และต่อเน็ตโดยตรง |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบเบื้องหลังที่รีเฟรช Token ทุก 55 นาที |
 | **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่ออนุญาตให้ agy ใช้ tool ของตัวเอง (terminal/ไฟล์/browser) ระหว่างตอบ API ค่า 0 = เป็น model gateway ล้วน ๆ และจะ kill ทันทีที่เจอ tool step |
+| **`ANTIGRAVITY_MAX_PROMPT_CHARS`** | `int` | `160000` | งบ context (ตัวอักษร) ที่ส่งให้ agy ถ้าไม่เกินงบจะไม่ตัดอะไรเลย ถ้าเกินจะย่อ tool result เก่าเหลือ `ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS` (2000) และรายการล่าสุดเหลือ `ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS` (20000) |
 | **`ANTIGRAVITY_STALL_TIMEOUT`** | `float` | `600` | จำนวนวินาทีที่ CLI เงียบก่อนจะยกเลิกรอบนั้น agy จะไม่พิมพ์อะไรเลยระหว่างโมเดลคิด (thinking) จึงควรตั้งไว้สูง ตัวกันจริงคือ profile timeout (600 วินาที) |
 | **`GEMINI_API_KEY`** | `str` | `None` | Google AI Studio Key สำหรับสร้างภาพด้วย Imagen 3 โดยตรง |
 | **`ANTIGRAVITY_IMAGE_ROUTER_URL`** | `str` | *9router* | URL สำหรับเกตเวย์สร้างภาพภายนอก |

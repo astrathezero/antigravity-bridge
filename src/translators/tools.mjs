@@ -92,6 +92,12 @@ export function formatToolsToSystemPrompt(tools, toolChoice = null) {
   }
 
   lines.push("Do NOT output conversational filler before or after the JSON block when calling a tool.");
+  lines.push(
+    "Tool results already in this conversation ([Tool Result] blocks) are the real outputs of your earlier calls. " +
+      "Never call a tool again with the same arguments to re-read a result you already have. " +
+      "When the results are sufficient, reply to the user with a normal text answer and no tool_calls. " +
+      "Focus on the latest user message."
+  );
   return lines.join("\n");
 }
 
