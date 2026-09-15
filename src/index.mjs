@@ -146,6 +146,15 @@ Press Ctrl+C to stop.
   function shutdown() {
     console.log("\n[INFO] Gracefully shutting down Antigravity Bridge Server...");
     if (daemonTimer) clearInterval(daemonTimer);
+    // Drop keep-alive / streaming connections so a restart is not held open by long-lived
+    // clients (e.g. Hermes); force-exit if anything is still hanging after 10s.
+    try { server.closeIdleConnections?.(); } catch { /* older Node */ }
+    const forceTimer = setTimeout(() => {
+      console.warn("[WARN] Shutdown timed out with open connections; forcing exit.");
+      try { server.closeAllConnections?.(); } catch { /* older Node */ }
+      process.exit(0);
+    }, 10_000);
+    forceTimer.unref();
     server.close(() => {
       console.log("[OK] Server stopped.");
       process.exit(0);
