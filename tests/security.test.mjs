@@ -214,3 +214,22 @@ test("executor: abort signal cancels the CLI", async () => {
   assert.ok(Date.now() - t0 < 5000);
   if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
 });
+
+
+test("executor: prompts above the argv limit go to agy over stdin as NDJSON", async () => {
+  const { parseCmdTemplate } = await import("../src/core/executor.mjs");
+  const big = "ทดสอบภาษาไทย ".repeat(20000); // ~600KB
+  const tpl = '"/usr/local/bin/agy" --dangerously-skip-permissions --print-timeout 20m0s --output-format stream-json -p "{prompt}"';
+  const { argv, stdinInput } = parseCmdTemplate(tpl, big);
+  assert.deepEqual(argv.slice(-2), ["-p", ""]);
+  const idx = argv.indexOf("--input-format");
+  assert.ok(idx > 0 && argv[idx + 1] === "stream-json" && idx < argv.indexOf("-p"));
+  const payload = JSON.parse(stdinInput);
+  assert.equal(payload.event, "user");
+  assert.equal(payload.message.role, "user");
+  assert.equal(payload.message.content, big);
+  // templates without stream-json output keep the old argv truncation
+  const { argv: a2, stdinInput: s2 } = parseCmdTemplate('agy -p "{prompt}"', big);
+  assert.equal(s2, null);
+  assert.ok(Buffer.byteLength(a2[a2.length - 1], "utf-8") < 131072);
+});

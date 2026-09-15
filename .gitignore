@@ -31,3 +31,6 @@ antigravity-bridge-bundle*
 
 # test scratch
 tests/.tmp-sandbox/
+
+# local branch backups (OneDrive-synced, not for git)
+backups/

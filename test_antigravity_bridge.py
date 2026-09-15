@@ -731,6 +731,21 @@ class TestAntigravityBridge(unittest.TestCase):
         self.assertEqual(argv, ["agy", "-p", "Hello AI"])
         self.assertEqual(stdin_input, "")
 
+    def test_parse_cmd_template_large_prompt_goes_to_stdin_ndjson(self):
+        """Prompts above the argv limit are delivered to agy via stdin NDJSON (no truncation) when the template is stream-json."""
+        big = "ทดสอบภาษาไทย " * 20000  # ~ 600KB
+        tpl = '"/usr/local/bin/agy" --dangerously-skip-permissions --print-timeout 20m0s --output-format stream-json -p "{prompt}"'
+        argv, stdin_input = antigravity_bridge.parse_cmd_template(tpl, big)
+        self.assertEqual(argv[-2:], ["-p", ""])
+        self.assertIn("--input-format", argv)
+        self.assertEqual(argv[argv.index("--input-format") + 1], "stream-json")
+        self.assertLess(argv.index("--input-format"), argv.index("-p"))
+        payload = json.loads(stdin_input)
+        self.assertEqual(payload["event"], "user")
+        self.assertEqual(payload["message"]["role"], "user")
+        self.assertEqual(payload["message"]["content"], big)  # full prompt, nothing cut
+        self.assertTrue(stdin_input.endswith("\n"))
+
     def test_parse_cmd_template_oversized_prompt_truncation(self):
         """Test that parse_cmd_template truncates prompts exceeding MAX_CLI_ARG_BYTES (350KB)."""
         oversized_prompt = "[System]\nKeep safe.\n\n" + ("\n\n[User]\nTurn data...\n\n[Assistant]\nResponse..." * 25000) # > 500KB

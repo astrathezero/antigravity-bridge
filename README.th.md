@@ -361,6 +361,14 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: app
 
 ---
 
+## 🗄️ แบบเก็บถาวร: Web Extension Edition
+
+"Web Extension Edition" (Chrome extension + Docker/noVNC ที่ใช้ browser session เป็นช่องทางที่สองคู่กับ CLI)
+ถูกถอดออกจาก branch ที่ใช้งานเมื่อ 2026-09-15 แนวทางการออกแบบ โปรโตคอล และวิธี deploy ทั้งหมดถูกเก็บไว้ที่
+[docs/WEB_EXTENSION_BRIDGE_APPROACH.md](docs/WEB_EXTENSION_BRIDGE_APPROACH.md) ส่วนโค้ดเก็บเป็น git bundle / tarball นอก repo (ดูส่วนที่ 8 ของเอกสารนั้น)
+
+---
+
 ## 🔒 โมเดลความปลอดภัย (Security Model)
 
 Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดังนั้น **ใครก็ตามที่เข้าถึงพอร์ตได้จะสั่งให้ agent รันคำสั่งและเขียนไฟล์บนเครื่องนี้ได้** ให้ปฏิบัติกับพอร์ตนี้เหมือนสิทธิ์ SSH
@@ -398,7 +406,8 @@ Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดั�
 | **`ANTIGRAVITY_NO_PROXY`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบตรวจจับ Proxy และต่อเน็ตโดยตรง |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบเบื้องหลังที่รีเฟรช Token ทุก 55 นาที |
 | **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่ออนุญาตให้ agy ใช้ tool ของตัวเอง (terminal/ไฟล์/browser) ระหว่างตอบ API ค่า 0 = เป็น model gateway ล้วน ๆ และจะ kill ทันทีที่เจอ tool step |
-| **`ANTIGRAVITY_MAX_PROMPT_CHARS`** | `int` | `160000` | งบ context (ตัวอักษร) ที่ส่งให้ agy ถ้าไม่เกินงบจะไม่ตัดอะไรเลย ถ้าเกินจะย่อ tool result เก่าเหลือ `ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS` (2000) และรายการล่าสุดเหลือ `ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS` (20000) |
+| **`ANTIGRAVITY_MAX_CLI_ARG_BYTES`** | `int` | `120000` | ขนาด prompt สูงสุดที่ส่งเป็น argument (Linux จำกัด 131072 bytes ต่อ argument) ถ้าใหญ่กว่านี้จะส่งให้ agy ทาง stdin แบบ NDJSON (`--input-format stream-json`) ได้ถึง `ANTIGRAVITY_MAX_STDIN_PROMPT_BYTES` (2 MB) |
+| **`ANTIGRAVITY_MAX_PROMPT_CHARS`** | `int` | `200000` | งบ context (UTF-8 bytes ภาษาไทย 3 bytes/ตัวอักษร) ที่ส่งให้ agy ถ้าไม่เกินงบจะไม่ตัดอะไรเลย ถ้าเกินจะย่อ tool result เก่าเหลือ `ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS` (2000) และรายการล่าสุดเหลือ `ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS` (20000) |
 | **`ANTIGRAVITY_STALL_TIMEOUT`** | `float` | `600` | จำนวนวินาทีที่ CLI เงียบก่อนจะยกเลิกรอบนั้น agy จะไม่พิมพ์อะไรเลยระหว่างโมเดลคิด (thinking) จึงควรตั้งไว้สูง ตัวกันจริงคือ profile timeout (600 วินาที) |
 | **`GEMINI_API_KEY`** | `str` | `None` | Google AI Studio Key สำหรับสร้างภาพด้วย Imagen 3 โดยตรง |
 | **`ANTIGRAVITY_IMAGE_ROUTER_URL`** | `str` | *9router* | URL สำหรับเกตเวย์สร้างภาพภายนอก |

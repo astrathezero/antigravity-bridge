@@ -436,6 +436,15 @@ curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: app
 
 ---
 
+## 🗄️ Archived design: Web Extension Edition
+
+The earlier "Web Extension Edition" (Chrome extension + Docker/noVNC browser sessions used as a
+second channel next to the CLI) was removed from the active branches on 2026-09-15. Its full design,
+protocol and deployment notes are preserved in [docs/WEB_EXTENSION_BRIDGE_APPROACH.md](docs/WEB_EXTENSION_BRIDGE_APPROACH.md),
+and the code is kept as git bundles / tarballs outside the repository (see that document, section 8).
+
+---
+
 ## 🔒 Security Model
 
 The bridge runs the `agy` CLI with `--dangerously-skip-permissions`, so **anyone who can reach the port can make the agent run commands and write files on this machine**. Treat the port like SSH access.
@@ -473,7 +482,8 @@ The bridge runs the `agy` CLI with `--dangerously-skip-permissions`, so **anyone
 | **`ANTIGRAVITY_NO_PROXY`** | `int/bool`| `0` | Set `1` to disable proxy auto-detection |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `int/bool`| `0` | Set `1` to disable background 55-minute OAuth token refresh |
 | **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `int/bool`| `0` | Set `1` to let agy execute its own tools (terminal/files/browser) during API requests. Off = pure model gateway; tool steps are killed immediately |
-| **`ANTIGRAVITY_MAX_PROMPT_CHARS`** | `int` | `160000` | Context budget (chars) handed to agy. Within budget nothing is truncated; above it older tool results are compacted to `ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS` (2000) and recent ones to `ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS` (20000) |
+| **`ANTIGRAVITY_MAX_CLI_ARG_BYTES`** | `int` | `120000` | Largest prompt passed as a CLI argument (Linux caps one argument at 131072 bytes). Bigger prompts are sent to agy over stdin as NDJSON (`--input-format stream-json`) up to `ANTIGRAVITY_MAX_STDIN_PROMPT_BYTES` (2 MB) |
+| **`ANTIGRAVITY_MAX_PROMPT_CHARS`** | `int` | `200000` | Context budget (UTF-8 bytes) handed to agy. Within budget nothing is truncated; above it older tool results are compacted to `ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS` (2000) and recent ones to `ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS` (20000) |
 | **`ANTIGRAVITY_STALL_TIMEOUT`** | `float` | `600` | Seconds of CLI silence before a run is abandoned. agy prints nothing while a reasoning model thinks, so keep this high; the per-profile timeout (600s) is the real guard |
 | **`GEMINI_API_KEY`** | `str` | `None` | Google AI Studio Key for direct Imagen 3 generation |
 | **`ANTIGRAVITY_IMAGE_ROUTER_URL`** | `str` | *9router* | Custom image generation gateway URL |

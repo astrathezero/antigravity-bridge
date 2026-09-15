@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import {
   MAX_CLI_ARG_BYTES,
+  MAX_STDIN_PROMPT_BYTES,
   DEFAULT_PROFILE_TIMEOUT,
   DEFAULT_TOTAL_TIMEOUT,
   calculateDynamicStallTimeout,
@@ -25,6 +26,28 @@ import {
   parseQuotaResetSeconds,
   GLOBAL_PROFILE_MANAGER,
 } from "./profile-manager.mjs";
+
+/** NDJSON line understood by `agy --input-format stream-json` (one user turn). */
+export function buildStdinPromptPayload(promptText) {
+  return JSON.stringify({ event: "user", message: { role: "user", content: promptText } }) + "\n";
+}
+
+/**
+ * Turn an agy `... --output-format stream-json -p "{prompt}"` argv into its stdin form: the prompt
+ * argument becomes "" and `--input-format stream-json` is inserted before -p. Returns null when the
+ * template is not an agy stream-json template (caller falls back to truncation).
+ */
+export function buildStdinPromptArgv(parts, placeholder, cmdTemplate) {
+  if (!cmdTemplate.includes("--output-format") || !cmdTemplate.includes("stream-json")) return null;
+  const argv = parts.map((p) => (p === placeholder ? "" : p));
+  for (let i = 0; i < argv.length; i++) {
+    if (["-p", "--print", "--prompt"].includes(argv[i]) && i + 1 < argv.length && argv[i + 1] === "") {
+      if (argv.includes("--input-format")) return argv;
+      return [...argv.slice(0, i), "--input-format", "stream-json", ...argv.slice(i)];
+    }
+  }
+  return null;
+}
 
 export function parseCmdTemplate(cmdTemplate, promptText, modelName = null) {
   const rawFlags = resolveModelFlags(modelName);
@@ -57,6 +80,14 @@ export function parseCmdTemplate(cmdTemplate, promptText, modelName = null) {
 
     let finalPrompt = promptText;
     if (promptBytesLen > MAX_CLI_ARG_BYTES) {
+      const stdinArgv = buildStdinPromptArgv(finalArgs, placeholder, cmdTemplate);
+      if (stdinArgv) {
+        // Linux caps a single argv string at 128KB (spawn E2BIG): hand the prompt to agy over stdin.
+        const payloadText =
+          promptBytesLen > MAX_STDIN_PROMPT_BYTES ? sanitizePromptForCli(promptText, MAX_STDIN_PROMPT_BYTES) : promptText;
+        console.log(`[EXEC] prompt is ${promptBytesLen} bytes (> ${MAX_CLI_ARG_BYTES} argv limit): delivering via stdin NDJSON`);
+        return { argv: stdinArgv, stdinInput: buildStdinPromptPayload(payloadText) };
+      }
       finalPrompt = sanitizePromptForCli(promptText, MAX_CLI_ARG_BYTES);
     }
 

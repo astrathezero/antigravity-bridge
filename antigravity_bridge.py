@@ -91,6 +91,10 @@ MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
 # Linux limits a SINGLE argv string to MAX_ARG_STRLEN = 131072 bytes (E2BIG above that), so the
 # prompt passed as `-p "<prompt>"` must stay below it; 120000 leaves headroom. Thai text is 3 bytes/char.
 MAX_CLI_ARG_BYTES = int(os.environ.get("ANTIGRAVITY_MAX_CLI_ARG_BYTES", "120000") or 120000)
+# Prompts larger than MAX_CLI_ARG_BYTES are handed to agy over stdin as one NDJSON line
+# ({"event":"user","message":{"role":"user","content":...}} with --input-format stream-json),
+# which has no argv size limit. This is the hard cap for that path.
+MAX_STDIN_PROMPT_BYTES = int(os.environ.get("ANTIGRAVITY_MAX_STDIN_PROMPT_BYTES", "2000000") or 2000000)
 
 DEFAULT_PROFILE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_PROFILE_TIMEOUT", "600.0"))  # Default execution timeout per profile attempt in seconds (10 mins)
 DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TOTAL_TIMEOUT", "1800.0"))       # Total execution timeout across all profile fallback attempts in seconds (30 mins)
@@ -405,9 +409,9 @@ def _env_int(name: str, default: int) -> int:
 
 # Context budget for the prompt handed to agy. Tool results are what the model needs to finish
 # a task; cutting them short makes it re-run the same tool forever (seen with Hermes).
-# Budget is measured in UTF-8 BYTES (Thai = 3 bytes/char) and must leave room for the tool
-# instructions and preamble under MAX_CLI_ARG_BYTES, otherwise the CLI argument overflows (E2BIG).
-DEFAULT_MAX_PROMPT_CHARS = _env_int("ANTIGRAVITY_MAX_PROMPT_CHARS", 90000)
+# Budget is measured in UTF-8 BYTES (Thai = 3 bytes/char). Prompts above MAX_CLI_ARG_BYTES are
+# delivered over stdin (see build_stdin_prompt_argv), so this can exceed the argv limit.
+DEFAULT_MAX_PROMPT_CHARS = _env_int("ANTIGRAVITY_MAX_PROMPT_CHARS", 200000)
 RECENT_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS", 20000)   # last few tool results
 OLD_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS", 2000)          # older tool results
 SQUEEZED_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_SQUEEZED_TOOL_OUTPUT_CHARS", 5000)  # last resort when over budget
@@ -2972,6 +2976,26 @@ def resolve_model_flags(model_name: Optional[str]) -> List[str]:
     return flags
 
 
+def build_stdin_prompt_payload(prompt_text: str) -> str:
+    """NDJSON line understood by `agy --input-format stream-json` (one user turn)."""
+    return json.dumps({"event": "user", "message": {"role": "user", "content": prompt_text}}, ensure_ascii=False) + "\n"
+
+
+def build_stdin_prompt_argv(parts: List[str], placeholder: str, cmd_template: str) -> Optional[List[str]]:
+    """Turn an agy `... --output-format stream-json -p "{prompt}"` argv into its stdin form:
+    the prompt argument becomes "" and `--input-format stream-json` is inserted before -p.
+    Returns None when the template is not an agy stream-json template (caller falls back to truncation)."""
+    if "--output-format" not in cmd_template or "stream-json" not in cmd_template:
+        return None
+    argv = ["" if p == placeholder else p for p in parts]
+    for i, p in enumerate(argv):
+        if p in ("-p", "--print", "--prompt") and i + 1 < len(argv) and argv[i + 1] == "":
+            if "--input-format" in argv:
+                return argv
+            return argv[:i] + ["--input-format", "stream-json"] + argv[i:]
+    return None
+
+
 def parse_cmd_template(
     cmd_template: str,
     prompt_text: str,
@@ -3003,6 +3027,14 @@ def parse_cmd_template(
             parts = [parts[0]] + model_flags + parts[1:]
 
         if prompt_bytes_len > MAX_CLI_ARG_BYTES:
+            stdin_argv = build_stdin_prompt_argv(parts, placeholder, cmd_template)
+            if stdin_argv is not None:
+                # Linux caps a single argv string at 128KB (E2BIG): hand the prompt to agy over stdin.
+                payload_text = prompt_text
+                if prompt_bytes_len > MAX_STDIN_PROMPT_BYTES:
+                    payload_text = sanitize_prompt_for_cli(prompt_text, max_bytes=MAX_STDIN_PROMPT_BYTES)
+                logger.info("Prompt is %d bytes (> %d argv limit): delivering via stdin NDJSON", prompt_bytes_len, MAX_CLI_ARG_BYTES)
+                return stdin_argv, build_stdin_prompt_payload(payload_text)
             final_prompt = sanitize_prompt_for_cli(prompt_text, max_bytes=MAX_CLI_ARG_BYTES)
         else:
             final_prompt = prompt_text
