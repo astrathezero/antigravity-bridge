@@ -47,16 +47,21 @@ export function compactToolOutput(content, maxChars = 1500) {
 
 export function compactMessages(messages, maxTotalChars = 280000) {
   if (!messages || !Array.isArray(messages)) return [];
+  // UTF-8 bytes, not characters: the CLI argument limit is in bytes and Thai is 3 bytes/char
+  const blen = (t) => Buffer.byteLength(String(t ?? ""), "utf-8");
   let totalChars = 0;
   for (const m of messages) {
     const c = m.content;
     if (typeof c === "string") {
-      totalChars += c.length;
+      totalChars += blen(c);
     } else if (Array.isArray(c)) {
       for (const part of c) {
-        if (typeof part === "string") totalChars += part.length;
-        else if (part && typeof part.text === "string") totalChars += part.text.length;
+        if (typeof part === "string") totalChars += blen(part);
+        else if (part && typeof part.text === "string") totalChars += blen(part.text);
       }
+    }
+    if (m.tool_calls) {
+      try { totalChars += blen(JSON.stringify(m.tool_calls)); } catch { /* ignore */ }
     }
   }
 

@@ -58,7 +58,9 @@ export const DEFAULT_PORT = parseInt(
 export const DEFAULT_HOST = process.env.HOST || process.env.ANTIGRAVITY_HOST || "127.0.0.1";
 
 export const MAX_BODY_SIZE = 32 * 1024 * 1024; // 32 MB
-export const MAX_CLI_ARG_BYTES = 350000; // 350KB safe CLI argument buffer limit
+// Linux limits a SINGLE argv string to MAX_ARG_STRLEN = 131072 bytes (spawn E2BIG above that), so the
+// prompt passed as `-p "<prompt>"` must stay below it; 120000 leaves headroom. Thai text is 3 bytes/char.
+export const MAX_CLI_ARG_BYTES = parseInt(process.env.ANTIGRAVITY_MAX_CLI_ARG_BYTES || "120000", 10) || 120000;
 
 export const DEFAULT_PROFILE_TIMEOUT = parseFloat(process.env.ANTIGRAVITY_PROFILE_TIMEOUT || "600.0");
 export const DEFAULT_TOTAL_TIMEOUT = parseFloat(process.env.ANTIGRAVITY_TOTAL_TIMEOUT || "1800.0");
@@ -430,7 +432,9 @@ function envInt(name, dflt) {
 }
 // Context budget for the prompt handed to agy. Tool results are what the model needs to finish a
 // task; cutting them short makes it re-run the same tool forever (seen with Hermes).
-export const DEFAULT_MAX_PROMPT_CHARS = envInt("ANTIGRAVITY_MAX_PROMPT_CHARS", 160000);
+// Budget is measured in UTF-8 BYTES (Thai = 3 bytes/char) and must leave room for the tool
+// instructions and preamble under MAX_CLI_ARG_BYTES, otherwise the CLI argument overflows (E2BIG).
+export const DEFAULT_MAX_PROMPT_CHARS = envInt("ANTIGRAVITY_MAX_PROMPT_CHARS", 90000);
 export const RECENT_TOOL_OUTPUT_CHARS = envInt("ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS", 20000);
 export const OLD_TOOL_OUTPUT_CHARS = envInt("ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS", 2000);
 

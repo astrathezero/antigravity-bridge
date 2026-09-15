@@ -88,7 +88,9 @@ logging.basicConfig(
 logger = logging.getLogger("antigravity_bridge")
 
 MAX_BODY_SIZE = 32 * 1024 * 1024  # 32 MB limit
-MAX_CLI_ARG_BYTES = 350000        # 350KB safe CLI argument limit (macOS ARG_MAX=1MB, Linux ARG_MAX=2MB)
+# Linux limits a SINGLE argv string to MAX_ARG_STRLEN = 131072 bytes (E2BIG above that), so the
+# prompt passed as `-p "<prompt>"` must stay below it; 120000 leaves headroom. Thai text is 3 bytes/char.
+MAX_CLI_ARG_BYTES = int(os.environ.get("ANTIGRAVITY_MAX_CLI_ARG_BYTES", "120000") or 120000)
 
 DEFAULT_PROFILE_TIMEOUT = float(os.environ.get("ANTIGRAVITY_PROFILE_TIMEOUT", "600.0"))  # Default execution timeout per profile attempt in seconds (10 mins)
 DEFAULT_TOTAL_TIMEOUT = float(os.environ.get("ANTIGRAVITY_TOTAL_TIMEOUT", "1800.0"))       # Total execution timeout across all profile fallback attempts in seconds (30 mins)
@@ -403,7 +405,9 @@ def _env_int(name: str, default: int) -> int:
 
 # Context budget for the prompt handed to agy. Tool results are what the model needs to finish
 # a task; cutting them short makes it re-run the same tool forever (seen with Hermes).
-DEFAULT_MAX_PROMPT_CHARS = _env_int("ANTIGRAVITY_MAX_PROMPT_CHARS", 160000)
+# Budget is measured in UTF-8 BYTES (Thai = 3 bytes/char) and must leave room for the tool
+# instructions and preamble under MAX_CLI_ARG_BYTES, otherwise the CLI argument overflows (E2BIG).
+DEFAULT_MAX_PROMPT_CHARS = _env_int("ANTIGRAVITY_MAX_PROMPT_CHARS", 90000)
 RECENT_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS", 20000)   # last few tool results
 OLD_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS", 2000)          # older tool results
 SQUEEZED_TOOL_OUTPUT_CHARS = _env_int("ANTIGRAVITY_SQUEEZED_TOOL_OUTPUT_CHARS", 5000)  # last resort when over budget
@@ -1009,18 +1013,28 @@ def compact_messages(
     if max_total_chars is None:
         max_total_chars = DEFAULT_MAX_PROMPT_CHARS
 
+    def _blen(text: Any) -> int:
+        try:
+            return len(str(text).encode("utf-8"))
+        except Exception:
+            return len(str(text))
+
     def estimate_chars(msg_list: List[Dict[str, Any]]) -> int:
+        # UTF-8 bytes, not characters: the CLI argument limit is in bytes and Thai is 3 bytes/char
         total = 0
         for m in msg_list:
             c = m.get("content")
             if isinstance(c, str):
-                total += len(c)
+                total += _blen(c)
             elif isinstance(c, list):
                 for item in c:
                     if isinstance(item, dict) and "text" in item:
-                        total += len(str(item["text"]))
+                        total += _blen(item["text"])
             elif c is not None:
-                total += len(str(c))
+                total += _blen(c)
+            tc = m.get("tool_calls")
+            if tc:
+                total += _blen(json.dumps(tc, ensure_ascii=False))
         return total
 
     system_msgs: List[Dict[str, Any]] = []
