@@ -233,3 +233,96 @@ test("executor: prompts above the argv limit go to agy over stdin as NDJSON", as
   assert.equal(s2, null);
   assert.ok(Buffer.byteLength(a2[a2.length - 1], "utf-8") < 131072);
 });
+
+// Helper agy stand-in for the tool-block retry tests. First run: the prompt carries no notice ->
+// start a tool and hang (the bridge kills it). Retry: the prompt carries the notice naming the
+// offending tool -> answer in text like a well-behaved run.
+const TOOL_STEP_THEN_TEXT_SRC = [
+  'const p = process.argv.slice(2).join(" ");',
+  'if (p.includes("[Bridge notice: previous attempt aborted]") && p.includes("run_command")) {',
+  '  process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"ACTIVE",step_type:"agent_response",text_delta:"text answer"}})+"\\n");',
+  '  process.stdout.write(JSON.stringify({event:"result",result:{status:"SUCCESS",response:"text answer"}})+"\\n");',
+  "} else {",
+  '  process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"ACTIVE",step_type:"tool",tool_name:"run_command",tool_info:{name:"run_command",parameters:{CommandLine:"id"}}}})+"\\n");',
+  "  setTimeout(()=>{},30000);",
+  "}",
+  "",
+].join("\n");
+
+test("executor: a blocked tool step is retried once on the same profile with a reinforced notice", async () => {
+  const prev = process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  const prevRetries = process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES;
+  delete process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES;
+  const prevBase = process.env.ANTIGRAVITY_SANDBOX_BASE;
+  process.env.ANTIGRAVITY_SANDBOX_BASE = `${process.cwd()}/tests/.tmp-sandbox`;
+  const pm = new ProfileManager(["zz_t1", "zz_t2"]);
+  pm.reset_all();
+  const fsMod = await import("node:fs");
+  fsMod.mkdirSync(`${process.cwd()}/tests/.tmp-sandbox`, { recursive: true });
+  const helper = `${process.cwd()}/tests/.tmp-sandbox/tool-step-then-text.mjs`;
+  fsMod.writeFileSync(helper, TOOL_STEP_THEN_TEXT_SRC);
+  try {
+    const t0 = Date.now();
+    const res = await executeCliWithFallback(`node ${helper} {prompt}`, "hi", { profileManager: pm, timeout: 20, totalTimeout: 40 });
+    assert.equal(res.outputText, "text answer");
+    assert.equal(res.usedProfile, "zz_t1", "retry stays on the same profile");
+    assert.ok(Date.now() - t0 < 15000, "retry happens right after the block, not after a timeout");
+    assert.equal(pm.is_in_cooldown("zz_t1"), false, "no cooldown for a blocked tool attempt");
+    assert.equal(pm.state["zz_t2"]?.last_used || 0, 0, "second profile never tried");
+  } finally {
+    if (prev === undefined) delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS; else process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS = prev;
+    if (prevRetries === undefined) delete process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES; else process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES = prevRetries;
+    if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
+  }
+});
+
+test("executor: tool-block retry is skipped once text was streamed, and when ANTIGRAVITY_TOOL_BLOCK_RETRIES=0", async () => {
+  const prev = process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  const prevRetries = process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES;
+  delete process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES;
+  const prevBase = process.env.ANTIGRAVITY_SANDBOX_BASE;
+  process.env.ANTIGRAVITY_SANDBOX_BASE = `${process.cwd()}/tests/.tmp-sandbox`;
+  const pm = new ProfileManager(["zz_t4"]);
+  pm.reset_all();
+  const fsMod = await import("node:fs");
+  fsMod.mkdirSync(`${process.cwd()}/tests/.tmp-sandbox`, { recursive: true });
+  const textThenTool = `${process.cwd()}/tests/.tmp-sandbox/text-then-tool-step.mjs`;
+  fsMod.writeFileSync(
+    textThenTool,
+    [
+      'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"ACTIVE",step_type:"agent_response",text_delta:"Let me check..."}})+"\\n");',
+      'setTimeout(()=>{process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:2,state:"ACTIVE",step_type:"tool",tool_name:"run_command",tool_info:{name:"run_command",parameters:{CommandLine:"id"}}}})+"\\n");},300);',
+      "setTimeout(()=>{},30000);",
+      "",
+    ].join("\n")
+  );
+  const helper = `${process.cwd()}/tests/.tmp-sandbox/tool-step-then-text.mjs`;
+  fsMod.writeFileSync(helper, TOOL_STEP_THEN_TEXT_SRC);
+  try {
+    // Text already forwarded to the client: a retry would duplicate it, so the request fails instead.
+    const kinds = [];
+    await assert.rejects(
+      executeCliWithFallback(`node ${textThenTool} {prompt}`, "hi", {
+        profileManager: pm,
+        timeout: 20,
+        totalTimeout: 40,
+        outputCallback: (_text, kind) => kinds.push(kind),
+      }),
+      /CLI tool execution blocked/
+    );
+    assert.ok(kinds.includes("delta"), "text was streamed before the tool step");
+
+    // Retry disabled by configuration.
+    process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES = "0";
+    await assert.rejects(
+      executeCliWithFallback(`node ${helper} {prompt}`, "hi", { profileManager: pm, timeout: 20, totalTimeout: 40 }),
+      /CLI tool execution blocked/
+    );
+  } finally {
+    if (prev === undefined) delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS; else process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS = prev;
+    if (prevRetries === undefined) delete process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES; else process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES = prevRetries;
+    if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
+  }
+});

@@ -430,6 +430,31 @@ export function apiModePreamble() {
   return cliToolsAllowed() ? "" : API_MODE_PREAMBLE;
 }
 
+/**
+ * When agy ignores the preamble and starts one of its own tools, the run is killed (executor.mjs).
+ * That choice is a per-run sampling accident of the model, not a profile problem, so the same
+ * profile gets this many further attempts with toolBlockRetryNotice() appended to the prompt
+ * before the request fails. ANTIGRAVITY_TOOL_BLOCK_RETRIES=0 disables the retry.
+ */
+export function toolBlockRetries() {
+  const raw = (process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES || "").trim();
+  if (raw === "") return 1;
+  const v = parseInt(raw, 10);
+  return Number.isFinite(v) && v >= 0 ? v : 1;
+}
+
+export const TOOL_BLOCK_RETRY_NOTICE_HEADER = "[Bridge notice: previous attempt aborted]";
+
+export function toolBlockRetryNotice(toolText) {
+  const shown = String(toolText || "a built-in tool").replace(/\s+/g, " ").slice(0, 160);
+  return [
+    TOOL_BLOCK_RETRY_NOTICE_HEADER,
+    `Your previous attempt at this exact request was killed because you tried to run your own built-in tool (${shown}).`,
+    "That is forbidden here and would be killed again. Do NOT run commands, read or list files, or browse.",
+    "Answer from the conversation above only: reply in plain text, or, if the request defines client-side tools and one is truly needed, output that tool call JSON exactly as instructed and stop.",
+  ].join("\n");
+}
+
 function envInt(name, dflt) {
   const v = parseInt((process.env[name] || "").trim(), 10);
   return Number.isFinite(v) && v > 0 ? v : dflt;

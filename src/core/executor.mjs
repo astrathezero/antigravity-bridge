@@ -13,6 +13,8 @@ import {
   ANTIGRAVITY_MODEL_FALLBACK_ENABLED,
   detectLocalProxy,
   cliToolsAllowed,
+  toolBlockRetries,
+  toolBlockRetryNotice,
 } from "../config.mjs";
 import { sanitizePromptForCli } from "../translators/context-compactor.mjs";
 import {
@@ -348,13 +350,14 @@ export async function executeCliCommand(
                 clearTimeout(totalTimer);
                 clearInterval(stallInterval);
                 killProcessTree(child, true);
-                reject(
-                  new Error(
-                    `CLI tool execution blocked (profile=${profile || "default"}): agy attempted to run ${it.text}. ` +
-                      "The bridge runs in API mode and does not let agy execute tools on this machine; " +
-                      "ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow)."
-                  )
+                const blockedErr = new Error(
+                  `CLI tool execution blocked (profile=${profile || "default"}): agy attempted to run ${it.text}. ` +
+                    "The bridge runs in API mode and does not let agy execute tools on this machine; " +
+                    "ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow)."
                 );
+                blockedErr.code = "TOOL_BLOCKED";
+                blockedErr.toolViolation = it.text;
+                reject(blockedErr);
               }
             } else {
               console.log(`[TOOL STEP] profile=${profile || "default"}: ${it.text}`);
@@ -530,6 +533,19 @@ export async function executeCliWithFallback(
   const triedProfiles = new Set();
   const startTime = Date.now();
 
+  // A tool-blocked run (API mode) is retried on the same profile with a reinforced notice:
+  // whether the model reaches for its own tools is a per-run accident, not a profile problem.
+  // Text already streamed to the client cannot be taken back, so the retry is only safe while
+  // nothing has been forwarded yet.
+  let toolBlockRetriesLeft = toolBlockRetries();
+  let deltaForwarded = false;
+  const trackedOutputCallback = outputCallback
+    ? (text, kind) => {
+        if (kind === "delta" && text) deltaForwarded = true;
+        outputCallback(text, kind);
+      }
+    : null;
+
   for (let i = 0; i < candidateProfiles.length; i++) {
     const elapsed = (Date.now() - startTime) / 1000;
     const remainingBudget = totalTimeout - elapsed;
@@ -574,15 +590,31 @@ export async function executeCliWithFallback(
     }
 
     try {
-      const output = await executeCliCommand(cmdTemplate, promptText, {
-        timeout: attemptTimeout,
-        profile,
-        modelName: effectiveModel,
-        stallTimeout,
-        outputCallback,
-        allowCliTools,
-        signal,
-      });
+      let attemptPrompt = promptText;
+      let attemptBudget = attemptTimeout;
+      let output;
+      for (;;) {
+        try {
+          output = await executeCliCommand(cmdTemplate, attemptPrompt, {
+            timeout: attemptBudget,
+            profile,
+            modelName: effectiveModel,
+            stallTimeout,
+            outputCallback: trackedOutputCallback,
+            allowCliTools,
+            signal,
+          });
+          break;
+        } catch (err) {
+          if (err?.code !== "TOOL_BLOCKED" || toolBlockRetriesLeft <= 0 || deltaForwarded) throw err;
+          toolBlockRetriesLeft--;
+          console.warn(
+            `[TOOL BLOCKED] profile=${profileKey}: retrying on the same profile with a reinforced no-tools notice (${toolBlockRetriesLeft} retry left)`
+          );
+          attemptPrompt = `${promptText}\n\n${toolBlockRetryNotice(err.toolViolation)}`;
+          attemptBudget = Math.max(1.0, Math.min(timeout, totalTimeout - (Date.now() - startTime) / 1000));
+        }
+      }
 
       mgr.mark_success(profile, effectiveModel);
       mgr.set_last_execution_model(profile, effectiveModel);

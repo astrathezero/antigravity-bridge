@@ -441,8 +441,39 @@ def api_mode_preamble() -> str:
     return "" if cli_tools_allowed() else API_MODE_PREAMBLE
 
 
+def tool_block_retries() -> int:
+    """How many further attempts a tool-blocked run gets on the same profile with tool_block_retry_notice()
+    appended to the prompt. Whether the model reaches for its own tools is a per-run sampling accident, not a
+    profile problem. Default 1; ANTIGRAVITY_TOOL_BLOCK_RETRIES=0 disables the retry."""
+    raw = os.environ.get("ANTIGRAVITY_TOOL_BLOCK_RETRIES", "").strip()
+    if not raw:
+        return 1
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1
+
+
+TOOL_BLOCK_RETRY_NOTICE_HEADER = "[Bridge notice: previous attempt aborted]"
+
+
+def tool_block_retry_notice(tool_text: Optional[str]) -> str:
+    shown = " ".join((tool_text or "a built-in tool").split())[:160]
+    return (
+        f"{TOOL_BLOCK_RETRY_NOTICE_HEADER}\n"
+        f"Your previous attempt at this exact request was killed because you tried to run your own built-in tool ({shown}).\n"
+        "That is forbidden here and would be killed again. Do NOT run commands, read or list files, or browse.\n"
+        "Answer from the conversation above only: reply in plain text, or, if the request defines client-side tools "
+        "and one is truly needed, output that tool call JSON exactly as instructed and stop."
+    )
+
+
 class CLIToolUseBlockedError(RuntimeError):
     """agy tried to execute one of its own tools while the bridge runs in API mode."""
+
+    def __init__(self, message: str, tool_violation: Optional[str] = None):
+        super().__init__(message)
+        self.tool_violation = tool_violation
 
 
 class CLIClientDisconnectedError(RuntimeError):
@@ -3674,7 +3705,8 @@ def execute_cli_command(
             raise CLIToolUseBlockedError(
                 f"CLI tool execution blocked (profile={profile or 'default'}): agy attempted to run {tool_violation}. "
                 "The bridge runs in API mode and does not let agy execute tools on this machine; "
-                "ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow)."
+                "ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow).",
+                tool_violation=tool_violation,
             )
 
         if parsed_stream.is_failure():
@@ -3741,6 +3773,19 @@ def execute_cli_with_fallback(
     errors: List[str] = []
     tried_profiles: set = set()
     start_time = time.time()
+
+    # A tool-blocked run (API mode) is retried on the same profile with a reinforced notice:
+    # whether the model reaches for its own tools is a per-run accident, not a profile problem.
+    # Text already streamed to the client cannot be taken back, so the retry is only safe while
+    # nothing has been forwarded yet.
+    tool_block_retries_left = tool_block_retries()
+    delta_forwarded = [False]
+    tracked_output_callback: Optional[Callable[..., None]] = None
+    if output_callback is not None:
+        def tracked_output_callback(text: str, kind: str = "raw") -> None:
+            if kind == "delta" and text:
+                delta_forwarded[0] = True
+            _invoke_output_callback(output_callback, text, kind)
 
     for _ in range(len(candidate_profiles)):
         elapsed = time.time() - start_time
@@ -3836,29 +3881,48 @@ def execute_cli_with_fallback(
                 sig_params = {}
             for k_name, k_val in (
                 ("stall_timeout", stall_timeout),
-                ("output_callback", output_callback),
+                ("output_callback", tracked_output_callback),
                 ("allow_cli_tools", allow_cli_tools),
                 ("cancel_check", cancel_check),
             ):
                 if k_name in sig_params:
                     extra_kwargs[k_name] = k_val
-            try:
-                output = execute_cli_command(
-                    cmd_template,
-                    prompt_text,
-                    timeout=attempt_timeout,
-                    profile=profile,
-                    model_name=effective_model,
-                    **extra_kwargs,
-                )
-            except TypeError:
-                output = execute_cli_command(
-                    cmd_template,
-                    prompt_text,
-                    timeout=attempt_timeout,
-                    profile=profile,
-                    model_name=effective_model,
-                )
+            def _run_once(attempt_prompt: str, attempt_budget: float) -> str:
+                try:
+                    return execute_cli_command(
+                        cmd_template,
+                        attempt_prompt,
+                        timeout=attempt_budget,
+                        profile=profile,
+                        model_name=effective_model,
+                        **extra_kwargs,
+                    )
+                except TypeError:
+                    return execute_cli_command(
+                        cmd_template,
+                        attempt_prompt,
+                        timeout=attempt_budget,
+                        profile=profile,
+                        model_name=effective_model,
+                    )
+
+            attempt_prompt = prompt_text
+            attempt_budget = attempt_timeout
+            while True:
+                try:
+                    output = _run_once(attempt_prompt, attempt_budget)
+                    break
+                except CLIToolUseBlockedError as blocked:
+                    if tool_block_retries_left <= 0 or delta_forwarded[0]:
+                        raise
+                    tool_block_retries_left -= 1
+                    logger.warning(
+                        "[TOOL BLOCKED] Profile '%s': retrying on the same profile with a reinforced no-tools notice (%d retry left)",
+                        profile_key,
+                        tool_block_retries_left,
+                    )
+                    attempt_prompt = f"{prompt_text}\n\n{tool_block_retry_notice(blocked.tool_violation)}"
+                    attempt_budget = max(1.0, min(timeout, total_timeout - (time.time() - start_time)))
             mgr.mark_success(profile, model=effective_model)
             mgr.set_last_execution_model(profile, effective_model or "default")
             return CLIExecutionResult(output, profile, effective_model)

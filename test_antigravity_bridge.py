@@ -1646,7 +1646,7 @@ class TestApiModeToolGuard(unittest.TestCase):
         self.assertTrue(text.startswith("run_command "))
         self.assertEqual(len(out.tool_steps), 1)
 
-    def test_tool_step_kills_cli_and_is_not_retried(self):
+    def test_tool_step_kills_cli_and_is_not_retried_on_other_profiles(self):
         pm = ProfileManager(profiles=["zz_t1", "zz_t2"], concurrency_per_profile=1)
         script = (
             "import sys,time,json;"
@@ -1661,6 +1661,68 @@ class TestApiModeToolGuard(unittest.TestCase):
         self.assertLess(time.time() - t0, 10.0)
         self.assertFalse(pm.is_in_cooldown("zz_t1"))
         self.assertEqual(pm.state.get("zz_t2", {}).get("last_used", 0), 0)
+
+    # agy stand-in for the retry tests. First run: the prompt carries no notice -> start a tool and
+    # hang (the bridge kills it). Retry: the prompt carries the notice naming the offending tool ->
+    # answer in text like a well-behaved run.
+    _TOOL_STEP_THEN_TEXT_SRC = (
+        "import sys,time,json\n"
+        "p=' '.join(sys.argv[1:])\n"
+        "if '[Bridge notice: previous attempt aborted]' in p and 'run_command' in p:\n"
+        "    print(json.dumps({'event':'step_update','step_update':{'step_index':1,'state':'ACTIVE','step_type':'agent_response','text_delta':'text answer'}}),flush=True)\n"
+        "    print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'text answer'}}),flush=True)\n"
+        "else:\n"
+        "    print(json.dumps({'event':'step_update','step_update':{'step_index':1,'state':'ACTIVE','step_type':'tool','tool_name':'run_command','tool_info':{'name':'run_command','parameters':{'CommandLine':'id'}}}}),flush=True)\n"
+        "    time.sleep(30)\n"
+    )
+    _TEXT_THEN_TOOL_STEP_SRC = (
+        "import sys,time,json\n"
+        "print(json.dumps({'event':'step_update','step_update':{'step_index':1,'state':'ACTIVE','step_type':'agent_response','text_delta':'Let me check...'}}),flush=True)\n"
+        "time.sleep(0.3)\n"
+        "print(json.dumps({'event':'step_update','step_update':{'step_index':2,'state':'ACTIVE','step_type':'tool','tool_name':'run_command','tool_info':{'name':'run_command','parameters':{'CommandLine':'id'}}}}),flush=True)\n"
+        "time.sleep(30)\n"
+    )
+
+    def _write_helper(self, name, body):
+        path = os.path.join(_TEST_STATE_DIR, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        return path
+
+    def test_tool_step_is_retried_once_on_same_profile_with_reinforced_notice(self):
+        os.environ.pop("ANTIGRAVITY_TOOL_BLOCK_RETRIES", None)
+        pm = ProfileManager(profiles=["zz_t1", "zz_t2"], concurrency_per_profile=1)
+        helper = self._write_helper("tool_step_then_text.py", self._TOOL_STEP_THEN_TEXT_SRC)
+        t0 = time.time()
+        out, used = execute_cli_with_fallback(f"python3 {helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm)
+        self.assertEqual(out, "text answer")
+        self.assertEqual(used, "zz_t1")
+        self.assertLess(time.time() - t0, 15.0)
+        self.assertFalse(pm.is_in_cooldown("zz_t1"))
+        self.assertEqual(pm.state.get("zz_t2", {}).get("last_used", 0), 0)
+
+    def test_tool_step_retry_skipped_when_text_streamed_or_disabled(self):
+        pm = ProfileManager(profiles=["zz_t4"], concurrency_per_profile=1)
+        # Text already forwarded to the client: a retry would duplicate it, so the request fails instead.
+        text_then_tool = self._write_helper("text_then_tool_step.py", self._TEXT_THEN_TOOL_STEP_SRC)
+        kinds = []
+        with self.assertRaises(RuntimeError) as ctx:
+            execute_cli_with_fallback(
+                f"python3 {text_then_tool} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm,
+                output_callback=lambda text, kind="raw": kinds.append(kind),
+            )
+        self.assertIn("CLI tool execution blocked", str(ctx.exception))
+        self.assertIn("delta", kinds)
+
+        # Retry disabled by configuration.
+        helper = self._write_helper("tool_step_then_text.py", self._TOOL_STEP_THEN_TEXT_SRC)
+        os.environ["ANTIGRAVITY_TOOL_BLOCK_RETRIES"] = "0"
+        try:
+            with self.assertRaises(RuntimeError) as ctx2:
+                execute_cli_with_fallback(f"python3 {helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm)
+        finally:
+            os.environ.pop("ANTIGRAVITY_TOOL_BLOCK_RETRIES", None)
+        self.assertIn("CLI tool execution blocked", str(ctx2.exception))
 
     def test_cancel_check_kills_cli(self):
         t0 = time.time()

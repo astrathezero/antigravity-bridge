@@ -384,7 +384,7 @@ Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดั�
 | `/health` | Liveness เท่านั้น | ผู้เรียกที่ไม่มี key ได้แค่ `{"status":"ok"}` รายละเอียดโปรไฟล์ต้องใช้ key |
 | ไฟล์ token | `0600` | OAuth token, `.env` และ quota cache เขียนแบบ owner-only และส่งค่าเข้า Keychain ผ่าน stdin ไม่ใช่ argv |
 | ชื่อโปรไฟล์ | `[A-Za-z0-9._-]` | ตรวจสอบทุก endpoint และ CLI (ห้าม `..`, `/`, control characters) |
-| การใช้ tool ของ agy | **บล็อก** | โหมด API: prompt สั่งไม่ให้ใช้ tool ของ agy และถ้า agy เริ่ม tool step อยู่ดี bridge จะ kill ภายใน 1 วินาทีแล้วตอบ error ชัดเจน ตั้ง `ANTIGRAVITY_ALLOW_CLI_TOOLS=1` ถ้าต้องการให้ agy ทำงานแบบ agent |
+| การใช้ tool ของ agy | **บล็อก** | โหมด API: prompt สั่งไม่ให้ใช้ tool ของ agy และถ้า agy เริ่ม tool step อยู่ดี bridge จะ kill ภายใน 1 วินาที แล้วลองใหม่ 1 ครั้งบน profile เดิมพร้อมข้อความเตือนซ้ำ (`ANTIGRAVITY_TOOL_BLOCK_RETRIES` ค่าเริ่มต้น `1`) ถ้ายังใช้ tool อีกจึงตอบ error ชัดเจน ตั้ง `ANTIGRAVITY_ALLOW_CLI_TOOLS=1` ถ้าต้องการให้ agy ทำงานแบบ agent |
 | Client ตัดการเชื่อมต่อ | ยกเลิก CLI | เมื่อ client ปิดการเชื่อมต่อ (เช่น Hermes `/stop`) bridge จะ kill agy ทันที ไม่ปล่อยให้รันต่อ |
 
 ---
@@ -406,6 +406,7 @@ Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดั�
 | **`ANTIGRAVITY_NO_PROXY`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบตรวจจับ Proxy และต่อเน็ตโดยตรง |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบเบื้องหลังที่รีเฟรช Token ทุก 55 นาที |
 | **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่ออนุญาตให้ agy ใช้ tool ของตัวเอง (terminal/ไฟล์/browser) ระหว่างตอบ API ค่า 0 = เป็น model gateway ล้วน ๆ และจะ kill ทันทีที่เจอ tool step |
+| **`ANTIGRAVITY_TOOL_BLOCK_RETRIES`** | `int` | `1` | จำนวนครั้งที่ลองใหม่บน profile เดิมเมื่อ agy โดน block เพราะใช้ tool ของตัวเอง โดยแปะข้อความเตือนซ้ำท้าย prompt ตั้ง `0` เพื่อปิด และจะไม่ลองใหม่ถ้าเริ่ม stream ข้อความไปให้ client แล้ว |
 | **`ANTIGRAVITY_MAX_CLI_ARG_BYTES`** | `int` | `120000` | ขนาด prompt สูงสุดที่ส่งเป็น argument (Linux จำกัด 131072 bytes ต่อ argument) ถ้าใหญ่กว่านี้จะส่งให้ agy ทาง stdin แบบ NDJSON (`--input-format stream-json`) ได้ถึง `ANTIGRAVITY_MAX_STDIN_PROMPT_BYTES` (2 MB) |
 | **`ANTIGRAVITY_MAX_PROMPT_CHARS`** | `int` | `200000` | งบ context (UTF-8 bytes ภาษาไทย 3 bytes/ตัวอักษร) ที่ส่งให้ agy ถ้าไม่เกินงบจะไม่ตัดอะไรเลย ถ้าเกินจะย่อ tool result เก่าเหลือ `ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS` (2000) และรายการล่าสุดเหลือ `ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS` (20000) |
 | **`ANTIGRAVITY_STALL_TIMEOUT`** | `float` | `600` | จำนวนวินาทีที่ CLI เงียบก่อนจะยกเลิกรอบนั้น agy จะไม่พิมพ์อะไรเลยระหว่างโมเดลคิด (thinking) จึงควรตั้งไว้สูง ตัวกันจริงคือ profile timeout (600 วินาที) |
