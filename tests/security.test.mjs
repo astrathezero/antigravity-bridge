@@ -203,6 +203,122 @@ test("executor: a tool step kills the CLI and is not retried on other profiles",
   if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
 });
 
+test("stream-json: tool items carry the tool name and full parameters", () => {
+  const p = new AgyStreamParser();
+  const longPath = "/tmp/" + "x".repeat(300) + "/transcript_full.jsonl";
+  const items = p.feed(`{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file","parameters":{"AbsolutePath":"${longPath}"}}}}\n`);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].name, "view_file");
+  assert.equal(items[0].params.AbsolutePath, longPath, "params are not truncated like the summary text");
+  assert.ok(items[0].text.length < longPath.length);
+});
+
+test("own-conversation read policy: matches only reads inside a conversation created by this run", async () => {
+  const { OwnConversationReadPolicy } = await import("../src/core/executor.mjs");
+  const fsMod = await import("node:fs");
+  const pathMod = await import("node:path");
+  const osMod = await import("node:os");
+  const sandbox = fsMod.mkdtempSync(pathMod.join(osMod.tmpdir(), "agv-brain-"));
+  const brain = pathMod.join(sandbox, ".gemini", "antigravity-cli", "brain");
+  fsMod.mkdirSync(pathMod.join(brain, "old-conv", ".system_generated", "logs"), { recursive: true });
+  const policy = new OwnConversationReadPolicy(sandbox, { enabled: true });
+  // agy creates this run's conversation after the policy took its snapshot
+  const newLogs = pathMod.join(brain, "new-conv", ".system_generated", "logs");
+  fsMod.mkdirSync(newLogs, { recursive: true });
+  const transcript = pathMod.join(newLogs, "transcript_full.jsonl");
+  const oldTranscript = pathMod.join(brain, "old-conv", ".system_generated", "logs", "transcript_full.jsonl");
+
+  assert.equal(policy.allows("view_content_chunk", { document_id: "d1", position: 2 }), false, "no chunk before a read");
+  assert.equal(policy.allows("view_file", { AbsolutePath: transcript, StartLine: 0, EndLine: 200 }), true);
+  assert.equal(policy.allows("view_content_chunk", { document_id: "d1", position: 2 }), true, "chunk pages through the allowed read");
+  assert.equal(policy.allows("grep_search", { Query: "hello", SearchPath: pathMod.join(brain, "new-conv") }), true);
+  assert.equal(policy.allows("view_file", { AbsolutePath: oldTranscript }), false, "another client's conversation");
+  assert.equal(policy.allows("list_dir", { DirectoryPath: brain }), false, "listing all conversations");
+  assert.equal(policy.allows("view_file", { AbsolutePath: "/etc/passwd" }), false);
+  assert.equal(policy.allows("view_file", { AbsolutePath: pathMod.join(brain, "new-conv", "..", "old-conv", "x") }), false, "traversal");
+  assert.equal(policy.allows("view_file", { AbsolutePath: "~/.gemini/antigravity-cli/brain/new-conv/x" }), false, "unresolved home");
+  assert.equal(policy.allows("view_file", {}), false, "no path at all");
+  assert.equal(policy.allows("run_command", { CommandLine: `cat ${transcript}` }), false, "never a command");
+  assert.equal(policy.allows("write_to_file", { TargetFile: transcript }), false, "never a write");
+
+  // Default is OFF: the step is recognised (for the hint) but not allowed.
+  const prev = process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS;
+  delete process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS;
+  try {
+    const off = new OwnConversationReadPolicy(sandbox);
+    assert.equal(off.enabled, false);
+    assert.equal(off.matches("view_file", { AbsolutePath: transcript }), false, "new-conv predates this policy");
+    const laterTranscript = pathMod.join(brain, "later-conv", ".system_generated", "logs", "transcript_full.jsonl");
+    fsMod.mkdirSync(pathMod.dirname(laterTranscript), { recursive: true });
+    assert.equal(off.matches("view_file", { AbsolutePath: laterTranscript }), true, "recognised for the hint");
+    assert.equal(off.allows("view_file", { AbsolutePath: laterTranscript }), false, "but not allowed while off");
+  } finally {
+    if (prev === undefined) delete process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS; else process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS = prev;
+  }
+});
+
+// agy stand-in: create this run's conversation log under $HOME (the sandbox), read it with
+// view_file the way agy does for an oversized prompt, then answer in text.
+const OWN_TRANSCRIPT_READ_SRC = [
+  'const fs = require("node:fs"); const path = require("node:path");',
+  'const logs = path.join(process.env.HOME, ".gemini", "antigravity-cli", "brain", "conv-" + process.pid, ".system_generated", "logs");',
+  "fs.mkdirSync(logs, { recursive: true });",
+  'const transcript = path.join(logs, "transcript_full.jsonl");',
+  'fs.writeFileSync(transcript, "{}\\n");',
+  'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"ACTIVE",step_type:"tool",tool_name:"view_file",tool_info:{name:"view_file",parameters:{AbsolutePath:transcript,StartLine:0,EndLine:400}}}})+"\\n");',
+  "setTimeout(() => {",
+  '  process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:2,state:"ACTIVE",step_type:"agent_response",text_delta:"log answer"}})+"\\n");',
+  '  process.stdout.write(JSON.stringify({event:"result",result:{status:"SUCCESS",response:"log answer"}})+"\\n");',
+  "}, 400);",
+  "",
+].join("\n");
+
+test("executor: agy reading its own conversation log is blocked by default (with a hint) and allowed by ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1", async () => {
+  const prevTools = process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  const prevReads = process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS;
+  delete process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS;
+  const prevBase = process.env.ANTIGRAVITY_SANDBOX_BASE;
+  process.env.ANTIGRAVITY_SANDBOX_BASE = `${process.cwd()}/tests/.tmp-sandbox`;
+  const fsMod = await import("node:fs");
+  fsMod.mkdirSync(`${process.cwd()}/tests/.tmp-sandbox`, { recursive: true });
+  const helper = `${process.cwd()}/tests/.tmp-sandbox/own-transcript-read.cjs`;
+  fsMod.writeFileSync(helper, OWN_TRANSCRIPT_READ_SRC);
+  try {
+    const pm = new ProfileManager(["zz_t5"]);
+    pm.reset_all();
+    const t0 = Date.now();
+    await assert.rejects(
+      executeCliWithFallback(`node ${helper} {prompt}`, "hi", { profileManager: pm, timeout: 20, totalTimeout: 40 }),
+      /CLI tool execution blocked[\s\S]*ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 allows only that read/
+    );
+    assert.ok(Date.now() - t0 < 10000, "blocked immediately, not after a timeout");
+
+    process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS = "1";
+    const res = await executeCliWithFallback(`node ${helper} {prompt}`, "hi", { profileManager: pm, timeout: 20, totalTimeout: 40 });
+    assert.equal(res.outputText, "log answer");
+    assert.equal(res.usedProfile, "zz_t5");
+
+    // Only that read: a command in the same run is still killed.
+    const cmdHelper = `${process.cwd()}/tests/.tmp-sandbox/own-transcript-then-cmd.cjs`;
+    fsMod.writeFileSync(
+      cmdHelper,
+      OWN_TRANSCRIPT_READ_SRC.replace(
+        "setTimeout(() => {",
+        'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:2,state:"ACTIVE",step_type:"tool",tool_name:"run_command",tool_info:{name:"run_command",parameters:{CommandLine:"id"}}}})+"\\n");\nsetTimeout(() => {'
+      )
+    );
+    await assert.rejects(
+      executeCliWithFallback(`node ${cmdHelper} {prompt}`, "hi", { profileManager: pm, timeout: 20, totalTimeout: 40 }),
+      /CLI tool execution blocked[\s\S]*run_command/
+    );
+  } finally {
+    if (prevTools === undefined) delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS; else process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS = prevTools;
+    if (prevReads === undefined) delete process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS; else process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS = prevReads;
+    if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
+  }
+});
+
 test("executor: abort signal cancels the CLI", async () => {
   const prevBase = process.env.ANTIGRAVITY_SANDBOX_BASE;
   process.env.ANTIGRAVITY_SANDBOX_BASE = `${process.cwd()}/tests/.tmp-sandbox`;

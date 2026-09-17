@@ -418,6 +418,16 @@ export function cliToolsAllowed() {
   return ["1", "true", "yes"].includes((process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS || "").trim().toLowerCase());
 }
 
+/**
+ * Opt-in, narrower than ANTIGRAVITY_ALLOW_CLI_TOOLS: let agy read only the conversation log it
+ * writes itself during the run (<sandbox>/.gemini/antigravity-cli/brain/<conversation>/...). With a
+ * large prompt agy points the model at that transcript; blocked (the default), that run is killed
+ * and the request fails. Set ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 to allow just those reads.
+ */
+export function ownTranscriptReadsAllowed() {
+  return ["1", "true", "yes"].includes((process.env.ANTIGRAVITY_ALLOW_TRANSCRIPT_READS || "").trim().toLowerCase());
+}
+
 export const API_MODE_PREAMBLE = [
   "[Bridge Mode: API backend]",
   "You are answering a request relayed by Antigravity Bridge. Behave as a plain language-model API:",

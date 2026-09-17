@@ -13,6 +13,7 @@ import {
   ANTIGRAVITY_MODEL_FALLBACK_ENABLED,
   detectLocalProxy,
   cliToolsAllowed,
+  ownTranscriptReadsAllowed,
   toolBlockRetries,
   toolBlockRetryNotice,
 } from "../config.mjs";
@@ -203,7 +204,8 @@ export class AgyStreamParser {
             }
             const summary = `${name} ${params}`.trim();
             this.toolSteps.push(summary);
-            return [{ kind: "tool", text: summary }];
+            const parameters = info.parameters && typeof info.parameters === "object" ? info.parameters : {};
+            return [{ kind: "tool", text: summary, name, params: parameters }];
           }
         } else if (ev.event === "result" && ev.result) {
           const r = ev.result;
@@ -237,6 +239,85 @@ export class AgyStreamParser {
   }
 }
 
+// agy's read-only tools. Anything else (run_command, writes, browser, web, subagents) is never matched.
+const READ_ONLY_TOOLS = new Set([
+  "view_file",
+  "view_file_outline",
+  "view_code_item",
+  "view_content_chunk",
+  "list_dir",
+  "grep_search",
+  "find_by_name",
+]);
+
+function looksLikePath(s) {
+  return /^(\/|~|\\\\|[A-Za-z]:[\\/])/.test(s);
+}
+
+function collectPathStrings(value, out = []) {
+  if (typeof value === "string") {
+    if (looksLikePath(value.trim())) out.push(value.trim());
+  } else if (Array.isArray(value)) {
+    for (const v of value) collectPathStrings(v, out);
+  } else if (value && typeof value === "object") {
+    for (const v of Object.values(value)) collectPathStrings(v, out);
+  }
+  return out;
+}
+
+/**
+ * Recognises one kind of tool step: agy reading the conversation log it writes itself during this
+ * run. With a large prompt agy hands the model a truncated view and points it at
+ * <sandbox>/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript_full.jsonl;
+ * the model then calls view_file on that path. Nothing runs on the host and nothing is written.
+ *
+ * Matched: a read-only tool whose every path points inside a conversation directory that did not
+ * exist before this run started (other clients' conversations in the same sandbox stay off-limits),
+ * plus view_content_chunk once such a read happened (it pages through that same document).
+ * Such a step is let through only when ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 (default: blocked like
+ * every other tool step, with a hint naming the switch).
+ */
+export class OwnConversationReadPolicy {
+  constructor(sandboxDir, { enabled = ownTranscriptReadsAllowed() } = {}) {
+    this.enabled = Boolean(enabled);
+    this.brainDir = path.resolve(sandboxDir, ".gemini", "antigravity-cli", "brain");
+    this.preexisting = new Set();
+    try {
+      for (const entry of fs.readdirSync(this.brainDir)) this.preexisting.add(entry);
+    } catch {
+      // No brain directory yet: every conversation agy creates now belongs to this run.
+    }
+    this.allowedReads = 0;
+  }
+
+  /** True when the step is a read of this run's own conversation log (regardless of `enabled`). */
+  matches(name, params) {
+    if (!READ_ONLY_TOOLS.has(name)) return false;
+    const paths = collectPathStrings(params);
+    if (name === "view_content_chunk") return this.allowedReads > 0 && paths.length === 0;
+    return paths.length > 0 && paths.every((p) => this.isOwnConversationPath(p));
+  }
+
+  /** True when the step matches AND the opt-in switch is on; counts the read for view_content_chunk. */
+  allows(name, params) {
+    if (!this.enabled || !this.matches(name, params)) return false;
+    this.allowedReads++;
+    return true;
+  }
+
+  isOwnConversationPath(p) {
+    const resolved = path.resolve(p);
+    const rel = path.relative(this.brainDir, resolved);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+    const conversation = rel.split(path.sep)[0];
+    return Boolean(conversation) && conversation !== "." && !this.preexisting.has(conversation);
+  }
+}
+
+export const TRANSCRIPT_READ_HINT =
+  "This step was agy reading its own conversation log for this run (it does that when the prompt is too large for one turn); " +
+  "ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 allows only that read, nothing else.";
+
 export async function executeCliCommand(
   cmdTemplate,
   promptText,
@@ -269,6 +350,7 @@ export async function executeCliCommand(
 
   try {
     const sandboxDir = getProfileSandboxDir(profile);
+    const readPolicy = allowTools ? null : new OwnConversationReadPolicy(sandboxDir);
 
     const allowedEnvKeys = new Set([
       "PATH",
@@ -341,7 +423,12 @@ export async function executeCliCommand(
         for (const it of items) {
           if (it.kind === "tool") {
             if (!allowTools) {
-              if (!toolViolation && !isSettled) {
+              if (readPolicy && readPolicy.allows(it.name, it.params)) {
+                console.log(
+                  `[TOOL ALLOWED] profile=${profile || "default"}: agy reads its own conversation log (ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1): ${it.text}`
+                );
+              } else if (!toolViolation && !isSettled) {
+                const hint = readPolicy && readPolicy.matches(it.name, it.params) ? ` ${TRANSCRIPT_READ_HINT}` : "";
                 toolViolation = it.text;
                 console.warn(
                   `[TOOL BLOCKED] profile=${profile || "default"}: agy attempted to run ${it.text} - killing CLI (API mode; set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow)`
@@ -353,7 +440,8 @@ export async function executeCliCommand(
                 const blockedErr = new Error(
                   `CLI tool execution blocked (profile=${profile || "default"}): agy attempted to run ${it.text}. ` +
                     "The bridge runs in API mode and does not let agy execute tools on this machine; " +
-                    "ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow)."
+                    "ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow)." +
+                    hint
                 );
                 blockedErr.code = "TOOL_BLOCKED";
                 blockedErr.toolViolation = it.text;

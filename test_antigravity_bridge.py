@@ -1724,6 +1724,89 @@ class TestApiModeToolGuard(unittest.TestCase):
             os.environ.pop("ANTIGRAVITY_TOOL_BLOCK_RETRIES", None)
         self.assertIn("CLI tool execution blocked", str(ctx2.exception))
 
+    def test_parser_keeps_tool_name_and_full_params(self):
+        out = antigravity_bridge.AgyStreamOutput()
+        long_path = "/tmp/" + "x" * 300 + "/transcript_full.jsonl"
+        kind, text = out.feed_line(json.dumps({"event": "step_update", "step_update": {"step_index": 2, "state": "ACTIVE", "step_type": "tool", "tool_name": "view_file", "tool_info": {"name": "view_file", "parameters": {"AbsolutePath": long_path}}}}) + "\n")
+        self.assertEqual(kind, "tool")
+        self.assertLess(len(text), len(long_path))
+        self.assertEqual(out.last_tool, ("view_file", {"AbsolutePath": long_path}))
+        self.assertEqual(out.tool_calls[0][:2], ("view_file", {"AbsolutePath": long_path}))
+
+    def test_own_conversation_read_policy(self):
+        sandbox = tempfile.mkdtemp(prefix="agv-brain-", dir=_TEST_STATE_DIR)
+        brain = os.path.join(sandbox, ".gemini", "antigravity-cli", "brain")
+        os.makedirs(os.path.join(brain, "old-conv", ".system_generated", "logs"))
+        policy = antigravity_bridge.OwnConversationReadPolicy(sandbox, enabled=True)
+        new_logs = os.path.join(brain, "new-conv", ".system_generated", "logs")
+        os.makedirs(new_logs)
+        transcript = os.path.join(new_logs, "transcript_full.jsonl")
+        old_transcript = os.path.join(brain, "old-conv", ".system_generated", "logs", "transcript_full.jsonl")
+
+        self.assertFalse(policy.allows("view_content_chunk", {"document_id": "d1", "position": 2}))
+        self.assertTrue(policy.allows("view_file", {"AbsolutePath": transcript, "StartLine": 0, "EndLine": 200}))
+        self.assertTrue(policy.allows("view_content_chunk", {"document_id": "d1", "position": 2}))
+        self.assertTrue(policy.allows("grep_search", {"Query": "hello", "SearchPath": os.path.join(brain, "new-conv")}))
+        self.assertFalse(policy.allows("view_file", {"AbsolutePath": old_transcript}))
+        self.assertFalse(policy.allows("list_dir", {"DirectoryPath": brain}))
+        self.assertFalse(policy.allows("view_file", {"AbsolutePath": "/etc/passwd"}))
+        self.assertFalse(policy.allows("view_file", {"AbsolutePath": os.path.join(brain, "new-conv", "..", "old-conv", "x")}))
+        self.assertFalse(policy.allows("view_file", {"AbsolutePath": "~/.gemini/antigravity-cli/brain/new-conv/x"}))
+        self.assertFalse(policy.allows("view_file", {}))
+        self.assertFalse(policy.allows("run_command", {"CommandLine": f"cat {transcript}"}))
+        self.assertFalse(policy.allows("write_to_file", {"TargetFile": transcript}))
+
+        os.environ.pop("ANTIGRAVITY_ALLOW_TRANSCRIPT_READS", None)
+        off = antigravity_bridge.OwnConversationReadPolicy(sandbox)
+        self.assertFalse(off.enabled)
+        self.assertFalse(off.matches("view_file", {"AbsolutePath": transcript}), "new-conv predates this policy")
+        later_transcript = os.path.join(brain, "later-conv", ".system_generated", "logs", "transcript_full.jsonl")
+        os.makedirs(os.path.dirname(later_transcript))
+        self.assertTrue(off.matches("view_file", {"AbsolutePath": later_transcript}), "recognised for the hint")
+        self.assertFalse(off.allows("view_file", {"AbsolutePath": later_transcript}), "but not allowed while off")
+
+    # agy stand-in: create this run's conversation log under $HOME (the sandbox), read it with view_file
+    # the way agy does for an oversized prompt, then answer in text.
+    _OWN_TRANSCRIPT_READ_SRC = (
+        "import os,sys,time,json\n"
+        "logs=os.path.join(os.environ['HOME'],'.gemini','antigravity-cli','brain','conv-%d'%os.getpid(),'.system_generated','logs')\n"
+        "os.makedirs(logs,exist_ok=True)\n"
+        "t=os.path.join(logs,'transcript_full.jsonl')\n"
+        "open(t,'w').write('{}\\n')\n"
+        "print(json.dumps({'event':'step_update','step_update':{'step_index':1,'state':'ACTIVE','step_type':'tool','tool_name':'view_file','tool_info':{'name':'view_file','parameters':{'AbsolutePath':t,'StartLine':0,'EndLine':400}}}}),flush=True)\n"
+        "EXTRA\n"
+        "time.sleep(0.4)\n"
+        "print(json.dumps({'event':'step_update','step_update':{'step_index':2,'state':'ACTIVE','step_type':'agent_response','text_delta':'log answer'}}),flush=True)\n"
+        "print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'log answer'}}),flush=True)\n"
+    )
+
+    def test_own_transcript_read_blocked_by_default_and_allowed_by_switch(self):
+        os.environ.pop("ANTIGRAVITY_ALLOW_CLI_TOOLS", None)
+        os.environ.pop("ANTIGRAVITY_ALLOW_TRANSCRIPT_READS", None)
+        pm = ProfileManager(profiles=["zz_t5"], concurrency_per_profile=1)
+        helper = self._write_helper("own_transcript_read.py", self._OWN_TRANSCRIPT_READ_SRC.replace("EXTRA\n", ""))
+        try:
+            t0 = time.time()
+            with self.assertRaises(RuntimeError) as ctx:
+                execute_cli_with_fallback(f"python3 {helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm)
+            self.assertIn("CLI tool execution blocked", str(ctx.exception))
+            self.assertIn("ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 allows only that read", str(ctx.exception))
+            self.assertLess(time.time() - t0, 10.0)
+
+            os.environ["ANTIGRAVITY_ALLOW_TRANSCRIPT_READS"] = "1"
+            out, used = execute_cli_with_fallback(f"python3 {helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm)
+            self.assertEqual(out, "log answer")
+            self.assertEqual(used, "zz_t5")
+
+            # Only that read: a command in the same run is still killed.
+            cmd_line = "print(json.dumps({'event':'step_update','step_update':{'step_index':2,'state':'ACTIVE','step_type':'tool','tool_name':'run_command','tool_info':{'name':'run_command','parameters':{'CommandLine':'id'}}}}),flush=True)\n"
+            cmd_helper = self._write_helper("own_transcript_then_cmd.py", self._OWN_TRANSCRIPT_READ_SRC.replace("EXTRA\n", cmd_line))
+            with self.assertRaises(RuntimeError) as ctx2:
+                execute_cli_with_fallback(f"python3 {cmd_helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm)
+            self.assertIn("run_command", str(ctx2.exception))
+        finally:
+            os.environ.pop("ANTIGRAVITY_ALLOW_TRANSCRIPT_READS", None)
+
     def test_cancel_check_kills_cli(self):
         t0 = time.time()
         with self.assertRaises(RuntimeError) as ctx:
