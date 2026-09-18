@@ -30,9 +30,11 @@ Repository นี้มี **เซิร์ฟเวอร์ตัวเดี
 
 > [!IMPORTANT]
 > ### 📢 ข้อควรทราบ: การใช้งานข้ามเครื่อง (Cross-Machine Notice)
-> **Antigravity Bridge ทำงานบนเครื่องเดียวกันกับที่ติดตั้ง `antigravity`/`agy` CLI และโปรไฟล์ Google**
-> - โปรแกรมปลายทาง (Hermes Agent, OpenAI SDK, Anthropic SDK, บอท, Webhook) เชื่อมต่อเข้ามาที่ Bridge ผ่าน HTTP จากเครื่องใดก็ได้
-> - แต่ตัว Bridge จะรัน CLI บนเครื่อง Host เท่านั้น ยังไม่รองรับการกระจายงานไปยัง worker บนเครื่องอื่น
+> **Antigravity Bridge ทำงานบนเครื่องเดียวกันกับที่ติดตั้ง `antigravity`/`agy` CLI และโปรไฟล์ Google** แต่ client จากเครื่องอื่นสามารถเรียกใช้ได้
+> - โปรแกรมปลายทาง (Hermes Agent, OpenAI SDK, Anthropic SDK, บอท, Webhook) เชื่อมต่อเข้ามาที่ Bridge ผ่าน HTTP จากเครื่องหรือเครือข่ายใดก็ได้
+> - หากต้องการเปิดให้เข้าถึงจากภายนอก ให้ bind Bridge ไว้ที่ `127.0.0.1` ตามเดิม แล้วตั้ง **Nginx** เป็น reverse proxy พร้อม TLS ไว้ด้านหน้า (ดู [Nginx reverse proxy](#nginx-reverse-proxy-รองรับสตรีมมิ่ง)) เพิ่ม hostname สาธารณะใน `ANTIGRAVITY_ALLOWED_HOSTS` และ **เปิดใช้ API key** เพื่อให้เฉพาะ client ของคุณเรียกได้
+> - **ระมัดระวังเรื่องความปลอดภัย:** Bridge รัน `agy` แบบปิดการขออนุญาต พอร์ตที่เปิดสู่ภายนอกโดยไม่มี auth จึงเท่ากับให้ remote shell บนเครื่อง Host อ่าน [โมเดลความปลอดภัย](#-โมเดลความปลอดภัย-security-model) ก่อนเปิดใช้งาน
+> - ตัว Bridge จะรัน CLI บนเครื่อง Host เท่านั้น ยังไม่รองรับการกระจายงานไปยัง worker บนเครื่องอื่น
 
 > [!WARNING]
 > ### ⚠️ คำเตือนและข้อกำหนดการใช้งาน (Terms of Service Notice)

@@ -30,8 +30,10 @@ Pick one, or run both at once on their default ports. See [Choosing an Edition](
 
 > [!IMPORTANT]
 > ### 📢 Notice: Cross-Machine Usage
-> **Antigravity Bridge runs on the machine where the `antigravity`/`agy` CLI and its Google profiles are installed.**
-> - Clients (Hermes Agent, OpenAI SDK, Anthropic SDK, bots, webhooks) can reach the bridge over HTTP from any machine.
+> **Antigravity Bridge runs on the machine where the `antigravity`/`agy` CLI and its Google profiles are installed**, but clients on other machines can use it.
+> - Clients (Hermes Agent, OpenAI SDK, Anthropic SDK, bots, webhooks) reach the bridge over HTTP from any machine or network.
+> - To expose it beyond localhost, keep the bridge bound to `127.0.0.1`, put **Nginx** in front of it with TLS (see [Nginx reverse proxy](#nginx-reverse-proxy-with-streaming-support)), add the public hostname to `ANTIGRAVITY_ALLOWED_HOSTS`, and **enable API key authentication** so only your clients can call it.
+> - **Be careful with security:** the bridge runs `agy` with permissions disabled, so an exposed, unauthenticated port is equivalent to giving remote shell access to the host. Read the [Security Model](#-security-model) before opening it up.
 > - The bridge itself always executes the CLI locally. Distributed / remote worker clustering is not supported.
 
 > [!WARNING]
