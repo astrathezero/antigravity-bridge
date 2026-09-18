@@ -1,6 +1,7 @@
 # Antigravity Bridge Server 🌉 (ภาษาไทย)
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Node.js 18+](https://img.shields.io/badge/node-18+-brightgreen.svg)](https://nodejs.org/)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-green.svg)](https://platform.openai.com/docs/api-reference)
 [![Anthropic Compatible](https://img.shields.io/badge/API-Anthropic%20Compatible-orange.svg)](https://docs.anthropic.com/en/api/messages)
 [![Imagen 3](https://img.shields.io/badge/Image-Google%20Imagen%203-purple.svg)](https://ai.google.dev/gemini-api/docs/imagen)
@@ -9,88 +10,117 @@
 
 **ภาษา:** [🇺🇸 English](README.md) | **ภาษาไทย**
 
-**Antigravity Bridge Server** คือ REST API Bridge Server ประสิทธิภาพสูง แบบ **Zero External Dependencies** (ใช้เฉพาะ Standard Library ของ Python 3) ที่ออกแบบมาเพื่อเชื่อมต่อระบบนิเวศของ `antigravity` / `agy` CLI เข้ากับมาตรฐาน **OpenAI API** และ **Anthropic Messages API** โดยเปลี่ยนบัญชี Google ในเครื่องของคุณให้กลายเป็น **Multi-Concurrent API Pool** พร้อมระบบสลับ Profile อัตโนมัติเมื่อโควตาเต็ม, รีเฟรช Token อัตโนมัติในเบื้องหลัง, รองรับ Tool/Function Calling และการสร้างรูปภาพผ่าน Google Imagen 3
+**Antigravity Bridge Server** คือ REST API Bridge แบบ Zero External Dependencies ที่รองรับมาตรฐาน OpenAI และ Anthropic สำหรับระบบนิเวศของ `antigravity` / `agy` CLI โดยเปลี่ยนบัญชี Google ที่ล็อกอินไว้ใน CLI บนเครื่องของคุณให้กลายเป็น API Cluster หลายโปรไฟล์ที่ทนทาน พร้อมระบบสลับโปรไฟล์อัจฉริยะ, fallback ทันทีเมื่อโควตาเต็ม, รีเฟรช OAuth อัตโนมัติในเบื้องหลัง, Tool Calling, SSE Streaming และการสร้างรูปภาพ
+
+Repository นี้มี **เซิร์ฟเวอร์ตัวเดียวกันสองรุ่น (edition)** อยู่ใน folder เดียวกัน ใช้ `.env` เดียวกัน, ที่เก็บโปรไฟล์เดียวกัน และมีฟีเจอร์ครบเท่ากัน:
+
+| | 🐍 รุ่น Python | ⚡ รุ่น Node.js |
+| :--- | :--- | :--- |
+| ไฟล์หลัก | `antigravity_bridge.py` | `src/index.mjs` |
+| พอร์ตเริ่มต้น | `8000` | `8008` |
+| Runtime | Python 3.8+ (Standard Library เท่านั้น) | Node.js 18+ (Native ESM ไม่ต้อง `npm install`) |
+| โครงสร้างโค้ด | ไฟล์เดียว | แยกโมดูล (`src/core`, `src/translators`, `src/cli`, `src/image`) |
+| Concurrency | Threads | Event loop แบบ non-blocking |
+| หน่วยความจำโดยประมาณ | ~80–150 MB | ~35–55 MB |
+| ชุดทดสอบ | `test_antigravity_bridge.py` (73 tests) | `tests/*.test.mjs` (37 tests) |
+
+เลือกใช้รุ่นใดรุ่นหนึ่ง หรือรันทั้งสองรุ่นพร้อมกันบนพอร์ตเริ่มต้นของแต่ละรุ่นก็ได้ ดู [การเลือกรุ่นที่จะใช้](#-การเลือกรุ่นที่จะใช้-choosing-an-edition)
 
 ---
 
 > [!IMPORTANT]
-> ### 📢 ข้อควรทราบ: การใช้งานข้ามเครื่อง (Cross-Machine Notice & Roadmap)
-> **ปัจจุบัน Antigravity Bridge ทำงานบนเครื่อง Local / Host เดียวกันกับที่ติดตั้ง `antigravity`/`agy` CLI และ Profiles เท่านั้น**
-> - โปรแกรมปลายทาง (เช่น Hermes Agent, OpenAI SDK, บอทเทรด, Webhook) สามารถเชื่อมต่อเข้ามาที่ Bridge ผ่านเครือข่าย HTTP จากเครื่องใดก็ได้
-> - แต่ตัว Bridge Server เองจะประมวลผลคำสั่ง CLI บนเครื่อง Host ที่รัน Bridge เท่านั้น
-> - **ยังไม่รองรับการกระจายงานไปประมวลผลบนหลายโหนดเครื่องข้ามระบบ (Cross-Machine / Distributed Worker)** โดยฟีเจอร์นี้อยู่ในแผนการพัฒนาสำหรับเวอร์ชันถัดไป (Roadmap)
+> ### 📢 ข้อควรทราบ: การใช้งานข้ามเครื่อง (Cross-Machine Notice)
+> **Antigravity Bridge ทำงานบนเครื่องเดียวกันกับที่ติดตั้ง `antigravity`/`agy` CLI และโปรไฟล์ Google**
+> - โปรแกรมปลายทาง (Hermes Agent, OpenAI SDK, Anthropic SDK, บอท, Webhook) เชื่อมต่อเข้ามาที่ Bridge ผ่าน HTTP จากเครื่องใดก็ได้
+> - แต่ตัว Bridge จะรัน CLI บนเครื่อง Host เท่านั้น ยังไม่รองรับการกระจายงานไปยัง worker บนเครื่องอื่น
 
 > [!WARNING]
 > ### ⚠️ คำเตือนและข้อกำหนดการใช้งาน (Terms of Service Notice)
-> **โปรดอ่านอย่างละเอียดก่อนเริ่มใช้งาน:**
-> - **เพื่อการศึกษา วิจัย และการใช้งานส่วนบุคคลเท่านั้น:** โปรเจกต์นี้เป็นเครื่องมือโอเพนซอร์สอิสระที่พัฒนาขึ้นเพื่อการทดสอบ การเชื่อมต่อระบบเฉพาะบุคคล และการทำงานอัตโนมัติในเครื่อง
-> - **การปฏิบัติตามข้อกำหนดการให้บริการ (ToS):** การใช้สคริปต์อัตโนมัติ การครอบ REST API หรือการสลับบัญชีหลายบัญชีอาจไม่สอดคล้องกับข้อกำหนดการให้บริการ (Terms of Service) หรือนโยบายการใช้งานของ Google, Gemini หรือ Antigravity
-> - **ความเสี่ยงต่อการถูกจำกัดสิทธิ์ / ระงับบัญชี:** การส่งคำขอจำนวนมากเกินไปหรือการสลับบัญชีถี่อาจส่งผลให้บัญชีติด Cooldown ชั่วคราว หรือถูกจำกัดการใช้งานจากผู้ให้บริการ
-> - **ผู้ใช้ยอมรับความเสี่ยงด้วยตนเอง:** ผู้พัฒนาไม่มีส่วนรับผิดชอบต่อการถูกระงับบัญชี ข้อมูลสูญหาย หรือความเสียหายใดๆ ที่เกิดขึ้นจากการใช้งานซอฟต์แวร์นี้
+> - **เพื่อการศึกษา วิจัย และการใช้งานส่วนบุคคลเท่านั้น:** โปรเจกต์นี้เป็นเครื่องมือโอเพนซอร์สอิสระสำหรับการทดสอบ การเชื่อมต่อระบบเฉพาะบุคคล และการทำงานอัตโนมัติในเครื่อง
+> - **ข้อกำหนดการให้บริการ (ToS):** การครอบ REST API หรือการสลับหลายบัญชีอาจไม่สอดคล้องกับ Terms of Service, Acceptable Use Policy หรือขีดจำกัดการใช้งานของ Google, Gemini และ Antigravity
+> - **ความเสี่ยงต่อการถูกจำกัดสิทธิ์ / ระงับบัญชี:** การส่งคำขอถี่เกินไปหรือสลับบัญชีบ่อยอาจทำให้บัญชีติด Cooldown หรือถูกระงับจากผู้ให้บริการ
+> - **ผู้ใช้ยอมรับความเสี่ยงด้วยตนเอง:** ผู้พัฒนาไม่รับผิดชอบต่อการถูกระงับบัญชี ข้อมูลสูญหาย หรือความเสียหายใดๆ
 
 ---
 
 ## 📖 สารบัญ (Table of Contents)
 
-- [🌟 สถาปัตยกรรมและการทำงาน (Overview & Architecture)](#-สถาปัตยกรรมและการทำงาน-overview--architecture)
-- [✨ ฟีเจอร์หลัก (Key Features)](#-ฟีเจอร์หลัก-key-features)
-- [📦 การติดตั้งและเริ่มต้นใช้งานด่วน (Quick Start)](#-การติดตั้งและเริ่มต้นใช้งานด่วน-quick-start)
-  - [1. สิ่งที่ต้องมีก่อน (Prerequisites)](#1-สิ่งที่ต้องมีก่อน-prerequisites)
-  - [2. โคลนและเตรียมไฟล์โปรเจกต์](#2-โคลนและเตรียมไฟล์โปรเจกต์)
-  - [3. ตั้งค่าสภาพแวดล้อม (.env)](#3-ตั้งค่าสภาพแวดล้อม-env)
-  - [4. จัดการ API Key สำหรับ Agent (ทางเลือก)](#4-จัดการ-api-key-สำหรับ-agent-ทางเลือก)
-  - [5. เพิ่มโปรไฟล์บัญชี Google](#5-เพิ่มโปรไฟล์บัญชี-google)
-  - [6. เริ่มรัน Bridge Server](#6-เริ่มรัน-bridge-server)
-  - [7. ทดสอบและตรวจสอบสถานะ](#7-ทดสอบและตรวจสอบสถานะ)
-- [🤖 ตารางโมเดลที่รองรับ (Supported Models Matrix)](#-ตารางโมเดลที่รองรับ-supported-models-matrix)
-- [👤 คำสั่งจัดการโปรไฟล์ CLI (Profile Manager CLI)](#-คำสั่งจัดการโปรไฟล์-cli-profile-manager-cli)
-- [🔑 คำสั่งจัดการ API Key สำหรับ Agent (API Key Manager CLI)](#-คำสั่งจัดการ-api-key-สำหรับ-agent-api-key-manager-cli)
+- [🧭 การเลือกรุ่นที่จะใช้](#-การเลือกรุ่นที่จะใช้-choosing-an-edition)
+- [🌟 สถาปัตยกรรมและการทำงาน](#-สถาปัตยกรรมและการทำงาน-overview--architecture)
+- [✨ ฟีเจอร์หลัก](#-ฟีเจอร์หลัก-key-features)
+- [📦 การติดตั้งและเริ่มต้นใช้งานด่วน](#-การติดตั้งและเริ่มต้นใช้งานด่วน-quick-start)
+- [🤖 ตารางโมเดลที่รองรับ](#-ตารางโมเดลที่รองรับ-supported-models-matrix)
+- [👤 คำสั่งจัดการโปรไฟล์ CLI](#-คำสั่งจัดการโปรไฟล์-cli-profile-manager-cli)
+- [🔑 คำสั่งจัดการ API Key](#-คำสั่งจัดการ-api-key-api-key-manager-cli)
 - [📡 รายละเอียด REST API Endpoints](#-รายละเอียด-rest-api-endpoints)
-  - [1. ตรวจสอบสถานะเซิร์ฟเวอร์ (`GET /health`)](#1-ตรวจสอบสถานะเซิร์ฟเวอร์-get-health)
-  - [2. แสดงรายชื่อโมเดล (`GET /v1/models`)](#2-แสดงรายชื่อโมเดล-get-v1models)
-  - [3. ส่งคำขอ OpenAI Chat Completions (`POST /v1/chat/completions`)](#3-ส่งคำขอ-openai-chat-completions-post-v1chatcompletions)
-  - [4. ส่งคำขอ Anthropic Messages (`POST /v1/messages`)](#4-ส่งคำขอ-anthropic-messages-post-v1messages)
-  - [5. สั่งสร้างรูปภาพ (`POST /v1/images/generations`)](#5-สั่งสร้างรูปภาพ-post-v1imagesgenerations)
-  - [6. API จัดการสถานะโปรไฟล์แบบเรียลไทม์ (`/v1/profiles/*`)](#6-api-จัดการสถานะโปรไฟล์แบบเรียลไทม์-v1profiles)
-- [⚙️ การตั้งค่าและตัวแปรสภาพแวดล้อม (Environment Variables)](#️-การตั้งค่าและตัวแปรสภาพแวดล้อม-environment-variables)
-- [🤖 การเชื่อมต่อกับ Hermes Agent (`config.yaml`)](#-การเชื่อมต่อกับ-hermes-agent-configyaml)
-- [🦞 การเชื่อมต่อกับ OpenClaw (`openclaw.json`)](#-การเชื่อมต่อกับ-openclaw-openclawjson)
-- [💻 ตัวอย่างการเขียนโค้ดเรียกใช้งาน (Client SDKs)](#-ตัวอย่างการเขียนโค้ดเรียกใช้งาน-client-sdks)
-- [🚀 การติดตั้งเพื่อใช้งานจริงในระดับ Production](#-การติดตั้งเพื่อใช้งานจริงในระดับ-production)
-- [🔧 การแก้ไขปัญหาที่พบบ่อย (Troubleshooting & FAQ)](#-การแก้ไขปัญหาที่พบบ่อย-troubleshooting--faq)
-- [🧪 การรันชุดทดสอบ (Unit Tests)](#-การรันชุดทดสอบ-unit-tests)
-- [📄 สัญญาอนุญาต (License)](#-สัญญาอนุญาต-license)
+- [🔒 โมเดลความปลอดภัย](#-โมเดลความปลอดภัย-security-model)
+- [⚙️ การตั้งค่าและตัวแปรสภาพแวดล้อม](#️-การตั้งค่าและตัวแปรสภาพแวดล้อม-environment-variables)
+- [🤖 การเชื่อมต่อกับ Hermes Agent](#-การเชื่อมต่อกับ-hermes-agent-configyaml)
+- [🦞 การเชื่อมต่อกับ OpenClaw](#-การเชื่อมต่อกับ-openclaw-openclawjson)
+- [💻 ตัวอย่างการเรียกใช้งานผ่าน SDK](#-ตัวอย่างการเรียกใช้งานผ่าน-sdk-client-sdks)
+- [⏱️ ตัวเลือก Timeout และ Prompt ขนาดใหญ่](#️-ตัวเลือก-timeout-และการจัดการ-prompt-ขนาดใหญ่)
+- [🚀 การติดตั้งเพื่อใช้งานจริง](#-การติดตั้งเพื่อใช้งานจริง-production-deployment)
+- [🔧 การแก้ไขปัญหาที่พบบ่อย](#-การแก้ไขปัญหาที่พบบ่อย-troubleshooting--faq)
+- [🧪 การรันชุดทดสอบ](#-การรันชุดทดสอบ-unit-tests)
+- [🗄️ แบบเก็บถาวร: Web Extension Edition](#️-แบบเก็บถาวร-web-extension-edition)
+- [📄 สัญญาอนุญาต](#-สัญญาอนุญาต-license)
+
+---
+
+## 🧭 การเลือกรุ่นที่จะใช้ (Choosing an Edition)
+
+ทั้งสองรุ่นเปิด HTTP API แบบเดียวกัน อ่าน `.env` ไฟล์เดียวกัน สลับโปรไฟล์ชุดเดียวกันใน `~/.config/antigravity/profiles/` และถูกพัฒนาไปพร้อมกัน (ทุก commit ที่เพิ่มฟีเจอร์จะแก้ทั้งสองรุ่น) ความต่างที่มีผลในการใช้งานประจำวันคือ:
+
+| หัวข้อ | Python (`8000`) | Node.js (`8008`) |
+| :--- | :--- | :--- |
+| คำสั่งเริ่มรัน | `python3 antigravity_bridge.py` | `node src/index.mjs` หรือ `npm start` |
+| ตัวแปร API key | `ANTIGRAVITY_BRIDGE_API_KEYS` / `ANTIGRAVITY_BRIDGE_API_KEY` | `ANTIGRAVITY_API_KEYS` / `ANTIGRAVITY_API_KEY` |
+| จำนวน request พร้อมกันต่อโปรไฟล์ | `ANTIGRAVITY_PROFILE_CONCURRENCY` หรือ `--profile-concurrency` | `ANTIGRAVITY_CONCURRENCY_PER_PROFILE` |
+| CLI สำหรับ login โปรไฟล์ / doctor | `profile login`, `doctor` | ไม่มีในตัว ให้ใช้ CLI ของ Python (หรือ `agy` โดยตรง) ครั้งเดียว |
+| สคริปต์ติดตั้งเป็น service | `setup_systemd.sh` | `setup_systemd_node.sh`, `setup_launchd_mac.sh`, `setup_service_windows.ps1`, `run_windows.bat` |
+| ตัวช่วย deploy แบบ staging-first | `safe_deploy.sh` (ดู `AGENTS.md`) | แก้โค้ด, รัน `npm test`, restart |
+
+เนื่องจากชื่อตัวแปร key ต่างกัน `.env` ไฟล์เดียวจึงเก็บ key สำหรับพอร์ต Python ไว้ได้โดยพอร์ต Node ยังเปิดแบบไม่ต้องใช้ key (หรือกลับกัน) key ที่อยู่ในตัวแปรของอีกรุ่นจะถูกละเว้น ไม่ได้ถูกรวมกัน
+
+**การรันทั้งสองรุ่นพร้อมกัน:** พอร์ตเริ่มต้นไม่ชนกันอยู่แล้ว หากต้องการแยก state ขณะรันด้วย ให้กำหนด quota cache และ sandbox root ของรุ่น Node แยกต่างหาก (ทั้งสองรุ่นรองรับตัวแปรนี้):
+
+```ini
+ANTIGRAVITY_QUOTA_CACHE_FILE=~/.config/antigravity/quota_cache_node.json
+ANTIGRAVITY_SANDBOX_BASE=~/.config/antigravity/sandboxes-node
+```
+
+ใส่ค่าเหล่านี้ใน environment ของ service Node (สคริปต์ systemd ทำให้อัตโนมัติ) ไม่ใช่ใน `.env` ที่ใช้ร่วมกัน
 
 ---
 
 ## 🌟 สถาปัตยกรรมและการทำงาน (Overview & Architecture)
 
-Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตัวกลางในการรับคำขอมาตรฐานจาก Client ภายนอก แล้วกระจายไปยังโปรเซสย่อยของ `antigravity` / `agy` CLI ภายในเครื่อง:
+Antigravity Bridge เป็น HTTP gateway ระหว่างแอปพลิเคชันของคุณกับ subprocess ของ `antigravity`/`agy` CLI ในเครื่อง:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│            External AI Clients (Hermes / OpenAI / Anthropic SDK)       │
+│      External AI Clients (Hermes / OpenClaw / OpenAI & Anthropic SDK)   │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ HTTP REST / SSE Stream
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                  Antigravity Bridge Server (Port 8000)                 │
+│     Antigravity Bridge Server  (Python :8000  และ/หรือ  Node.js :8008)  │
 │  ├── Multi-API Key Auth & Client Isolator (Cursor, Hermes, Cline)      │
 │  ├── Dual API Translators (OpenAI v1 & Anthropic Messages)             │
 │  ├── Multi-Concurrent Profile Pool & Dynamic Lease Allocator           │
-│  ├── Smart Quota Detector (คำนวณ Cooldown อัตโนมัติ & สลับ Profile)    │
-│  ├── Dynamic Timeout Scaling (สูงสุด 2 ชม.) & รองรับ Prompt ขนาดใหญ่   │
+│  ├── Smart Quota Detector (Auto-Calculates Reset Timers & Rotates)     │
+│  ├── Dynamic Timeout Scaling (Up to 2h) & Large Prompt Support         │
 │  ├── Context Compactor & SSE Keep-Alive Heartbeat Generator            │
-│  ├── Background OAuth Auto-Refresh Daemon (รีเฟรชทุก 55 นาที)          │
+│  ├── Background OAuth Auto-Refresh Daemon (Every 55m)                  │
 │  └── Google Imagen 3 & Gemini Image Router                             │
 └───────────────────────────────────┬────────────────────────────────────┘
-                                    │ แยก Sandbox ย่อยรายโปรไฟล์
+                                    │ Isolated Subprocess Execution
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │         Isolated Runtime Sandboxes (~/.config/antigravity/sandboxes/)   │
-│  ├── Sandbox [Profile 1] (ไร้ปัญหา DB Lock) ──► Google Gemini API      │
-│  ├── Sandbox [Profile 2] (ไร้ปัญหา DB Lock) ──► Google Gemini API      │
-│  └── Sandbox [Profile N] (ไร้ปัญหา DB Lock) ──► Google Gemini API      │
+│  ├── Sandbox [Profile 1] (Zero DB Lock) ──► Google Gemini API (Stream) │
+│  ├── Sandbox [Profile 2] (Zero DB Lock) ──► Google Gemini API (Stream) │
+│  └── Sandbox [Profile N] (Zero DB Lock) ──► Google Gemini API (Stream) │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -98,215 +128,215 @@ Antigravity Bridge ทำหน้าที่เป็น HTTP Gateway ตั�
 
 ## ✨ ฟีเจอร์หลัก (Key Features)
 
-- 🔑 **ระบบ Multiple API Keys & แยกสิทธิ์ตาม Agent**:
-  - กำหนด API Key ปลอดภัยแยกสำหรับ Agent แต่ละตัว (Cursor, Hermes, Cline, Claude Dev) ได้โดยตรงในไฟล์ `.env`
-  - มีเครื่องมือ CLI Standalone (`manage_keys.py` / `python3 antigravity_bridge.py key`) สำหรับสร้าง, ดู, เพิกถอน และทดสอบ Key
-  - ตรวจสอบผ่าน `Authorization: Bearer <key>`, `x-api-key: <key>`, `api-key: <key>` หรือ URL Parameter
-- ⚡ **Multi-Concurrent Profile Pool & การประมวลผลแบบขนาน**:
-  - **Isolated Sandboxes**: รันแต่ละโปรไฟล์ในไดเรกทอรีเฉพาะแยกขาดจากกัน (`~/.config/antigravity/sandboxes/<profile>/`) หมดปัญหา SQLite database lock (`conversation_summaries.db`) และการชนกันของไฟล์ Auth
-  - **ความจุขนานสูง**: กำหนดจำนวนคำขอพร้อมกันต่อโปรไฟล์ได้ (เช่น 14 โปรไฟล์ × 2 Concurrency = **รองรับพร้อมกันสูงสุด 28 คำขอ**)
-- 🔄 **รองรับ 2 มาตรฐาน API (Dual Format)**: เข้ากันได้ 100% ทั้ง **OpenAI API** (`/v1/chat/completions`) และ **Anthropic API** (`/v1/messages`)
-- 🛠️ **รองรับ Tool Calling & Function Calling**: แปลงคำจำกัดความเครื่องมือของ OpenAI และ Anthropic เข้าสู่ระบบ Prompt ของ CLI พร้อมดึงผลลัพธ์กลับมาเป็น Tool Call JSON แม่นยำ
-- 🌊 **Real-Time SSE Streaming & Heartbeat**: ส่งข้อมูลแบบสตรีมมิ่งผ่าน Server-Sent Events พร้อมระบบส่งสัญญาณ Heartbeat เป็นระยะเพื่อป้องกัน Gateway/Reverse Proxy ตัดการเชื่อมต่อขณะโมเดลใช้เหตุผลลึก (Deep Reasoning)
-- 🔀 **Zero-Downtime Smart Fallback & Fast-Fail**:
-  - สลับหมุนเวียนโปรไฟล์ใน `~/.config/antigravity/profiles/` อัตโนมัติ
-  - ตรวจจับข้อผิดพลาด `429 Too Many Requests` และ `RESOURCE_EXHAUSTED` ทันที
-  - อ่านระยะเวลาฟื้นฟูโควตาจากข้อความระบบ (เช่น `Resets in 74h 7m 25s`) เพื่อตั้ง Cooldown แม่นยำ และสลับไปใช้โปรไฟล์ถัดไปทันทีโดยที่ Client ไม่หลุด
-  - **Cooldown Skip & Fast-Fail**: ข้ามโปรไฟล์ที่กำลังติด Cooldown ทันทีโดยไม่เสียเวลายิงซ้ำ และแจ้ง Error ชัดเจนทันทีหากทุกโปรไฟล์ใน Pool ติด Limit ทั้งหมด
-- 🚀 **รองรับ Prompt ขนาดใหญ่ (Large Prompt) & Adaptive Compaction**:
-  - ส่งข้อความ Prompt ขนาดใหญ่เข้าสู่ CLI Argument ได้สูงถึง **350KB (~85,000 คำ)** โดยตรง ไม่ติดข้อจำกัด `ARG_MAX` ของระบบปฏิบัติการ
-  - มีระบบบีบอัดประวัติและตัดข้อความตรงกลางอย่างชาญฉลาดเมื่อบริบทการสนทนายาวเกิน 350KB เพื่อให้การประมวลผลยังคงรวดเร็ว
-- ⏱️ **ระบบ Dynamic Timeout ตามคำขอ & ปรับขนาดเวลาอัตโนมัติ**:
-  - รองรับการขอ Execution Timeout ได้สูงถึง **2 ชั่วโมง** (เช่น 20–30 นาทีสำหรับงาน Prompt ขนาดใหญ่ที่ต้องคิดลึก) ผ่านหลายช่องทาง:
-    - **HTTP Headers**: `X-Profile-Timeout: 30m`, `X-Execution-Timeout: 20m`, `OpenAI-Timeout: 1800`, `X-Timeout: 1800`, `Prefer: wait=1800`
-    - **JSON Request Body**: `"profile_timeout": "30m"`, `"timeout": 1800`, `"extra_body": {"profile_timeout": "30m"}`
-    - **URL Query Parameters**: `?timeout=30m`, `?profile_timeout=20m`
-    - **Model Name Suffix**: `model: "gemini-3.7-flash-high:timeout=30m"` หรือ `model: "gemini-3.7-flash:30m"` หรือ `model: "gemini-3.7-flash?timeout=1800"`
-    - **In-Prompt Directives**: `[antigravity:timeout=30m]` หรือ `<!-- timeout: 30m -->`
-  - คำนวณขยายเวลา Timeout ต่อโปรไฟล์ให้อัตโนมัติเมื่อตรวจพบ Prompt ขนาดยาว (>10KB) สูงสุด 60 นาที หากไม่มีการระบุเจาะจง
-  - ส่งค่า Timeout ที่ใช้วินิจฉัยจริงกลับทาง Response Header `X-Antigravity-Profile-Timeout` และ `X-Antigravity-Total-Timeout`
-- 🔒 **บันทึกสถานะโปรไฟล์ถาวร (Persistent Profile State)**: คำสั่ง `profile disable <name>` จะบันทึกลงไฟล์การตั้งค่า (`~/.config/antigravity/bridge_config.json`) และคงสถานะปิดไว้แม้จะ Restart เซิร์ฟเวอร์
-- 🔄 **ระบบรีเฟรช Token อัตโนมัติในเบื้องหลัง**: Background Daemon ทำงานทุก 55 นาทีเพื่อต่ออายุ Google OAuth Access Token ป้องกัน Session หมดอายุ
-- 🌐 **ตรวจจับ SOCKS5 / Cloudflare WARP Proxy อัตโนมัติ**: ตรวจหาพอร์ต Local Proxy (เช่น `40000`, `10808`, `7890`) อัตโนมัติเพื่อเชื่อมต่ออินเทอร์เน็ตได้ราบรื่น
-- 🎨 **สร้างรูปภาพผ่าน Google Imagen 3**: รองรับเอนด์พอยต์ `/v1/images/generations` และแปลงคำสั่งสร้างภาพในแชท
-- 🩺 **ระบบหมอตรวจเช็คระบบ (`doctor` / `diag`)**: ตรวจสอบการเชื่อมต่อ IP, ตรวจสถานะ Token กับ Google UserInfo API และล้างไฟล์ขยะ
-- 🚀 **Zero External Dependencies**: พัฒนาด้วย Python 3 Standard Library ล้วน ไม่ต้องติดตั้งไลบรารีภายนอกด้วย `pip`
+- 🔑 **จัดการ API Key หลายชุดและแยก Agent**
+  - กำหนด key แยกต่อ agent (Cursor, Hermes, Cline, Claude Dev) ใน `.env` จัดการผ่านคำสั่ง `key` ของรุ่นใดก็ได้
+  - รองรับ `Authorization: Bearer <key>`, `x-api-key: <key>` หรือ `api-key: <key>`
+- ⚡ **Profile Pool แบบรันพร้อมกันหลายคำขอ**
+  - **Sandbox แยกต่อโปรไฟล์:** แต่ละโปรไฟล์รันใน runtime directory ของตัวเอง (`~/.config/antigravity/sandboxes/<profile>/`) ตัดปัญหา SQLite lock และไฟล์ auth ชนกัน
+  - **ขยายความจุได้:** กำหนดจำนวนคำขอพร้อมกันต่อโปรไฟล์ (เช่น 14 โปรไฟล์ × 2 = 28 คำขอพร้อมกัน)
+- 🔄 **รองรับสองมาตรฐาน:** ใช้แทน **OpenAI** (`/v1/chat/completions`) และ **Anthropic** (`/v1/messages`) ได้ทันที
+- 🛠️ **Tool & Function Calling:** แปลง `tools`/`functions` ของ OpenAI และ `tools` ของ Anthropic ได้ทั้งสองทาง
+- 🌊 **SSE Streaming และ Heartbeat:** สตรีมแบบ `text/event-stream` พร้อมส่ง heartbeat comment เป็นระยะ ป้องกัน proxy ตัดการเชื่อมต่อระหว่างโมเดลคิดนาน
+- 🔀 **Smart Fallback & Fast-Fail**
+  - สลับไปยังทุกโปรไฟล์ใน `~/.config/antigravity/profiles/`
+  - ตรวจจับ `429`, `RESOURCE_EXHAUSTED` และ error โควตา แล้วอ่านเวลารีเซ็ต (`Resets in 74h 7m 25s`) เพื่อสลับไปโปรไฟล์ถัดไปโดยไม่ทำให้คำขอล้มเหลว
+  - ข้ามโปรไฟล์ที่ติด cooldown โดยไม่ยิงคำขอซ้ำ และล้มเหลวทันทีเมื่อ pool หมดทั้งชุด
+- 🚀 **รองรับ Prompt ขนาดใหญ่และการบีบอัด Context**
+  - Prompt ไม่เกิน `ANTIGRAVITY_MAX_CLI_ARG_BYTES` (120 KB) ส่งให้ agy เป็น CLI argument ส่วนที่ใหญ่กว่านั้นส่งผ่าน stdin เป็น NDJSON ได้ถึง `ANTIGRAVITY_MAX_STDIN_PROMPT_BYTES` (2 MB) จึงไม่ติดขีดจำกัด `ARG_MAX` ของ Linux
+  - เมื่อเกินงบ context (`ANTIGRAVITY_MAX_PROMPT_CHARS`, 200 KB) จะบีบอัดผลลัพธ์ tool เก่าๆ แทนการตัดบทสนทนาทิ้ง
+- ⏱️ **Timeout แบบไดนามิก:** ขอเวลาได้สูงสุด **2 ชั่วโมง** ผ่าน header, body, query, ต่อท้ายชื่อโมเดล หรือ directive ใน prompt และขยายเวลาอัตโนมัติสำหรับ prompt เกิน 10 KB ดู [ตัวเลือก Timeout](#️-ตัวเลือก-timeout-และการจัดการ-prompt-ขนาดใหญ่)
+- 🔒 **สถานะโปรไฟล์คงอยู่:** `profile disable <name>` ถูกบันทึกลง `~/.config/antigravity/bridge_config.json` และคงอยู่หลัง restart
+- 🔄 **รีเฟรช OAuth อัตโนมัติ:** รีเฟรช access token ของ Google ทุก 55 นาที
+- 🌐 **ตรวจจับ SOCKS5 / Cloudflare WARP อัตโนมัติ:** หา proxy ในเครื่องที่พอร์ต `40000`, `10808`, `7890` ฯลฯ
+- 🎨 **สร้างรูปภาพ:** Google Imagen 3 (`imagen-3.0-generate-002`) และ Gemini image router ผ่าน `/v1/images/generations`
+- 🩺 **Diagnostic Doctor** (CLI ของ Python): ตรวจ OAuth, เส้นทาง IP สาธารณะ และล้าง lock ค้าง
+- 📦 **Zero External Dependencies** ทั้งสองรุ่น: Python ใช้ Standard Library เท่านั้น, Node.js เป็น native ESM ไม่ต้อง `npm install`
 
 ---
 
 ## 📦 การติดตั้งและเริ่มต้นใช้งานด่วน (Quick Start)
 
 ### 1. สิ่งที่ต้องมีก่อน (Prerequisites)
-- **Python 3.8 ขึ้นไป** (`python3 --version`)
-- ติดตั้ง **Antigravity CLI** (`antigravity` หรือ `agy`) และอยู่ใน PATH
-- ติดตั้ง **Git**
+- **Antigravity CLI** (`antigravity` หรือ `agy`) ติดตั้งแล้วและอยู่ใน `PATH`
+- **Git**
+- **Python 3.8+** สำหรับรุ่น Python, **Node.js 18+** สำหรับรุ่น Node.js ผู้ใช้รุ่น Node ควรมี Python ด้วย เพราะคำสั่ง login โปรไฟล์และ `doctor` อยู่ใน CLI ของ Python
 
-### 2. โคลนและเตรียมไฟล์โปรเจกต์
+### 2. โคลนโปรเจกต์
 ```bash
 git clone https://github.com/astrathezero/antigravity-bridge.git
 cd antigravity-bridge
 ```
 
-### 3. ตั้งค่าสภาพแวดล้อม (`.env`)
+### 3. ตั้งค่า `.env`
 ```bash
 cp .env.example .env
 nano .env
 ```
-ตัวอย่างการตั้งค่าหลักใน `.env`:
+ทั้งสองรุ่นค้นหาไฟล์ตามลำดับ: `./.env` (Python ดูใน directory ของสคริปต์ด้วย), `~/.config/antigravity/bridge.env`, `~/.config/antigravity/.env`, `~/.env` ค่าที่มีอยู่แล้วใน environment ของ process จะมีผลเหนือค่าในไฟล์
+
 ```ini
 ANTIGRAVITY_HOST=127.0.0.1
-ANTIGRAVITY_PORT=8000
-ANTIGRAVITY_PROFILE_CONCURRENCY=2
+ANTIGRAVITY_PORT=8000                 # Python; Node ไม่ใช้ค่านี้ถ้าไม่ระบุ --port (ค่าเริ่มต้น 8008)
+ANTIGRAVITY_PROFILE_CONCURRENCY=1     # Python
+# ANTIGRAVITY_CONCURRENCY_PER_PROFILE=1   # Node.js
 # ANTIGRAVITY_DISABLED_PROFILES=reserve_profile
-# ANTIGRAVITY_BRIDGE_API_KEYS=agent-cursor:sk-agv-111,agent-hermes:sk-agv-222
 ```
 
-### 4. จัดการ API Key สำหรับ Agent (แนะนำอย่างยิ่ง)
-ถ้าไม่มี Key เซิร์ฟเวอร์จะเริ่มในโหมด anonymous และแจ้งเตือนเท่านั้น (ดู [โมเดลความปลอดภัย](#-โมเดลความปลอดภัย-security-model)) สร้าง Key สำหรับ Agent แต่ละตัว:
+### 4. สร้าง API key (แนะนำอย่างยิ่ง)
+หากไม่มี key เซิร์ฟเวอร์ทั้งสองรุ่นจะเริ่มในโหมด anonymous พร้อมแจ้งเตือน (ดู [โมเดลความปลอดภัย](#-โมเดลความปลอดภัย-security-model))
+
 ```bash
-python3 manage_keys.py create agent-cursor
-python3 manage_keys.py create agent-hermes
+# รุ่น Python → เขียนลง ANTIGRAVITY_BRIDGE_API_KEYS
+python3 antigravity_bridge.py key create agent-hermes
 python3 manage_keys.py list
+
+# รุ่น Node.js → เขียนลง ANTIGRAVITY_API_KEYS
+node src/index.mjs key generate agent-hermes
+node src/index.mjs key list
 ```
 
 ### 5. เพิ่มโปรไฟล์บัญชี Google
-เพิ่มบัญชี Google เข้าสู่ระบบแบบ Interactive:
 ```bash
 python3 antigravity_bridge.py login profile_1
 python3 antigravity_bridge.py login profile_2
 ```
-> **ขั้นตอนการล็อกอิน:**
-> 1. เบราว์เซอร์จะเปิดหน้าต่าง Google OAuth ให้เลือกบัญชี Google และกดยินยอมสิทธิ์
-> 2. เมื่อหน้าจอ Terminal กลับมาและแสดงเครื่องหมาย `>` ให้พิมพ์ว่า `hi` แล้วกด `Enter` เพื่อเริ่มใช้งาน
-> 3. พิมพ์คำสั่ง `/exit` (หรือกด `Ctrl+D`) เพื่อบันทึกข้อมูล Token ลงใน `~/.config/antigravity/profiles/<ชื่อโปรไฟล์>/`
+> **ขั้นตอน login:**
+> 1. เบราว์เซอร์จะเปิดหน้า Google OAuth เลือกบัญชีและกดอนุญาต
+> 2. เมื่อ terminal แสดง `>` ให้พิมพ์ `hi` แล้วกด `Enter` เพื่อ activate
+> 3. พิมพ์ `/exit` (หรือ `Ctrl+D`) ข้อมูลจะถูกบันทึกที่ `~/.config/antigravity/profiles/<name>/`
+>
+> โปรไฟล์ใช้ร่วมกัน: login ครั้งเดียว ทั้งสองรุ่นมองเห็น
 
-### 6. เริ่มรัน Bridge Server
+### 6. เริ่มรัน
 
-#### วิธีที่ 1: ติดตั้งเป็น Systemd Service อัตโนมัติ (แนะนำสำหรับ Linux VPS)
+**รุ่น Python (พอร์ต 8000)**
 ```bash
-chmod +x setup_systemd.sh
-./setup_systemd.sh
+python3 antigravity_bridge.py                      # key จาก .env
+python3 antigravity_bridge.py --api-key sk-agv-... # หรือระบุ key โดยตรง
+./setup_systemd.sh                                 # หรือติดตั้งเป็น systemd service
 ```
 
-#### วิธีที่ 2: รันตรงผ่าน Terminal
+**รุ่น Node.js (พอร์ต 8008)**
 ```bash
-python3 antigravity_bridge.py            # อ่าน key จาก .env
-python3 antigravity_bridge.py --api-key sk-agv-...   # หรือระบุ key โดยตรง
+node src/index.mjs                                 # key จาก .env
+node src/index.mjs --port 8008 --host 127.0.0.1 --api-key sk-agv-...
+npm start                                          # เท่ากับ node src/index.mjs --port 8008
+./setup_systemd_node.sh                            # service บน Linux
+./setup_launchd_mac.sh                             # launchd บน macOS
+.\setup_service_windows.ps1                        # service บน Windows (หรือ run_windows.bat)
 ```
-> ถ้าไม่มี key เลยเซิร์ฟเวอร์จะเริ่มในโหมด anonymous พร้อม log แจ้งเตือน ห้ามเปิดพอร์ตนั้นออกนอก `127.0.0.1` เด็ดขาด
 
 ### 7. ทดสอบและตรวจสอบสถานะ
 ```bash
-# ตรวจสอบสถานะโปรไฟล์และความจุ Concurrency:
-python3 antigravity_bridge.py profiles
+python3 antigravity_bridge.py profiles             # สถานะ profile pool (ใช้ CLI รุ่นไหนก็ได้)
+node src/index.mjs profile list
 
-# ทดสอบเรียก Health Check ผ่าน cURL (ไม่มี key = ได้แค่สถานะ liveness):
-curl http://127.0.0.1:8000/health
-# ดูสถานะเต็ม (โปรไฟล์, โควตา) ต้องแนบ key:
-curl -H "Authorization: Bearer sk-agv-..." http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/health                  # liveness เท่านั้น ไม่ต้องใช้ key
+curl http://127.0.0.1:8008/health
+curl -H "Authorization: Bearer sk-agv-..." http://127.0.0.1:8000/health   # สถานะเต็ม
 ```
 
 ---
 
 ## 🤖 ตารางโมเดลที่รองรับ (Supported Models Matrix)
 
-| Model ID (`model`) | การแมปคำสั่ง CLI | ระดับ Reasoning | คำอธิบาย | ขนาด Context |
+| Model ID (`model`) | คำสั่ง CLI ที่ใช้จริง | Reasoning Effort | คำอธิบาย | Max Context |
 | :--- | :--- | :---: | :--- | :---: |
-| **`gemini-3.8-flash-high`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับสูง) | 1,000,000 |
-| **`gemini-3.8-flash-medium`** | `--model gemini-3.8-flash` | `medium` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับกลาง) | 1,000,000 |
-| **`gemini-3.8-flash-low`** | `--model gemini-3.8-flash` | `low` | Gemini 3.8 Flash (คิดวิเคราะห์ระดับเร็ว) | 1,000,000 |
-| **`gemini-3.8-flash`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (ค่ามาตรฐาน) | 1,000,000 |
-| **`gemini-3.7-flash-high`** | `--model gemini-3.7-flash` | `high` | Gemini 3.7 Flash (คิดวิเคราะห์ระดับสูง) | 1,000,000 |
-| **`gemini-3.7-flash-medium`** | `--model gemini-3.7-flash` | `medium` | Gemini 3.7 Flash (คิดวิเคราะห์ระดับกลาง) | 1,000,000 |
-| **`gemini-3.7-flash-low`** | `--model gemini-3.7-flash` | `low` | Gemini 3.7 Flash (คิดวิเคราะห์ระดับเร็ว) | 1,000,000 |
-| **`gemini-3.7-flash`** | `--model gemini-3.7-flash` | - | Gemini 3.7 Flash (ค่ามาตรฐาน) | 1,000,000 |
-| **`gemini-3.6-flash-high`** | `--model gemini-3.6-flash` | `high` | Gemini 3.6 Flash (คิดวิเคราะห์ระดับสูง) | 1,000,000 |
-| **`gemini-3.6-flash`** | `--model gemini-3.6-flash` | - | Gemini 3.6 Flash (ค่ามาตรฐาน) | 1,000,000 |
-| **`gemini-3.5-flash-medium`** | `--model gemini-3.5-flash` | `medium` | Gemini 3.5 Flash (คิดวิเคราะห์ระดับกลาง) | 1,000,000 |
-| **`gemini-3.5-flash`** | `--model gemini-3.5-flash` | - | Gemini 3.5 Flash (ค่ามาตรฐาน) | 1,000,000 |
-| **`gemini-3.1-pro-high`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (โมเดลเรือธงคิดวิเคราะห์สูง) | 2,000,000 |
-| **`gemini-3.1-pro-low`** | `--model gemini-3.1-pro` | `low` | Gemini 3.1 Pro (โมเดลเรือธงคิดวิเคราะห์เร็ว) | 2,000,000 |
-| **`gemini-3.1-pro`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (ค่ามาตรฐาน) | 2,000,000 |
-| **`claude-sonnet-4.6-thinking`** | `--model claude-sonnet-4.6` | `thinking` | Claude Sonnet 4.6 (เปิดระบบ Extended Thinking) | 200,000 |
-| **`claude-sonnet-4.6`** | `--model claude-sonnet-4.6` | - | Claude Sonnet 4.6 (มาตรฐาน) | 200,000 |
-| **`claude-opus-4.6-thinking`** | `--model claude-opus-4.6` | `thinking` | Claude Opus 4.6 (เปิดระบบ Extended Thinking) | 200,000 |
-| **`claude-opus-4.6`** | `--model claude-opus-4.6` | - | Claude Opus 4.6 (มาตรฐาน) | 200,000 |
-| **`gpt-oss-120b-medium`** / **`gpt-oss-128b`** | `--model gpt-oss-120b` | `medium` | GPT-OSS 120B / 128B (Reasoning ปานกลาง) | 128,000 |
-| **`gpt-oss-120b`** | `--model gpt-oss-120b` | - | GPT-OSS 120B (มาตรฐาน) | 128,000 |
-| **`imagen-3.0-generate-002`** | Google Imagen 3 API | - | สร้างรูปภาพคุณภาพสูง (`/v1/images/generations`) | - |
-| **`imagen-3.0-fast-generate-001`**| Google Imagen 3 Fast API | - | สร้างรูปภาพความเร็วสูง (`/v1/images/generations`) | - |
-| **`gemini-3.1-flash-image`** | Gemini Image Router | - | สร้างรูปภาพรวดเร็วผ่าน Gemini Router | - |
-| **`antigravity`** / **`agy`** | Default CLI backend | - | โมเดลสำรองอัตโนมัติ | 1,000,000 |
+| **`gemini-3.8-flash-high`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (คิดละเอียดสูง) | 1,000,000 |
+| **`gemini-3.8-flash-medium`** | `--model gemini-3.8-flash` | `medium` | Gemini 3.8 Flash (คิดละเอียดปานกลาง) | 1,000,000 |
+| **`gemini-3.8-flash-low`** | `--model gemini-3.8-flash` | `low` | Gemini 3.8 Flash (คิดละเอียดต่ำ) | 1,000,000 |
+| **`gemini-3.8-flash`** | `--model gemini-3.8-flash` | `high` | Gemini 3.8 Flash (มาตรฐาน) | 1,000,000 |
+| **`gemini-3.7-flash-high`** | `--model gemini-3.7-flash` | `high` | Gemini 3.7 Flash (คิดละเอียดสูง) | 1,000,000 |
+| **`gemini-3.7-flash-medium`** | `--model gemini-3.7-flash` | `medium` | Gemini 3.7 Flash (คิดละเอียดปานกลาง) | 1,000,000 |
+| **`gemini-3.7-flash-low`** | `--model gemini-3.7-flash` | `low` | Gemini 3.7 Flash (คิดละเอียดต่ำ) | 1,000,000 |
+| **`gemini-3.7-flash`** | `--model gemini-3.7-flash` | - | Gemini 3.7 Flash (มาตรฐาน) | 1,000,000 |
+| **`gemini-3.6-flash-high`** | `--model gemini-3.6-flash` | `high` | Gemini 3.6 Flash (คิดละเอียดสูง) | 1,000,000 |
+| **`gemini-3.6-flash`** | `--model gemini-3.6-flash` | - | Gemini 3.6 Flash (มาตรฐาน) | 1,000,000 |
+| **`gemini-3.5-flash-medium`** | `--model gemini-3.5-flash` | `medium` | Gemini 3.5 Flash (คิดละเอียดปานกลาง) | 1,000,000 |
+| **`gemini-3.5-flash`** | `--model gemini-3.5-flash` | - | Gemini 3.5 Flash (มาตรฐาน) | 1,000,000 |
+| **`gemini-3.1-pro-high`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (คิดละเอียดสูง) | 2,000,000 |
+| **`gemini-3.1-pro-low`** | `--model gemini-3.1-pro` | `low` | Gemini 3.1 Pro (คิดละเอียดต่ำ) | 2,000,000 |
+| **`gemini-3.1-pro`** | `--model gemini-3.1-pro` | `high` | Gemini 3.1 Pro (มาตรฐาน) | 2,000,000 |
+| **`claude-sonnet-4.6-thinking`** | `--model claude-sonnet-4.6` | `thinking` | Claude Sonnet 4.6 (Extended Thinking) | 200,000 |
+| **`claude-sonnet-4.6`** | `--model claude-sonnet-4.6` | - | Claude Sonnet 4.6 | 200,000 |
+| **`claude-opus-4.6-thinking`** | `--model claude-opus-4.6` | `thinking` | Claude Opus 4.6 (Extended Thinking) | 200,000 |
+| **`claude-opus-4.6`** | `--model claude-opus-4.6` | - | Claude Opus 4.6 | 200,000 |
+| **`gpt-oss-120b-medium`** / **`gpt-oss-128b`** | `--model gpt-oss-120b` | `medium` | GPT-OSS 120B / 128B (คิดละเอียดปานกลาง) | 128,000 |
+| **`gpt-oss-120b`** | `--model gpt-oss-120b` | - | GPT-OSS 120B | 128,000 |
+| **`imagen-3.0-generate-002`** | Google Imagen 3 API | - | สร้างรูปคุณภาพสูง (`/v1/images/generations`) | - |
+| **`imagen-3.0-fast-generate-001`**| Google Imagen 3 Fast API | - | สร้างรูปแบบเร็ว (`/v1/images/generations`) | - |
+| **`gemini-3.1-flash-image`** | Gemini Image Router | - | สร้างรูปผ่าน Gemini แบบเร็ว | - |
+| **`antigravity`** / **`agy`** | CLI backend เริ่มต้น | - | เส้นทาง fallback เริ่มต้น | 1,000,000 |
 
 ---
 
 ## 👤 คำสั่งจัดการโปรไฟล์ CLI (Profile Manager CLI)
 
-เซิร์ฟเวอร์มีชุดคำสั่งจัดการโปรไฟล์ในตัวอย่างครบครัน:
+CLI ของทั้งสองรุ่นทำงานกับที่เก็บโปรไฟล์ชุดเดียวกัน จึงใช้สลับกันได้
 
-| คำสั่ง | คำสั่งลัด | คำอธิบายการทำงาน |
+| งาน | Python | Node.js |
 | :--- | :--- | :--- |
-| `python3 antigravity_bridge.py profile list` | `profiles` | แสดงตารางโปรไฟล์ อีเมล บัญชี สถานะ Cooldown โควตา และจำนวนคิว |
-| `python3 antigravity_bridge.py profile login <ชื่อ>` | `login <ชื่อ>` | ล็อกอินและเพิ่มโปรไฟล์บัญชี Google ใหม่ |
-| `python3 antigravity_bridge.py profile test [ชื่อ]` | - | ส่งคำขอทดสอบความพร้อมของโควตาและการตอบสนองของโมเดล |
-| `python3 antigravity_bridge.py profile set <p1,p2>` | `profile order` | ปรับเปลี่ยนลำดับการสลับโปรไฟล์แบบ Live ทันที |
-| `python3 antigravity_bridge.py profile disable <ชื่อ>` | - | ปิดการใช้งานโปรไฟล์แบบถาวร (คงสถานะปิดไว้แม้รีสตาร์ท Service จนกว่าจะเปิดใหม่) |
-| `python3 antigravity_bridge.py profile enable <ชื่อ>` | - | เปิดใช้งานโปรไฟล์ที่เคยปิดไว้กลับคืนมา |
-| `python3 antigravity_bridge.py profile reset [ชื่อ]` | - | รีเซ็ตสถานะ Cooldown และเคลียร์สถานะ Exhausted |
-| `python3 antigravity_bridge.py profile refresh [ชื่อ]` | - | บังคับรีเฟรช OAuth Token กับทาง Google โดยตรง |
-| `python3 antigravity_bridge.py profile sync <user@vps>` | - | คัดลอกโปรไฟล์ทั้งหมดไปยัง VPS ปลายทางผ่าน SSH |
-| `python3 antigravity_bridge.py profile copy <ชื่อ> <vps>` | - | คัดลอกโปรไฟล์เดียวไปยังเครื่องปลายทางผ่าน SCP |
-| `python3 antigravity_bridge.py profile remove <ชื่อ>` | - | ลบโฟลเดอร์โปรไฟล์ที่ไม่ได้ใช้ออกจากระบบ |
-| `python3 antigravity_bridge.py doctor` | `diag` | ตรวจสุขภาพระบบ (เช็ค IP, Proxy, ตรวจสอบ Token และล้างไฟล์ขยะ) |
+| แสดงโปรไฟล์, อีเมล, lease, cooldown, โควตา | `python3 antigravity_bridge.py profile list` (ย่อ `profiles`) | `node src/index.mjs profile list` |
+| Login / ลงทะเบียนโปรไฟล์ Google ใหม่ | `python3 antigravity_bridge.py login <name>` | — (ใช้คำสั่งของ Python) |
+| ทดสอบโควตาและการตอบสนองของโมเดล | `python3 antigravity_bridge.py profile test [name]` | `node src/index.mjs profile probe [name]` |
+| กำหนด pool และลำดับการหมุนเวียน | `python3 antigravity_bridge.py profile set p1,p2` (ย่อ `order`) | `node src/index.mjs profile set p1,p2` (ย่อ `order`) |
+| ปิด / เปิดโปรไฟล์แบบถาวร | `profile disable <name>` / `profile enable <name>` | `profile disable <name>` / `profile enable <name>` |
+| รีเซ็ต cooldown และสถานะ exhausted | `profile reset [name]` | `profile reset [name]` |
+| บังคับรีเฟรช OAuth token | `profile refresh [name]` | `profile refresh [name]` |
+| Sync โปรไฟล์ไปเครื่องอื่นผ่าน SSH | `profile sync <user@vps>` | — |
+| คัดลอกโปรไฟล์เดียวผ่าน SCP / ลบโปรไฟล์ | `profile copy <name> <vps>` / `profile remove <name>` | — |
+| Sync token ของโปรไฟล์เข้า credential store ของระบบ | — | `profile sync <name>` |
+| วินิจฉัย (IP, proxy, token, ล้าง lock) | `python3 antigravity_bridge.py doctor` (ย่อ `diag`) | — |
 
 ---
 
-## 🔑 คำสั่งจัดการ API Key สำหรับ Agent (API Key Manager CLI)
+## 🔑 คำสั่งจัดการ API Key (API Key Manager CLI)
 
-Antigravity Bridge รองรับระบบ **Multiple API Keys** เพื่อแยก Agent แต่ละตัว (เช่น Cursor, Hermes, Cline, Claude Dev) และบันทึกลงในไฟล์ `.env` ให้อัตโนมัติ:
+Key ถูกเก็บใน `.env` รุ่น Python อ่านและเขียน `ANTIGRAVITY_BRIDGE_API_KEYS` ส่วนรุ่น Node.js ใช้ `ANTIGRAVITY_API_KEYS` ทั้งคู่ใช้รูปแบบ `label:key,label2:key2` เหมือนกัน
 
-| คำสั่ง | คำสั่งลัด Standalone | คำอธิบายการทำงาน |
+| งาน | Python | Node.js |
 | :--- | :--- | :--- |
-| `python3 antigravity_bridge.py key list` | `python3 manage_keys.py list` | แสดงตารางรายชื่อ API Key, Label ของ Agent และสถานะการใช้งาน |
-| `python3 antigravity_bridge.py key create <ชื่อ>` | `python3 manage_keys.py create <ชื่อ>` | สร้างรหัส API Key ปลอดภัยแบบสุ่มและบันทึกลงใน `.env` ทันที |
-| `python3 antigravity_bridge.py key add <ชื่อ> <key>` | `python3 manage_keys.py add <ชื่อ> <key>` | เพิ่ม API Key ที่มีอยู่เดิมพร้อมกำหนดชื่อ Label ลงใน `.env` |
-| `python3 antigravity_bridge.py key revoke <ชื่อ\|key>` | `python3 manage_keys.py revoke <ชื่อ\|key>` | เพิกถอนและลบ API Key ออกจากไฟล์ `.env` |
-| `python3 antigravity_bridge.py key test <key>` | `python3 manage_keys.py test <key>` | ทดสอบส่งคำขอตรวจสอบความถูกต้องของ API Key กับเซิร์ฟเวอร์ที่กำลังรันอยู่ |
+| แสดง key และ label | `python3 antigravity_bridge.py key list` หรือ `python3 manage_keys.py list` | `node src/index.mjs key list` |
+| สร้าง key สุ่มใหม่ | `key create <label>` (ย่อ `generate`) | `key generate <label>` (ย่อ `create`) |
+| ลงทะเบียน key ที่มีอยู่แล้ว | `key add <label> <key>` / `manage_keys.py add` | — |
+| ยกเลิก key | `key revoke <label\|key>` | `key revoke <label>` |
+| ทดสอบ key กับเซิร์ฟเวอร์ที่รันอยู่ | `key test <key>` / `manage_keys.py test <key>` | `curl -H "Authorization: Bearer <key>" http://127.0.0.1:8008/health` |
 
-### ตัวอย่างการตั้งค่าใน `.env`:
-```bash
-# กำหนด Multiple API Keys พร้อมชื่อ Agent แต่ละตัว
-ANTIGRAVITY_BRIDGE_API_KEYS=agent-cursor:sk-agv-a1b2c3d4,agent-hermes:sk-agv-e5f6g7h8,team-dev:sk-agv-99887766
+```ini
+# รุ่น Python
+ANTIGRAVITY_BRIDGE_API_KEYS=agent-cursor:sk-agv-a1b2c3d4,agent-hermes:sk-agv-e5f6g7h8
+# รุ่น Node.js
+ANTIGRAVITY_API_KEYS=agent-cursor:sk-agv-a1b2c3d4,agent-hermes:sk-agv-e5f6g7h8
 ```
+
+ทั้งสองรุ่นยังมี `GET /v1/keys`, `POST /v1/keys/create` และ `POST /v1/keys/revoke` สำหรับทำงานเดียวกันผ่าน HTTP (ต้อง auth)
 
 ---
 
 ## 📡 รายละเอียด REST API Endpoints
 
+Endpoint ด้านล่างเหมือนกันทั้งสองรุ่น ต่างกันเพียงพอร์ต ตัวอย่างใช้ `8000` เปลี่ยนเป็น `8008` สำหรับ Node.js
+
 ### 1. ตรวจสอบสถานะเซิร์ฟเวอร์ (`GET /health`)
 ```bash
-curl http://127.0.0.1:8000/health                                   # → {"status":"ok","service":"antigravity-bridge","auth_required":true}
-curl -H "Authorization: Bearer sk-agv-..." http://127.0.0.1:8000/health   # สถานะเต็มตามด้านล่าง
+curl http://127.0.0.1:8000/health                                        # → {"status":"ok","service":"antigravity-bridge","auth_required":true}
+curl -H "Authorization: Bearer sk-agv-..." http://127.0.0.1:8000/health  # สถานะเต็มตามด้านล่าง
 ```
 ```json
 {
-  status: ok,
-  service: antigravity-bridge,
-  active_profile: profile_1,
-  concurrency: {
-    active_in_flight: 0,
-    max_pool_capacity: 28,
-    concurrency_per_profile: 2
-  },
-  profiles: {
-    profile_1: {
-      status: OK,
-      in_flight: 0,
-      max_concurrency: 2,
-      cooldown_seconds_remaining: 0,
-      estimated_quota_percent: 100,
-      success_count: 42,
-      google_account: user@gmail.com
+  "status": "ok",
+  "service": "antigravity-bridge",
+  "active_profile": "profile_1",
+  "concurrency": { "active_in_flight": 0, "max_pool_capacity": 28, "concurrency_per_profile": 2 },
+  "profiles": {
+    "profile_1": {
+      "status": "OK",
+      "in_flight": 0,
+      "max_concurrency": 2,
+      "cooldown_seconds_remaining": 0,
+      "estimated_quota_percent": 100,
+      "success_count": 42,
+      "google_account": "user@gmail.com"
     }
   }
 }
@@ -314,114 +344,116 @@ curl -H "Authorization: Bearer sk-agv-..." http://127.0.0.1:8000/health   # ส�
 
 ### 2. แสดงรายชื่อโมเดล (`GET /v1/models`)
 ```bash
-curl http://127.0.0.1:8000/v1/models   -H "Authorization: Bearer sk-antigravity"
+curl http://127.0.0.1:8000/v1/models -H "Authorization: Bearer sk-antigravity"
 ```
 
-### 3. ส่งคำขอ OpenAI Chat Completions (`POST /v1/chat/completions`)
-
-#### แบบสตรีมมิ่ง (Streaming SSE):
+### 3. OpenAI Chat Completions (`POST /v1/chat/completions`)
 ```bash
-curl -N -X POST http://127.0.0.1:8000/v1/chat/completions   -H "Content-Type: application/json"   -H "Authorization: Bearer sk-antigravity"   -d '{
+curl -N -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{
     "model": "gemini-3.7-flash-high",
-    "messages": [
-      {"role": "user", "content": "อธิบายสถาปัตยกรรม Microservices สั้นๆ 3 ข้อ"}
-    ],
+    "messages": [{"role": "user", "content": "อธิบาย async concurrency ใน Python"}],
     "stream": true
   }'
 ```
 
-### 4. ส่งคำขอ Anthropic Messages (`POST /v1/messages`)
+### 4. Anthropic Messages (`POST /v1/messages`)
 ```bash
-curl -X POST http://127.0.0.1:8000/v1/messages   -H "Content-Type: application/json"   -H "x-api-key: sk-antigravity"   -H "anthropic-version: 2023-06-01"   -d '{
+curl -X POST http://127.0.0.1:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: sk-antigravity" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
     "model": "claude-sonnet-4.6-thinking",
-    "system": "คุณคือผู้เชี่ยวชาญด้านการออกแบบระบบ",
-    "messages": [
-      {"role": "user", "content": "เปรียบเทียบ Redis กับ Memcached"}
-    ]
+    "system": "You are a senior systems engineer.",
+    "messages": [{"role": "user", "content": "เปรียบเทียบ Redis กับ Memcached"}]
   }'
 ```
 
 ### 5. สั่งสร้างรูปภาพ (`POST /v1/images/generations`)
 ```bash
-curl -X POST http://127.0.0.1:8000/v1/images/generations   -H "Content-Type: application/json"   -H "Authorization: Bearer sk-antigravity"   -d '{
+curl -X POST http://127.0.0.1:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{
     "model": "imagen-3.0-generate-002",
-    "prompt": "A cybernetic dragon flying over futuristic Bangkok skyline at night, 8k photorealistic",
+    "prompt": "A cybernetic dragon flying over neon Tokyo, photorealistic 8k",
     "size": "1024x1024",
     "n": 1
   }'
 ```
 
-### 6. API จัดการสถานะโปรไฟล์แบบเรียลไทม์ (`/v1/profiles/*`)
-- `GET /v1/profiles` — ดูสถานะและสถิติของทุกโปรไฟล์
-- `POST /v1/profiles/reset` — สั่งปลดล็อค Cooldown (`{"profile": "profile_1"}`)
-- `POST /v1/profiles/check` — สั่งทดสอบโควตาสด (`{"model": "gemini-3.7-flash"}`)
-- `POST /v1/profiles/config` — อัปเดตรายชื่อโปรไฟล์ที่ทำงานอยู่โดยไม่ต้องรีสตาร์ท (`{"profiles": ["p1", "p2"]}`)
-- `POST /v1/profiles/disable` — สั่งปิดโปรไฟล์ชั่วคราว (`{"profile": "p1"}`)
-- `POST /v1/profiles/enable` — สั่งเปิดใช้งานโปรไฟล์ (`{"profile": "p1"}`)
-
----
-
-## 🗄️ แบบเก็บถาวร: Web Extension Edition
-
-"Web Extension Edition" (Chrome extension + Docker/noVNC ที่ใช้ browser session เป็นช่องทางที่สองคู่กับ CLI)
-ถูกถอดออกจาก branch ที่ใช้งานเมื่อ 2026-09-15 แนวทางการออกแบบ โปรโตคอล และวิธี deploy ทั้งหมดถูกเก็บไว้ที่
-[docs/WEB_EXTENSION_BRIDGE_APPROACH.md](docs/WEB_EXTENSION_BRIDGE_APPROACH.md) ส่วนโค้ดเก็บเป็น git bundle / tarball นอก repo (ดูส่วนที่ 8 ของเอกสารนั้น)
+### 6. API จัดการโปรไฟล์ (`/v1/profiles/*`)
+- `GET /v1/profiles` — แสดง metric ของทุกโปรไฟล์
+- `POST /v1/profiles/reset` — รีเซ็ต cooldown (`{"profile": "profile_1"}`)
+- `POST /v1/profiles/check` — สั่งตรวจโควตาแบบ active (`{"model": "gemini-3.7-flash"}`)
+- `POST /v1/profiles/config` — โหลดลำดับการหมุนเวียนใหม่ทันที (`{"profiles": ["p1", "p2"]}`)
+- `POST /v1/profiles/disable` / `POST /v1/profiles/enable` — ปิด/เปิดโปรไฟล์ (`{"profile": "p1"}`)
+- `GET /v1/config` — ค่าคอนฟิกที่มีผลอยู่ปัจจุบัน
 
 ---
 
 ## 🔒 โมเดลความปลอดภัย (Security Model)
 
-Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดังนั้น **ใครก็ตามที่เข้าถึงพอร์ตได้จะสั่งให้ agent รันคำสั่งและเขียนไฟล์บนเครื่องนี้ได้** ให้ปฏิบัติกับพอร์ตนี้เหมือนสิทธิ์ SSH
+Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดังนั้น **ใครก็ตามที่เข้าถึงพอร์ตได้ สามารถสั่งให้ agent รันคำสั่งและเขียนไฟล์บนเครื่องนี้ได้** ให้ปฏิบัติกับพอร์ตนี้เหมือน SSH การควบคุมด้านล่างใช้กับทั้งสองรุ่น
 
-| การป้องกัน | ค่าเริ่มต้น | หมายเหตุ |
+| การควบคุม | ค่าเริ่มต้น | หมายเหตุ |
 | :--- | :---: | :--- |
-| API key auth | แนะนำอย่างยิ่ง | ถ้าไม่มี key เซิร์ฟเวอร์จะเริ่มในโหมด anonymous พร้อมแจ้งเตือน ทุก endpoint จะเปิดให้ใครก็ตามที่เข้าถึงพอร์ตได้ |
-| การส่ง key | Header เท่านั้น | `Authorization: Bearer`, `x-api-key` หรือ `api-key` **ไม่รับ** key ผ่าน query string ใน URL |
-| การเทียบ key | Constant-time | ต้องตรงกับ key ที่ตั้งไว้แบบเป๊ะเท่านั้น |
-| Bind address | `127.0.0.1` | การ bind `0.0.0.0` เปิด agent ออก network ถ้าจำเป็นให้วางหลัง reverse proxy ที่มี TLS |
-| Host header | Allow-list | loopback + host ที่ bind + `ANTIGRAVITY_ALLOWED_HOSTS` กัน DNS-rebinding จากเว็บเพจ |
-| CORS | **ปิด** | `--enable-cors` จะส่ง `Access-Control-Allow-Origin: *` เปิดเฉพาะเมื่อมี browser client ที่คุณควบคุมเอง |
-| `/health` | Liveness เท่านั้น | ผู้เรียกที่ไม่มี key ได้แค่ `{"status":"ok"}` รายละเอียดโปรไฟล์ต้องใช้ key |
-| ไฟล์ token | `0600` | OAuth token, `.env` และ quota cache เขียนแบบ owner-only และส่งค่าเข้า Keychain ผ่าน stdin ไม่ใช่ argv |
-| ชื่อโปรไฟล์ | `[A-Za-z0-9._-]` | ตรวจสอบทุก endpoint และ CLI (ห้าม `..`, `/`, control characters) |
-| การใช้ tool ของ agy | **บล็อก** | โหมด API: prompt สั่งไม่ให้ใช้ tool ของ agy และถ้า agy เริ่ม tool step อยู่ดี bridge จะ kill ภายใน 1 วินาที แล้วลองใหม่ 1 ครั้งบน profile เดิมพร้อมข้อความเตือนซ้ำ (`ANTIGRAVITY_TOOL_BLOCK_RETRIES` ค่าเริ่มต้น `1`) ถ้ายังใช้ tool อีกจึงตอบ error ชัดเจน ตั้ง `ANTIGRAVITY_ALLOW_CLI_TOOLS=1` ถ้าต้องการให้ agy ทำงานแบบ agent หรือตั้ง `ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1` เพื่ออนุญาตแค่ให้ agy อ่าน log บทสนทนาของตัวเองในรอบนั้น (agy จะชี้ให้โมเดลอ่านไฟล์นี้เมื่อ prompt ใหญ่เกินหนึ่งเทิร์น) |
-| Client ตัดการเชื่อมต่อ | ยกเลิก CLI | เมื่อ client ปิดการเชื่อมต่อ (เช่น Hermes `/stop`) bridge จะ kill agy ทันที ไม่ปล่อยให้รันต่อ |
+| API key auth | แนะนำ | ไม่มี key เซิร์ฟเวอร์จะเริ่มในโหมด anonymous พร้อมแจ้งเตือน ทุก endpoint จะเปิดให้ทุกคนที่เข้าถึงพอร์ตได้ |
+| ช่องทางส่ง key | Header เท่านั้น | `Authorization: Bearer`, `x-api-key` หรือ `api-key` **ไม่รับ** key ใน query string |
+| การเปรียบเทียบ key | Constant-time | ต้องตรงกับ key ที่ตั้งไว้เท่านั้น |
+| Bind address | `127.0.0.1` | การ bind `0.0.0.0` เปิด agent สู่เครือข่าย ถ้าจำเป็นให้วางหลัง reverse proxy ที่มี TLS |
+| Host header | Allow-list | Loopback + bind host และ `ANTIGRAVITY_ALLOWED_HOSTS` ป้องกัน DNS-rebinding จากหน้าเว็บ |
+| CORS | **ปิด** | `--enable-cors` ส่ง `Access-Control-Allow-Origin: *` เปิดเฉพาะกับ browser client ที่คุณควบคุมเอง |
+| `/health` | Liveness เท่านั้น | ไม่มี key จะได้แค่ `{"status":"ok"}` รายละเอียดโปรไฟล์ต้องใช้ key |
+| ไฟล์ token | `0600` | OAuth token, `.env` และ quota cache ถูกเขียนแบบเจ้าของอ่านได้คนเดียว การเขียน Keychain ส่งผ่าน stdin ไม่ใช่ argv |
+| ชื่อโปรไฟล์ | `[A-Za-z0-9._-]` | ตรวจสอบทุก endpoint และ CLI (ห้าม `..`, `/`, control character) |
+| การใช้ tool ของ agy | **บล็อก** | โหมด API: prompt บอกโมเดลไม่ให้ใช้ tool ของ agy หาก agy ยังเริ่ม tool step จะถูก kill ภายในหนึ่งวินาที แล้ว retry หนึ่งครั้งบนโปรไฟล์เดิมพร้อมข้อความย้ำห้ามใช้ tool (`ANTIGRAVITY_TOOL_BLOCK_RETRIES`, ค่าเริ่มต้น `1`) จากนั้นจึงล้มเหลวพร้อม error ที่ชัดเจน `ANTIGRAVITY_ALLOW_CLI_TOOLS=1` เปิดโหมด agentic กลับมา มีตัวเลือกแคบกว่าหนึ่งตัวคือ `ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1` อนุญาตให้ agy อ่านเฉพาะ log บทสนทนาที่มันเขียนเองระหว่างรัน (agy ชี้โมเดลไปอ่านไฟล์นี้เมื่อ prompt ใหญ่เกินหนึ่ง turn) |
+| Client ตัดการเชื่อมต่อ | ยกเลิก CLI | เมื่อ client ปิด connection (เช่น Hermes `/stop`) process ของ agy จะถูก kill แทนที่จะรันต่อ |
 
 ---
 
 ## ⚙️ การตั้งค่าและตัวแปรสภาพแวดล้อม (Environment Variables)
 
-### ตัวแปรในไฟล์ `.env`
+ใช้ร่วมกันทั้งสองรุ่น ยกเว้นที่ระบุว่าเป็นของรุ่นใดรุ่นหนึ่ง
 
-| ตัวแปร | ประเภท | ค่าเริ่มต้น | คำอธิบาย |
-| :--- | :---: | :---: | :--- |
-| **`ANTIGRAVITY_HOST`** | `str` | `127.0.0.1` | IP Interface ที่เซิร์ฟเวอร์จะเปิดรับคำขอ (`0.0.0.0` เพื่อรับจากทุก IP) |
-| **`ANTIGRAVITY_PORT`** | `int` | `8000` | หมายเลขพอร์ตที่เปิดให้บริการ |
-| **`ANTIGRAVITY_PROFILE_CONCURRENCY`** | `int` | `1` | จำนวนคำขอพร้อมกันสูงสุดต่อโปรไฟล์ (เช่น `2` เพื่อเพิ่ม Throughput) |
-| **`ANTIGRAVITY_PROFILES`** | `str` | *Auto* | รายชื่อโปรไฟล์ที่ต้องการหมุนเวียน (คั่นด้วยจุลภาค) |
-| **`ANTIGRAVITY_BRIDGE_API_KEYS`** | `str` | `None` | กำหนด API Key หลายตัวพร้อมชื่อ Agent (`agent-1:sk-xxx,agent-2:sk-yyy`) |
-| **`ANTIGRAVITY_BRIDGE_API_KEY`** | `str` | `None` | API Key เดี่ยวที่บังคับให้ Client ต้องแนบมาเพื่อความปลอดภัย |
-| **`ANTIGRAVITY_ALLOWED_HOSTS`** | `str` | `None` | ค่า `Host` header เพิ่มเติมที่ยอมรับ นอกเหนือจาก loopback และ host ที่ bind |
-| **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อซ่อนข้อความสรุปโปรไฟล์/โควตาที่ท้ายคำตอบของโมเดล |
-| **`ANTIGRAVITY_NO_PROXY`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบตรวจจับ Proxy และต่อเน็ตโดยตรง |
-| **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่อปิดระบบเบื้องหลังที่รีเฟรช Token ทุก 55 นาที |
-| **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่ออนุญาตให้ agy ใช้ tool ของตัวเอง (terminal/ไฟล์/browser) ระหว่างตอบ API ค่า 0 = เป็น model gateway ล้วน ๆ และจะ kill ทันทีที่เจอ tool step |
-| **`ANTIGRAVITY_TOOL_BLOCK_RETRIES`** | `int` | `1` | จำนวนครั้งที่ลองใหม่บน profile เดิมเมื่อ agy โดน block เพราะใช้ tool ของตัวเอง โดยแปะข้อความเตือนซ้ำท้าย prompt ตั้ง `0` เพื่อปิด และจะไม่ลองใหม่ถ้าเริ่ม stream ข้อความไปให้ client แล้ว |
-| **`ANTIGRAVITY_ALLOW_TRANSCRIPT_READS`** | `int/bool`| `0` | ตั้งเป็น `1` เพื่ออนุญาตให้ agy อ่านเฉพาะ log บทสนทนาของตัวเองในรอบปัจจุบัน (`<sandbox>/.gemini/antigravity-cli/brain/<conversation>/…` เช่น `transcript_full.jsonl`) agy จะทำแบบนี้เมื่อ prompt ใหญ่เกินหนึ่งเทิร์น ถ้าบล็อกไว้ run จะตายพร้อม error `CLI tool execution blocked … view_file …` อนุญาตเฉพาะ tool อ่านอย่างเดียวและเฉพาะโฟลเดอร์บทสนทนาของรอบนี้ ส่วนคำสั่ง การเขียนไฟล์ และบทสนทนาอื่นยังถูกบล็อก |
-| **`ANTIGRAVITY_MAX_CLI_ARG_BYTES`** | `int` | `120000` | ขนาด prompt สูงสุดที่ส่งเป็น argument (Linux จำกัด 131072 bytes ต่อ argument) ถ้าใหญ่กว่านี้จะส่งให้ agy ทาง stdin แบบ NDJSON (`--input-format stream-json`) ได้ถึง `ANTIGRAVITY_MAX_STDIN_PROMPT_BYTES` (2 MB) |
-| **`ANTIGRAVITY_MAX_PROMPT_CHARS`** | `int` | `200000` | งบ context (UTF-8 bytes ภาษาไทย 3 bytes/ตัวอักษร) ที่ส่งให้ agy ถ้าไม่เกินงบจะไม่ตัดอะไรเลย ถ้าเกินจะย่อ tool result เก่าเหลือ `ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS` (2000) และรายการล่าสุดเหลือ `ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS` (20000) |
-| **`ANTIGRAVITY_STALL_TIMEOUT`** | `float` | `600` | จำนวนวินาทีที่ CLI เงียบก่อนจะยกเลิกรอบนั้น agy จะไม่พิมพ์อะไรเลยระหว่างโมเดลคิด (thinking) จึงควรตั้งไว้สูง ตัวกันจริงคือ profile timeout (600 วินาที) |
-| **`GEMINI_API_KEY`** | `str` | `None` | Google AI Studio Key สำหรับสร้างภาพด้วย Imagen 3 โดยตรง |
-| **`ANTIGRAVITY_IMAGE_ROUTER_URL`** | `str` | *9router* | URL สำหรับเกตเวย์สร้างภาพภายนอก |
+| ตัวแปร | ค่าเริ่มต้น | คำอธิบาย |
+| :--- | :---: | :--- |
+| **`ANTIGRAVITY_HOST`** | `127.0.0.1` | Interface ที่ bind (`0.0.0.0` สำหรับทุก interface) |
+| **`ANTIGRAVITY_PORT`** | `8000` / `8008` | พอร์ตที่รับฟัง Node รับ `PORT` / `BRIDGE_PORT` ด้วย |
+| **`ANTIGRAVITY_PROFILE_CONCURRENCY`** | `1` | **Python เท่านั้น** จำนวนคำขอพร้อมกันสูงสุดต่อโปรไฟล์ |
+| **`ANTIGRAVITY_CONCURRENCY_PER_PROFILE`** | `1` | **Node.js เท่านั้น** ความหมายเดียวกัน |
+| **`ANTIGRAVITY_PROFILES`** | *อัตโนมัติ* | รายชื่อโปรไฟล์ที่จะหมุนเวียน คั่นด้วยจุลภาค |
+| **`ANTIGRAVITY_PROFILE`** | — | ล็อกให้ใช้โปรไฟล์เดียว |
+| **`ANTIGRAVITY_DISABLED_PROFILES`** | — | โปรไฟล์ที่ไม่เอาเข้าการหมุนเวียนและ fallback |
+| **`ANTIGRAVITY_BRIDGE_API_KEYS`** / **`ANTIGRAVITY_BRIDGE_API_KEY`** | — | **Python เท่านั้น** รายการ key พร้อม label / key เดี่ยว |
+| **`ANTIGRAVITY_API_KEYS`** / **`ANTIGRAVITY_API_KEY`** | — | **Node.js เท่านั้น** รายการ key พร้อม label / key เดี่ยว (อ่าน `BRIDGE_API_KEYS`, `API_KEYS` ด้วย) |
+| **`ANTIGRAVITY_ALLOWED_HOSTS`** | — | ค่า `Host` header เพิ่มเติมที่ยอมรับ นอกเหนือจาก loopback และ bind host |
+| **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | `0` | `1` ซ่อน footer สถานะโปรไฟล์ในคำตอบของ AI |
+| **`ANTIGRAVITY_NO_PROXY`** | `0` | `1` ปิดการตรวจจับ proxy อัตโนมัติ |
+| **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `0` | `1` ปิด daemon รีเฟรช OAuth ทุก 55 นาที |
+| **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `0` | `1` อนุญาตให้ agy รัน tool ของตัวเอง (terminal/ไฟล์/เบราว์เซอร์) ระหว่างคำขอ API |
+| **`ANTIGRAVITY_TOOL_BLOCK_RETRIES`** | `1` | จำนวนครั้งที่ retry การรันที่ถูกบล็อกเพราะ tool บนโปรไฟล์เดิมพร้อมข้อความย้ำห้ามใช้ tool `0` ปิด จะข้ามเมื่อมีข้อความสตรีมออกไปแล้ว |
+| **`ANTIGRAVITY_ALLOW_TRANSCRIPT_READS`** | `0` | `1` อนุญาตให้ agy อ่านเฉพาะ log บทสนทนาของการรันปัจจุบัน (`<sandbox>/.gemini/antigravity-cli/brain/<conversation>/…`) คำสั่ง การเขียน และบทสนทนาอื่นยังถูกบล็อก |
+| **`ANTIGRAVITY_MAX_CLI_ARG_BYTES`** | `120000` | ขนาด prompt สูงสุดที่ส่งเป็น CLI argument ใหญ่กว่านี้จะส่งผ่าน stdin เป็น NDJSON ได้ถึง `ANTIGRAVITY_MAX_STDIN_PROMPT_BYTES` (2 MB) |
+| **`ANTIGRAVITY_MAX_PROMPT_CHARS`** | `200000` | งบ context (UTF-8 bytes) เมื่อเกิน ผลลัพธ์ tool เก่าจะถูกบีบเหลือ `ANTIGRAVITY_OLD_TOOL_OUTPUT_CHARS` (2000) และของล่าสุดเหลือ `ANTIGRAVITY_RECENT_TOOL_OUTPUT_CHARS` (20000) |
+| **`ANTIGRAVITY_PROFILE_TIMEOUT`** / **`ANTIGRAVITY_TOTAL_TIMEOUT`** | `600` / `1800` | วินาทีต่อการลองหนึ่งโปรไฟล์ / งบเวลารวมของ fallback |
+| **`ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT`** / **`ANTIGRAVITY_MAX_TOTAL_TIMEOUT`** | `900` / `3600` | เพดานของ timeout ที่ขยายอัตโนมัติและที่ client ขอ |
+| **`ANTIGRAVITY_STALL_TIMEOUT`** | `600` | วินาทีที่ CLI เงียบก่อนยกเลิกการรัน โมเดลที่คิดนานจะไม่พิมพ์อะไรระหว่างคิด จึงควรตั้งสูง |
+| **`ANTIGRAVITY_FALLBACK_CHAIN`** / **`ANTIGRAVITY_MODEL_FALLBACK_ENABLED`** | — / `true` | ลำดับ fallback ระดับโมเดลเมื่อ family หนึ่งติด cooldown |
+| **`ANTIGRAVITY_QUOTA_CACHE_FILE`** | `~/.config/antigravity/quota_cache.json` | ที่เก็บสถานะโควตา ควรแยกไฟล์ต่อรุ่นเมื่อรันทั้งสองรุ่น |
+| **`ANTIGRAVITY_SANDBOX_BASE`** | `~/.config/antigravity/sandboxes` | Root ของ sandbox ต่อโปรไฟล์ ควรแยกต่อรุ่นเมื่อรันทั้งสองรุ่น |
+| **`ANTIGRAVITY_BRIDGE_CMD`** | *อัตโนมัติ* | Template คำสั่ง CLI แบบกำหนดเอง (หรือ `--cmd`) |
+| **`GEMINI_API_KEY`** | — | Google AI Studio key สำหรับ Imagen 3 โดยตรง |
+| **`ANTIGRAVITY_IMAGE_ROUTER_URL`** / **`ANTIGRAVITY_IMAGE_ROUTER_KEY`** | — | Image gateway ภายนอกที่เข้ากับ OpenAI |
 
 ---
 
 ## 🤖 การเชื่อมต่อกับ Hermes Agent (`config.yaml`)
 
-**Hermes Agent** สามารถเชื่อมต่อกับ Antigravity Bridge เพื่อใช้เป็น Custom OpenAI-Compatible Provider ที่รองรับทั้ง Real-time Streaming และ Tool/Function Calling เต็มรูปแบบ
-
-### 1. แก้ไขไฟล์คอนฟิก `config.yaml`
-เพิ่มบล็อก `agy-cli` ภายใต้ `custom_providers` ในไฟล์คอนฟิกของ Hermes (`~/.hermes/config.yaml` หรือ `~/.hermes/profiles/<ชื่อโปรไฟล์>/config.yaml`):
+**Hermes Agent** ใช้ Bridge เป็น custom provider แบบ OpenAI-compatible ได้ทั้ง streaming และ tool calling เพิ่ม provider ใต้ `custom_providers` ใน `~/.hermes/config.yaml` หรือ `~/.hermes/profiles/<profile>/config.yaml` ชี้ `api` ไปยังรุ่นที่รัน (`8000` Python, `8008` Node.js) จะกำหนด provider แยกต่อพอร์ตก็ได้
 
 ```yaml
 model:
@@ -431,7 +463,7 @@ model:
 custom_providers:
   agy-cli:
     api: http://127.0.0.1:8000/v1
-    api_key: sk-antigravity  # ตรงกับ ANTIGRAVITY_BRIDGE_API_KEY หรือใส่ข้อความใดๆ ก็ได้หากไม่ได้ตั้งรหัส
+    api_key: sk-antigravity  # key จากรายการ key ของรุ่นนั้น หรือค่าอะไรก็ได้ถ้าปิด auth
     name: Antigravity Multi-Profile Bridge
     models:
       gemini-3.7-flash-high:
@@ -452,26 +484,17 @@ custom_providers:
         context_length: 128000
 ```
 
-### 2. ตรวจสอบและสลับโมเดลผ่าน Hermes CLI
 ```bash
-# 1. ตรวจสอบรายชื่อโมเดลที่เชื่อมต่อได้:
-hermes models
-
-# 2. สลับโมเดลเริ่มต้น:
-hermes model set agy-cli/gemini-3.7-flash-high
-
-# 3. เริ่มต้นเปิดแชทโดยเรียกผ่าน Antigravity Bridge:
-hermes chat -m agy-cli/gemini-3.7-flash-high
+hermes models                                  # ดู custom model ที่โหลด
+hermes model set agy-cli/gemini-3.7-flash-high # ตั้งค่าเริ่มต้น
+hermes chat -m agy-cli/gemini-3.7-flash-high   # แชตผ่าน Bridge
 ```
 
 ---
 
 ## 🦞 การเชื่อมต่อกับ OpenClaw (`openclaw.json`)
 
-**OpenClaw** (Autonomous Agent Gateway & Multi-Channel Runtime) สามารถเชื่อมต่อกับ Antigravity Bridge ผ่านโครงสร้าง Custom OpenAI-Compatible Provider:
-
-### 1. แก้ไขไฟล์ `openclaw.json` (JSON5)
-แก้ไขไฟล์คอนฟิก (`~/.openclaw/openclaw.json` หรือพาธที่ระบุใน `OPENCLAW_CONFIG_PATH`):
+**OpenClaw** เชื่อมต่อกับ Bridge เป็น custom provider แบบ OpenAI-compatible แก้ไข `~/.openclaw/openclaw.json` (หรือ path ใน `OPENCLAW_CONFIG_PATH`):
 
 ```json5
 {
@@ -479,111 +502,56 @@ hermes chat -m agy-cli/gemini-3.7-flash-high
     "mode": "merge",
     "providers": {
       "antigravity": {
-        "baseUrl": "http://127.0.0.1:8000/v1",
-        "apiKey": "sk-antigravity", // รหัส API Key ที่ตั้งใน .env ของ Bridge
+        "baseUrl": "http://127.0.0.1:8000/v1",   // หรือ :8008 สำหรับรุ่น Node.js
+        "apiKey": "sk-antigravity",
         "api": "openai-completions",
         "models": [
-          {
-            "id": "gemini-3.7-flash-high",
-            "name": "Gemini 3.7 Flash (High Reasoning)",
-            "contextWindow": 1000000,
-            "maxTokens": 64000
-          },
-          {
-            "id": "gemini-3.7-flash-medium",
-            "name": "Gemini 3.7 Flash (Medium Reasoning)",
-            "contextWindow": 1000000,
-            "maxTokens": 64000
-          },
-          {
-            "id": "gemini-3.7-flash",
-            "name": "Gemini 3.7 Flash",
-            "contextWindow": 1000000,
-            "maxTokens": 64000
-          },
-          {
-            "id": "gemini-3.1-pro-high",
-            "name": "Gemini 3.1 Pro (High Reasoning)",
-            "contextWindow": 2000000,
-            "maxTokens": 64000
-          },
-          {
-            "id": "claude-sonnet-4.6-thinking",
-            "name": "Claude Sonnet 4.6 (Extended Thinking)",
-            "contextWindow": 200000,
-            "maxTokens": 64000
-          },
-          {
-            "id": "claude-opus-4.6-thinking",
-            "name": "Claude Opus 4.6 (Extended Thinking)",
-            "contextWindow": 200000,
-            "maxTokens": 64000
-          }
+          { "id": "gemini-3.7-flash-high",      "name": "Gemini 3.7 Flash (High Reasoning)",      "contextWindow": 1000000, "maxTokens": 64000 },
+          { "id": "gemini-3.7-flash-medium",    "name": "Gemini 3.7 Flash (Medium Reasoning)",    "contextWindow": 1000000, "maxTokens": 64000 },
+          { "id": "gemini-3.7-flash",           "name": "Gemini 3.7 Flash",                       "contextWindow": 1000000, "maxTokens": 64000 },
+          { "id": "gemini-3.1-pro-high",        "name": "Gemini 3.1 Pro (High Reasoning)",        "contextWindow": 2000000, "maxTokens": 64000 },
+          { "id": "claude-sonnet-4.6-thinking", "name": "Claude Sonnet 4.6 (Extended Thinking)",  "contextWindow": 200000,  "maxTokens": 64000 },
+          { "id": "claude-opus-4.6-thinking",   "name": "Claude Opus 4.6 (Extended Thinking)",    "contextWindow": 200000,  "maxTokens": 64000 }
         ]
       }
     }
   },
   "agents": {
     "defaults": {
-      "model": {
-        "primary": "antigravity/gemini-3.7-flash-high"
-      },
+      "model": { "primary": "antigravity/gemini-3.7-flash-high" },
       "models": {
-        "antigravity/gemini-3.7-flash-high": {
-          "alias": "gemini-flash"
-        },
-        "antigravity/claude-sonnet-4.6-thinking": {
-          "alias": "claude-sonnet"
-        }
+        "antigravity/gemini-3.7-flash-high":      { "alias": "gemini-flash" },
+        "antigravity/claude-sonnet-4.6-thinking": { "alias": "claude-sonnet" }
       }
     }
   }
 }
 ```
 
-### 2. ตั้งค่าผ่านคำสั่ง OpenClaw CLI
-สามารถใช้ CLI ของ OpenClaw ในการตั้งค่าได้โดยตรง:
-
+หรือผ่าน CLI:
 ```bash
-# 1. กำหนด Endpoint และ API Key ของ Custom Provider
 openclaw config set models.providers.antigravity.baseUrl "http://127.0.0.1:8000/v1"
 openclaw config set models.providers.antigravity.apiKey "sk-antigravity"
 openclaw config set models.providers.antigravity.api "openai-completions"
-
-# 2. ตั้งค่าโมเดลหลักที่ต้องการใช้งาน
 openclaw models set antigravity/gemini-3.7-flash-high
-
-# 3. ตรวจสอบความถูกต้องของคอนฟิกและเช็คโมเดล
-openclaw config validate
-openclaw models list
+openclaw config validate && openclaw models list
 ```
 
-### 3. สำหรับการรัน OpenClaw บน Docker (`openclaw-in-docker`)
-หากรัน OpenClaw อยู่ใน Docker Container ให้ชี้ Base URL ไปยัง IP ของ Host เครื่องหลัก:
-
-* **Linux Docker Host**: ชี้ไปที่ `http://172.17.0.1:8000/v1` หรือ `http://host.docker.internal:8000/v1` (โดยเพิ่ม `extra_hosts: ["host.docker.internal:host-gateway"]` ใน `docker-compose.yml`)
-* ในไฟล์ `.env` ของ OpenClaw Docker:
-  ```ini
-  OPENAI_BASE_URL=http://172.17.0.1:8000/v1
-  OPENAI_API_KEY=sk-antigravity
-  ```
+**OpenClaw บน Docker:** เข้าถึง host ด้วย `http://172.17.0.1:8000/v1` หรือ `http://host.docker.internal:8000/v1` (บน Linux เพิ่ม `extra_hosts: ["host.docker.internal:host-gateway"]`) เช่นตั้ง `OPENAI_BASE_URL=http://172.17.0.1:8000/v1` และ `OPENAI_API_KEY=sk-antigravity` ใน `.env` ของ container
 
 ---
 
-## 💻 ตัวอย่างการเขียนโค้ดเรียกใช้งาน (Client SDKs)
+## 💻 ตัวอย่างการเรียกใช้งานผ่าน SDK (Client SDKs)
 
 ### Python (OpenAI SDK)
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://127.0.0.1:8000/v1",
-    api_key="sk-antigravity"
-)
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="sk-antigravity")
 
 response = client.chat.completions.create(
     model="gemini-3.7-flash-high",
-    messages=[{"role": "user", "content": "อธิบายหลักการทำงานของ Event Loop ใน Python"}]
+    messages=[{"role": "user", "content": "อธิบาย event loop ของ Node.js เทียบกับ Python"}],
 )
 print(response.choices[0].message.content)
 ```
@@ -592,17 +560,28 @@ print(response.choices[0].message.content)
 ```python
 from anthropic import Anthropic
 
-client = Anthropic(
-    base_url="http://127.0.0.1:8000",
-    api_key="sk-antigravity"
-)
+client = Anthropic(base_url="http://127.0.0.1:8000", api_key="sk-antigravity")
 
 message = client.messages.create(
     model="claude-sonnet-4.6-thinking",
     max_tokens=1024,
-    messages=[{"role": "user", "content": "เขียนโค้ด Binary Search ด้วยภาษา Rust"}]
+    messages=[{"role": "user", "content": "เขียน binary search ด้วยภาษา Rust"}],
 )
 print(message.content[0].text)
+```
+
+### Node.js (OpenAI SDK)
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "http://127.0.0.1:8008/v1", apiKey: "sk-antigravity" });
+
+const stream = await client.chat.completions.create({
+  model: "gemini-3.7-flash-high",
+  messages: [{ role: "user", content: "สรุป CAP theorem" }],
+  stream: true,
+});
+for await (const chunk of stream) process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
 ```
 
 ### Python (กำหนด Timeout ยาวพิเศษ: 20–30 นาทีสำหรับ Prompt ขนาดใหญ่)
@@ -612,108 +591,139 @@ from openai import OpenAI
 client = OpenAI(
     base_url="http://127.0.0.1:8000/v1",
     api_key="sk-antigravity",
-    timeout=1800.0,  # 30 minutes client timeout
-    default_headers={"X-Profile-Timeout": "30m"}
+    timeout=1800.0,  # client timeout 30 นาที
+    default_headers={"X-Profile-Timeout": "30m"},
 )
 
 response = client.chat.completions.create(
     model="gemini-3.7-flash-high",
-    messages=[{"role": "user", "content": "ช่วยวิเคราะห์สถาปัตยกรรมและ Refactor โปรเจกต์ขนาด 100k tokens นี้อย่างละเอียด..."}],
-    extra_body={"profile_timeout": "30m"}
+    messages=[{"role": "user", "content": "วิเคราะห์และ refactor โค้ดทั้ง repository ขนาด 100k token นี้..."}],
+    extra_body={"profile_timeout": "30m"},
 )
 print(response.choices[0].message.content)
 ```
 
 ---
 
-## ⏱️ ตัวเลือกการระบุ Timeout และการจัดการ Prompt ขนาดใหญ่
+## ⏱️ ตัวเลือก Timeout และการจัดการ Prompt ขนาดใหญ่
 
-เมื่อประมวลผลงานที่มี Prompt ขนาดยาวมาก (เช่น การวิเคราะห์โค้ดหลายไฟล์พร้อมกัน หรืองานคิดวิเคราะห์เชิงลึก) คุณสามารถส่งคำขอเพิ่มเวลา Execution Timeout ได้สูงสุดถึง **2 ชั่วโมง** ผ่านช่องทางต่างๆ ดังนี้:
+สำหรับ prompt ขนาดใหญ่หรือการคิดที่ใช้เวลานาน คุณขอเวลาประมวลผลได้สูงสุด **2 ชั่วโมง** ด้วยวิธีใดวิธีหนึ่งด้านล่าง Bridge จะรายงานงบเวลาที่ใช้จริงใน response header `X-Antigravity-Profile-Timeout` และ `X-Antigravity-Total-Timeout` และจะขยายเวลาให้อัตโนมัติ (สูงสุด 60 นาที) สำหรับ prompt เกิน 10 KB เมื่อไม่ได้ระบุ
 
-| ช่องทางการส่ง (Method) | ตัวอย่าง (Example) |
+| วิธี | ตัวอย่าง |
 | :--- | :--- |
-| **HTTP Header** | `X-Profile-Timeout: 30m` หรือ `OpenAI-Timeout: 1800` หรือ `X-Execution-Timeout: 20m` |
-| **JSON Request Body** | `{"model": "gemini-3.7-flash-high", "profile_timeout": "30m", ...}` |
-| **ผ่าน `extra_body` ใน SDK** | `client.chat.completions.create(..., extra_body={"profile_timeout": "30m"})` |
-| **URL Query Parameter** | `POST http://127.0.0.1:8000/v1/chat/completions?timeout=30m` |
-| **ต่อท้ายชื่อ Model** | `model: "gemini-3.7-flash-high:timeout=30m"` หรือ `model: "gemini-3.7-flash-high:30m"` |
-| **ใส่ Directive ใน Prompt** | ใส่ `[antigravity:timeout=30m]` ไว้บรรทัดแรกของ Prompt หรือ System Message |
+| **HTTP header** | `X-Profile-Timeout: 30m`, `X-Execution-Timeout: 20m`, `OpenAI-Timeout: 1800`, `X-Timeout: 1800`, `Prefer: wait=1800` |
+| **JSON body** | `{"model": "gemini-3.7-flash-high", "profile_timeout": "30m", ...}` หรือ `"timeout": 1800` |
+| **`extra_body`** | `client.chat.completions.create(..., extra_body={"profile_timeout": "30m"})` |
+| **URL query** | `POST /v1/chat/completions?timeout=30m` หรือ `?profile_timeout=20m` |
+| **ต่อท้ายชื่อโมเดล** | `model: "gemini-3.7-flash-high:timeout=30m"`, `"gemini-3.7-flash-high:30m"`, `"gemini-3.7-flash?timeout=1800"` |
+| **Directive ใน prompt** | `[antigravity:timeout=30m]` หรือ `<!-- timeout: 30m -->` ไว้ต้น prompt หรือ system instruction |
 
 ---
 
-## 🚀 การติดตั้งเพื่อใช้งานจริงในระดับ Production
+## 🚀 การติดตั้งเพื่อใช้งานจริง (Production Deployment)
 
-### 1. ติดตั้งผ่าน Systemd (Linux)
-รันสคริปต์ติดตั้งอัตโนมัติ:
+### Systemd (Linux)
+แต่ละรุ่นมีสคริปต์ติดตั้งของตัวเอง รันจาก directory ของ repo ได้ทั้งสองตัว สคริปต์จะสร้าง unit ที่ชี้มาที่ checkout นี้ ดังนั้น clone เดียวให้บริการได้ทั้งสองพอร์ต
+
 ```bash
-chmod +x setup_systemd.sh
-./setup_systemd.sh
+./setup_systemd.sh          # antigravity-bridge.service      → Python, พอร์ต 8000
+./setup_systemd_node.sh     # antigravity-bridge-node.service → Node.js, พอร์ต 8008 (quota cache + sandbox root แยก)
+
+sudo systemctl status antigravity-bridge antigravity-bridge-node
+sudo systemctl restart antigravity-bridge-node
+sudo journalctl -u antigravity-bridge-node -f
 ```
 
-การจัดการเซอร์วิสผ่านคำสั่ง:
+การอัปเดตคือ `git pull --ff-only` ใน checkout แล้ว restart unit ที่เกี่ยวข้อง ควรรันชุดทดสอบก่อน ([การรันชุดทดสอบ](#-การรันชุดทดสอบ-unit-tests)) สำหรับรุ่น Python มี `safe_deploy.sh` ที่ครอบขั้นตอน stage → test → สลับไฟล์แบบ atomic → ตรวจ health → rollback (ดู `AGENTS.md`)
+
+### macOS (launchd) และ Windows — รุ่น Node.js
 ```bash
-sudo systemctl status antigravity-bridge
-sudo systemctl restart antigravity-bridge
-sudo journalctl -u antigravity-bridge -f
+./setup_launchd_mac.sh                # LaunchAgent สำหรับ node src/index.mjs
+```
+```powershell
+.\setup_service_windows.ps1           # Windows service
+.\run_windows.bat                     # หรือรัน foreground ธรรมดาที่พอร์ต 8008
 ```
 
-### 2. ตั้งค่า Nginx Reverse Proxy รองรับสตรีมมิ่ง
+### PM2 (ทุก OS) — รุ่น Node.js
+```bash
+npm install -g pm2
+pm2 start src/index.mjs --name antigravity-bridge -- --port 8008
+pm2 save && pm2 startup
+```
+
+### Nginx reverse proxy รองรับสตรีมมิ่ง
 ```nginx
 server {
     listen 80;
     server_name bridge.yourdomain.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8000;      # หรือ 8008
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
-        # ปิด Buffering และเพิ่ม Timeout สำหรับงานวิเคราะห์ยาวนาน
+        # จำเป็นสำหรับ SSE streaming และงานคิดนาน
         proxy_buffering off;
         proxy_read_timeout 1800s;
         proxy_send_timeout 1800s;
     }
 }
 ```
+เพิ่ม `bridge.yourdomain.com` ใน `ANTIGRAVITY_ALLOWED_HOSTS` เพื่อให้ allow-list ของ Host ยอมรับคำขอที่ผ่าน proxy
 
 ---
 
 ## 🔧 การแก้ไขปัญหาที่พบบ่อย (Troubleshooting & FAQ)
 
-### Q1: เพิ่มโปรไฟล์ใหม่แล้ว แต่ทำไมคำสั่ง `profiles` ไม่แสดงโปรไฟล์ใหม่?
-- **สาเหตุ**: หากมีไฟล์ `~/.config/antigravity/bridge_config.json` อยู่ ระบบจะล็อกรายชื่อโปรไฟล์ตามไฟล์นั้นแทนการสแกนหาโฟลเดอร์ใหม่
-- **วิธีแก้**: ลบไฟล์คอนฟิกล็อกทิ้งเพื่อให้ระบบสแกนหาโฟลเดอร์อัตโนมัติ:
+### Q1: เพิ่มโปรไฟล์ใหม่แล้ว แต่ `profile list` ไม่แสดง
+- **สาเหตุ:** ถ้ามีไฟล์ `~/.config/antigravity/bridge_config.json` Bridge จะล็อกรายชื่อโปรไฟล์ตามไฟล์นั้นแทนการสแกน folder
+- **วิธีแก้:**
   ```bash
   rm -f ~/.config/antigravity/bridge_config.json
-  python3 antigravity_bridge.py profiles
+  python3 antigravity_bridge.py profiles      # หรือ: node src/index.mjs profile list
   ```
 
-### Q2: ต้องการทดสอบว่า Token ของแต่ละโปรไฟล์ยังใช้งานได้หรือไม่ ทำอย่างไร?
-- **วิธีแก้**: ใช้คำสั่ง Diagnostic Doctor:
-  ```bash
-  python3 antigravity_bridge.py doctor
-  ```
+### Q2: ต้องการตรวจว่า OAuth token ของทุกบัญชียังใช้ได้หรือไม่
+```bash
+python3 antigravity_bridge.py doctor
+```
 
-### Q3: โปรไฟล์ติด Cooldown ค้าง ต้องการปลดล็อกทำอย่างไร?
-- **วิธีแก้**:
-  ```bash
-  python3 antigravity_bridge.py profile reset
-  ```
+### Q3: โปรไฟล์ติด cooldown ค้าง จะรีเซ็ตอย่างไร
+```bash
+python3 antigravity_bridge.py profile reset   # หรือ: node src/index.mjs profile reset
+```
+
+### Q4: ตั้ง API key แล้ว แต่อีกรุ่นยังตอบ `auth_required: false`
+แต่ละรุ่นอ่านตัวแปรของตัวเอง: Python ใช้ `ANTIGRAVITY_BRIDGE_API_KEYS`, Node.js ใช้ `ANTIGRAVITY_API_KEYS` ให้สร้าง key ด้วย CLI ของรุ่นนั้น (`key create` / `key generate`) หรือเพิ่มตัวแปรตัวที่สองลง `.env`
+
+### Q5: คำขอล้มเหลวด้วย `CLI tool execution blocked … view_file … transcript_full.jsonl`
+Prompt ใหญ่เกินหนึ่ง turn ของ agy และโมเดลพยายามอ่าน transcript ของ agy เอง ให้ลดขนาด prompt หรือตั้ง `ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1` เพื่ออนุญาตการอ่านแบบ read-only นี้เพียงอย่างเดียว (ดู [โมเดลความปลอดภัย](#-โมเดลความปลอดภัย-security-model))
 
 ---
 
 ## 🧪 การรันชุดทดสอบ (Unit Tests)
 
-รันชุดทดสอบครอบคลุมทุก Endpoint, ระบบสตรีมมิ่ง, การตัดข้อความ, อัลกอริทึมการกระจายงาน, การข้าม Cooldown, รองรับ Large Prompt และคำสั่ง CLI (**ผ่านครบ 25/25 tests**):
-
 ```bash
+# รุ่น Python (73 tests)
 python3 -m unittest test_antigravity_bridge.py -v
+
+# รุ่น Node.js (37 tests ใช้ node:test ไม่ต้องติดตั้ง dev dependency)
+npm test
 ```
+
+ทั้งสองชุดครอบคลุมการแปลง API, streaming, การเรียงลำดับโปรไฟล์, fallback routing, cooldown fast-fail, การส่ง prompt ขนาดใหญ่, การควบคุมความปลอดภัย และ CLI handler ชุดของ Node เขียนไฟล์เฉพาะใน `tests/.tmp-sandbox/`
+
+---
+
+## 🗄️ แบบเก็บถาวร: Web Extension Edition
+
+"Web Extension Edition" รุ่นก่อนหน้า (Chrome extension + Docker/noVNC browser session เป็นช่องทางที่สองควบคู่กับ CLI) ถูกถอดออกจาก branch ที่ใช้งานเมื่อ 2026-09-15 การออกแบบ โปรโตคอล และบันทึกการ deploy เก็บไว้ที่ [docs/WEB_EXTENSION_BRIDGE_APPROACH.md](docs/WEB_EXTENSION_BRIDGE_APPROACH.md) ส่วนโค้ดเก็บเป็น git bundle นอก repository (ดูหัวข้อ 8 ของเอกสารนั้น)
 
 ---
 
 ## 📄 สัญญาอนุญาต (License)
 
-โปรเจกต์นี้เผยแพร่ภายใต้สัญญาอนุญาต [MIT License](LICENSE)
+โปรเจกต์นี้ใช้สัญญาอนุญาต [MIT License](LICENSE)
