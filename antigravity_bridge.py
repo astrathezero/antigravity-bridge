@@ -424,6 +424,14 @@ def cli_tools_allowed() -> bool:
     return os.environ.get("ANTIGRAVITY_ALLOW_CLI_TOOLS", "").strip().lower() in ("1", "true", "yes")
 
 
+def own_transcript_reads_allowed() -> bool:
+    """Opt-in, narrower than ANTIGRAVITY_ALLOW_CLI_TOOLS: let agy read only the conversation log it writes
+    itself during the run (<sandbox>/.gemini/antigravity-cli/brain/<conversation>/...). With a large prompt agy
+    points the model at that transcript; blocked (the default), that run is killed and the request fails.
+    Set ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 to allow just those reads."""
+    return os.environ.get("ANTIGRAVITY_ALLOW_TRANSCRIPT_READS", "").strip().lower() in ("1", "true", "yes")
+
+
 API_MODE_PREAMBLE = (
     "[Bridge Mode: API backend]\n"
     "You are answering a request relayed by Antigravity Bridge. Behave as a plain language-model API:\n"
@@ -3251,6 +3259,9 @@ class AgyStreamOutput:
         self.error: Optional[str] = None
         self.raw_lines: List[str] = []
         self.tool_steps: List[str] = []
+        # (tool name, full parameters, summary) per tool step; last_tool is the most recent one.
+        self.tool_calls: List[Tuple[str, Dict[str, Any], str]] = []
+        self.last_tool: Optional[Tuple[str, Dict[str, Any]]] = None
 
     def feed_line(self, line: str) -> Tuple[str, Optional[str]]:
         """Consume one stdout line. Returns (kind, text): kind is 'delta' (text to forward),
@@ -3279,6 +3290,9 @@ class AgyStreamOutput:
                             params = ""
                         summary = f"{name} {params}".strip()
                         self.tool_steps.append(summary)
+                        parameters = info.get("parameters") if isinstance(info.get("parameters"), dict) else {}
+                        self.tool_calls.append((str(name), parameters, summary))
+                        self.last_tool = (str(name), parameters)
                         return "tool", summary
                 elif kind == "result" and isinstance(ev.get("result"), dict):
                     r = ev["result"]
@@ -3323,6 +3337,85 @@ def _invoke_output_callback(callback: Callable[..., None], text: str, kind: str)
         callback(text)
 
 
+# agy's read-only tools. Anything else (run_command, writes, browser, web, subagents) is never matched.
+READ_ONLY_CLI_TOOLS = frozenset({
+    "view_file", "view_file_outline", "view_code_item", "view_content_chunk",
+    "list_dir", "grep_search", "find_by_name",
+})
+
+_PATH_LIKE_RE = re.compile(r"^(/|~|\\\\|[A-Za-z]:[\\/])")
+
+
+def _collect_path_strings(value: Any, out: Optional[List[str]] = None) -> List[str]:
+    if out is None:
+        out = []
+    if isinstance(value, str):
+        if _PATH_LIKE_RE.match(value.strip()):
+            out.append(value.strip())
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _collect_path_strings(v, out)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _collect_path_strings(v, out)
+    return out
+
+
+TRANSCRIPT_READ_HINT = (
+    "This step was agy reading its own conversation log for this run (it does that when the prompt is too large "
+    "for one turn); ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 allows only that read, nothing else."
+)
+
+
+class OwnConversationReadPolicy:
+    """Recognises one kind of tool step: agy reading the conversation log it writes itself during this run.
+    With a large prompt agy hands the model a truncated view and points it at
+    <sandbox>/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript_full.jsonl; the model
+    then calls view_file on that path. Nothing runs on the host and nothing is written.
+
+    Matched: a read-only tool whose every path points inside a conversation directory that did not exist before
+    this run started (other clients' conversations in the same sandbox stay off-limits), plus view_content_chunk
+    once such a read happened (it pages through that same document). Such a step is let through only when
+    ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 (default: blocked like every other tool step, with a hint naming the switch)."""
+
+    def __init__(self, sandbox_dir: str, enabled: Optional[bool] = None):
+        self.enabled = own_transcript_reads_allowed() if enabled is None else bool(enabled)
+        self.brain_dir = os.path.realpath(os.path.join(sandbox_dir, ".gemini", "antigravity-cli", "brain"))
+        try:
+            self.preexisting: Set[str] = set(os.listdir(self.brain_dir))
+        except OSError:
+            # No brain directory yet: every conversation agy creates now belongs to this run.
+            self.preexisting = set()
+        self.allowed_reads = 0
+
+    def matches(self, name: str, params: Any) -> bool:
+        """True when the step is a read of this run's own conversation log (regardless of `enabled`)."""
+        if name not in READ_ONLY_CLI_TOOLS:
+            return False
+        paths = _collect_path_strings(params)
+        if name == "view_content_chunk":
+            return self.allowed_reads > 0 and not paths
+        return bool(paths) and all(self.is_own_conversation_path(p) for p in paths)
+
+    def allows(self, name: str, params: Any) -> bool:
+        """True when the step matches AND the opt-in switch is on; counts the read for view_content_chunk."""
+        if not self.enabled or not self.matches(name, params):
+            return False
+        self.allowed_reads += 1
+        return True
+
+    def is_own_conversation_path(self, p: str) -> bool:
+        resolved = os.path.realpath(os.path.abspath(p))
+        try:
+            rel = os.path.relpath(resolved, self.brain_dir)
+        except ValueError:  # different drive on Windows
+            return False
+        if not rel or rel == "." or rel.startswith("..") or os.path.isabs(rel):
+            return False
+        conversation = rel.split(os.sep)[0]
+        return bool(conversation) and conversation != "." and conversation not in self.preexisting
+
+
 class ProcessActivityTracker:
     """Tracks stdout/stderr chunk streaming, Linux kernel CPU ticks, and sandbox changes to distinguish
     between a genuinely long-running process ('ยาวจริง') and a hung/deadlocked process ('ค้าง')."""
@@ -3337,6 +3430,7 @@ class ProcessActivityTracker:
         output_callback: Optional[Callable[[str], None]] = None,
         allow_cli_tools: bool = True,
         cancel_check: Optional[Callable[[], bool]] = None,
+        read_policy: Optional["OwnConversationReadPolicy"] = None,
     ):
         self.proc = proc
         self.timeout = timeout
@@ -3346,7 +3440,9 @@ class ProcessActivityTracker:
         self.output_callback = output_callback
         self.allow_cli_tools = allow_cli_tools
         self.cancel_check = cancel_check
+        self.read_policy = read_policy
         self.tool_violation: Optional[str] = None
+        self.tool_violation_call: Optional[Tuple[str, Dict[str, Any]]] = None
         self.cancelled = False
 
         self.start_time = time.time()
@@ -3413,8 +3509,15 @@ class ProcessActivityTracker:
                     kind, text = self.stream.feed_line(line)
                     if kind == "tool":
                         if not self.allow_cli_tools:
-                            if not self.tool_violation:
+                            call_name, call_params = self.stream.last_tool or (text or "tool", {})
+                            if self.read_policy is not None and self.read_policy.allows(call_name, call_params):
+                                logger.info(
+                                    "[TOOL ALLOWED] Profile '%s': agy reads its own conversation log (ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1): %s",
+                                    self.profile, text,
+                                )
+                            elif not self.tool_violation:
                                 self.tool_violation = text or "tool"
+                                self.tool_violation_call = (call_name, call_params)
                                 logger.warning(
                                     "[TOOL BLOCKED] Profile '%s': agy attempted to run %s - killing CLI (API mode; set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow)",
                                     self.profile, self.tool_violation,
@@ -3556,6 +3659,9 @@ def execute_cli_command(
     argv, stdin_input = parse_cmd_template(cmd_template, prompt_text, model_name=model_name)
     effective_allow_tools = cli_tools_allowed() if allow_cli_tools is None else bool(allow_cli_tools)
     tool_violation: Optional[str] = None
+    tool_violation_call: Optional[Tuple[str, Dict[str, Any]]] = None
+    read_policy: Optional[OwnConversationReadPolicy] = None
+    tracker_used = False
 
     effective_stall = stall_timeout if stall_timeout is not None else calculate_dynamic_stall_timeout(len(prompt_text), model_name=model_name)
     log_str = " ".join(argv)[:120] if argv else cmd_template[:120]
@@ -3564,6 +3670,8 @@ def execute_cli_command(
     sandbox_base = get_profile_sandbox_base_path(profile)
     with SandboxDirectoryLock(sandbox_base, profile):
         sandbox_dir = get_profile_sandbox_dir(profile)
+        if not effective_allow_tools:
+            read_policy = OwnConversationReadPolicy(sandbox_dir)
 
         # Filtered environment with isolated HOME and XDG variables
         allowed_env_keys = {
@@ -3681,10 +3789,13 @@ def execute_cli_command(
                     output_callback=output_callback,
                     allow_cli_tools=effective_allow_tools,
                     cancel_check=cancel_check,
+                    read_policy=read_policy,
                 )
+                tracker_used = True
                 stdout_data, stderr_data = tracker.run(comm_input=comm_input)
                 parsed_stream = tracker.stream
                 tool_violation = tracker.tool_violation
+                tool_violation_call = tracker.tool_violation_call
         finally:
             if proc is not None and proc.poll() is None:
                 kill_process_tree(proc, force=True)
@@ -3699,13 +3810,22 @@ def execute_cli_command(
                 except Exception:
                     pass
 
-        if tool_violation is None and not effective_allow_tools and parsed_stream.tool_steps:
-            tool_violation = parsed_stream.tool_steps[0]
+        if tool_violation is None and not effective_allow_tools and not tracker_used:
+            # Non-tracker path (mocked Popen / pipes without fileno): judge the captured tool steps after the fact.
+            for call_name, call_params, summary in parsed_stream.tool_calls:
+                if read_policy is not None and read_policy.allows(call_name, call_params):
+                    continue
+                tool_violation = summary
+                tool_violation_call = (call_name, call_params)
+                break
         if tool_violation:
+            hint = ""
+            if read_policy is not None and tool_violation_call and read_policy.matches(*tool_violation_call):
+                hint = " " + TRANSCRIPT_READ_HINT
             raise CLIToolUseBlockedError(
                 f"CLI tool execution blocked (profile={profile or 'default'}): agy attempted to run {tool_violation}. "
                 "The bridge runs in API mode and does not let agy execute tools on this machine; "
-                "ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow).",
+                f"ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow).{hint}",
                 tool_violation=tool_violation,
             )
 
