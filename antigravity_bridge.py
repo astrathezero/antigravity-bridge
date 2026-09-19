@@ -870,6 +870,12 @@ def format_tools_to_system_prompt(
         lines.append("If no tool needs to be called to answer the user's request, respond normally with plain text.")
 
     lines.append("Do NOT output conversational filler before or after the JSON block when calling a tool.")
+
+    lines.append(
+        "Tool arguments must be valid JSON: keep every string value on ONE line and write line breaks inside it as \\n. "
+        "Never inline a multi-line script in a command argument (python3 -c, bash -c, heredocs): if the client offers a "
+        "file-writing tool, save the script as a file (for example a .py file) with it first, then run that file."
+    )
     lines.append(
         "Tool results already in this conversation ([Tool Result] blocks) are the real outputs of your earlier calls. "
         "Never call a tool again with the same arguments to re-read a result you already have. "
