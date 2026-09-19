@@ -446,6 +446,18 @@ export function apiModePreamble() {
  * profile gets this many further attempts with toolBlockRetryNotice() appended to the prompt
  * before the request fails. ANTIGRAVITY_TOOL_BLOCK_RETRIES=0 disables the retry.
  */
+/**
+ * In API mode agy must not run its own tools, so a turn is exactly one model reply. When agy answers
+ * with a client-side tool call it ALSO tends to emit an empty native function call; agy then retries
+ * the model up to 3 times (30-60s wasted) before ending the run, and the bridge salvages the reply at
+ * the end. With this on, the bridge instead ends the run the moment the first complete agent_response
+ * parses as a client tool call - the same reply, without the retries. ANTIGRAVITY_EARLY_TOOL_CALL_EXIT=0 disables it.
+ */
+export function earlyToolCallExitEnabled() {
+  const raw = (process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT || "").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
 export function toolBlockRetries() {
   const raw = (process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES || "").trim();
   if (raw === "") return 1;

@@ -127,7 +127,10 @@ test("stream-json: parser yields deltas, final response and failure status", () 
   items.push(...p.feed('{"event":"init","init":{"cwd":"/x"}}\n{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"17 × 23"}}\n{"event":"step_update","step_update":{"step_i'));
   items.push(...p.feed('ndex":1,"state":"DONE","step_type":"agent_response","text_delta":" = 391\\n"}}\n{"event":"result","result":{"status":"SUCCESS","response":"17 × 23 = 391\\n"}}\n'));
   items.push(...p.finish());
-  assert.deepEqual(items.map((i) => i.kind), ["delta", "delta"]);
+  // The two deltas, then an agent_step_done when the agent_response step reaches DONE (the signal the
+  // executor uses to end an API-mode turn early once the reply is a complete client tool call).
+  assert.deepEqual(items.map((i) => i.kind), ["delta", "delta", "agent_step_done"]);
+  assert.equal(items[items.length - 1].text, "17 × 23 = 391\n");
   assert.equal(p.finalText(), "17 × 23 = 391\n");
   assert.equal(p.isFailure(), false);
 
@@ -606,5 +609,124 @@ test("executor: a blocked run_command step is answered as the client's terminal 
     if (prevRetries === undefined) delete process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES; else process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES = prevRetries;
     if (prevTranslate === undefined) delete process.env.ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS; else process.env.ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS = prevTranslate;
     if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
+  }
+});
+
+// --- early exit on a completed client-side tool call (skip agy's internal retries) ----------------
+
+// Fake agy: step 1 is a complete client tool call, then the run "wastes time" (agy's 3 internal retries
+// on the empty native call) for DELAY ms before ending with the malformed-function-call ERROR.
+function earlyExitAgySrc(callJson, delayMs) {
+  return [
+    `const call = ${JSON.stringify(callJson)};`,
+    'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"ACTIVE",step_type:"agent_response",text_delta:call}})+"\\n");',
+    'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"DONE",step_type:"agent_response",text_delta:""}})+"\\n");',
+    `setTimeout(() => {`,
+    '  process.stdout.write(JSON.stringify({event:"result",result:{status:"ERROR",error:"Your previous response contained an improperly formatted function call\\nRetries remaining: 3"}})+"\\n");',
+    "  process.exit(0);",
+    `}, ${delayMs});`,
+    "",
+  ].join("\n");
+}
+
+test("executor: a completed client-side tool call ends the run early, without waiting for agy's retries", async () => {
+  const prevBase = process.env.ANTIGRAVITY_SANDBOX_BASE;
+  process.env.ANTIGRAVITY_SANDBOX_BASE = `${process.cwd()}/tests/.tmp-sandbox`;
+  const prevEarly = process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT;
+  delete process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT;
+  const fsMod = await import("node:fs");
+  fsMod.mkdirSync(`${process.cwd()}/tests/.tmp-sandbox`, { recursive: true });
+  const call = '{"tool_calls":[{"name":"terminal","arguments":{"command":"ls"}}]}';
+  const helper = `${process.cwd()}/tests/.tmp-sandbox/early-exit-agy.mjs`;
+  fsMod.writeFileSync(helper, earlyExitAgySrc(call, 4000)); // 4s of "retries" that we must NOT wait for
+  const tools = [{ name: "terminal", parameters: { type: "object", properties: { command: { type: "string" } } } }];
+  try {
+    const pm = new ProfileManager(["zz_e1"]);
+    pm.reset_all();
+    const t0 = Date.now();
+    const res = await executeCliWithFallback(`node ${helper} {prompt}`, "hi", {
+      profileManager: pm,
+      timeout: 20,
+      totalTimeout: 40,
+      clientTools: tools,
+    });
+    const elapsed = Date.now() - t0;
+    assert.equal(res.outputText, call);
+    assert.ok(elapsed < 2000, `should return well before the 4s of retries (took ${elapsed}ms)`);
+
+    // Disabled: the run is NOT cut short; the reply comes only after the retries, via end-of-run salvage.
+    process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT = "0";
+    const helper2 = `${process.cwd()}/tests/.tmp-sandbox/early-exit-agy2.mjs`;
+    fsMod.writeFileSync(helper2, earlyExitAgySrc(call, 1200));
+    const pm2 = new ProfileManager(["zz_e2"]);
+    pm2.reset_all();
+    const t1 = Date.now();
+    const res2 = await executeCliWithFallback(`node ${helper2} {prompt}`, "hi", {
+      profileManager: pm2,
+      timeout: 20,
+      totalTimeout: 40,
+      clientTools: tools,
+    });
+    const elapsed2 = Date.now() - t1;
+    assert.equal(res2.outputText, call, "disabled still returns the same reply (salvaged at the end)");
+    assert.ok(elapsed2 >= 1000, `disabled waits for the run to finish (took ${elapsed2}ms)`);
+  } finally {
+    if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
+    if (prevEarly === undefined) delete process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT; else process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT = prevEarly;
+  }
+});
+
+test("executor: early exit only fires on a step that parses as a tool call, and never without client tools", async () => {
+  const prevBase = process.env.ANTIGRAVITY_SANDBOX_BASE;
+  process.env.ANTIGRAVITY_SANDBOX_BASE = `${process.cwd()}/tests/.tmp-sandbox`;
+  const prevEarly = process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT;
+  delete process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT;
+  const fsMod = await import("node:fs");
+  fsMod.mkdirSync(`${process.cwd()}/tests/.tmp-sandbox`, { recursive: true });
+  const tools = [{ name: "read_file", parameters: { type: "object", properties: { path: { type: "string" } } } }];
+  try {
+    // A plain-text final answer must NOT be cut short as if it were a tool call; it completes normally.
+    const textHelper = `${process.cwd()}/tests/.tmp-sandbox/text-answer-agy.mjs`;
+    fsMod.writeFileSync(
+      textHelper,
+      [
+        'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"ACTIVE",step_type:"agent_response",text_delta:"here is the plain answer"}})+"\\n");',
+        'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"DONE",step_type:"agent_response",text_delta:""}})+"\\n");',
+        'process.stdout.write(JSON.stringify({event:"result",result:{status:"SUCCESS",response:"here is the plain answer"}})+"\\n");',
+        "",
+      ].join("\n")
+    );
+    const pmA = new ProfileManager(["zz_e3"]);
+    pmA.reset_all();
+    const resA = await executeCliWithFallback(`node ${textHelper} {prompt}`, "hi", { profileManager: pmA, timeout: 20, totalTimeout: 40, clientTools: tools });
+    assert.equal(resA.outputText, "here is the plain answer");
+
+    // Step 1 is reasoning text (no parse); the tool call arrives only at step 3 — early exit must wait
+    // for the parseable step, not fire on step 1.
+    const call = '{"tool_calls":[{"name":"read_file","arguments":{"path":"/x"}}]}';
+    const twoStep = `${process.cwd()}/tests/.tmp-sandbox/two-step-agy.mjs`;
+    fsMod.writeFileSync(
+      twoStep,
+      [
+        'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"ACTIVE",step_type:"agent_response",text_delta:"Let me look into this."}})+"\\n");',
+        'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"DONE",step_type:"agent_response",text_delta:""}})+"\\n");',
+        `setTimeout(() => {`,
+        `  process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:3,state:"ACTIVE",step_type:"agent_response",text_delta:${JSON.stringify(call)}}})+"\\n");`,
+        '  process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:3,state:"DONE",step_type:"agent_response",text_delta:""}})+"\\n");',
+        '  setTimeout(() => { process.stdout.write(JSON.stringify({event:"result",result:{status:"ERROR",error:"improperly formatted function call"}})+"\\n"); process.exit(0); }, 4000);',
+        "}, 150);",
+        "",
+      ].join("\n")
+    );
+    const pmB = new ProfileManager(["zz_e4"]);
+    pmB.reset_all();
+    const t0 = Date.now();
+    const resB = await executeCliWithFallback(`node ${twoStep} {prompt}`, "hi", { profileManager: pmB, timeout: 20, totalTimeout: 40, clientTools: tools });
+    const el = Date.now() - t0;
+    assert.equal(resB.outputText, call, "returns the step-3 tool call");
+    assert.ok(el < 2500, `exits on step 3, not after the 4s tail (took ${el}ms)`);
+  } finally {
+    if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
+    if (prevEarly === undefined) delete process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT; else process.env.ANTIGRAVITY_EARLY_TOOL_CALL_EXIT = prevEarly;
   }
 });

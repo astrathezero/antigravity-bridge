@@ -17,6 +17,7 @@ import {
   toolBlockRetries,
   toolBlockRetryNotice,
   blockedToolTranslationEnabled,
+  earlyToolCallExitEnabled,
 } from "../config.mjs";
 import { sanitizePromptForCli } from "../translators/context-compactor.mjs";
 import { parseToolCallsFromResponse, translateBlockedToolCall } from "../translators/tools.mjs";
@@ -199,13 +200,23 @@ export class AgyStreamParser {
         this.seenEvents = true;
         if (ev.event === "step_update" && ev.step_update) {
           const su = ev.step_update;
-          if (su.step_type === "agent_response" && typeof su.text_delta === "string" && su.text_delta) {
-            this.deltas.push(su.text_delta);
+          if (su.step_type === "agent_response") {
             const stepKey = su.step_index === undefined || su.step_index === null ? null : su.step_index;
-            const last = this._steps[this._steps.length - 1];
-            if (last && last.key === stepKey) last.text += su.text_delta;
-            else this._steps.push({ key: stepKey, text: su.text_delta });
-            return [{ kind: "delta", text: su.text_delta }];
+            const out = [];
+            if (typeof su.text_delta === "string" && su.text_delta) {
+              this.deltas.push(su.text_delta);
+              const last = this._steps[this._steps.length - 1];
+              if (last && last.key === stepKey) last.text += su.text_delta;
+              else this._steps.push({ key: stepKey, text: su.text_delta });
+              out.push({ kind: "delta", text: su.text_delta });
+            }
+            if (su.state === "DONE") {
+              // The model's reply for this step is complete. In API mode this is a whole turn, so the
+              // executor can end the run here instead of waiting for agy's internal retries.
+              const step = [...this._steps].reverse().find((s) => s.key === stepKey) || this._steps[this._steps.length - 1];
+              out.push({ kind: "agent_step_done", text: step ? step.text : "" });
+            }
+            return out;
           }
           if (su.step_type === "tool" && su.state === "ACTIVE") {
             const info = su.tool_info && typeof su.tool_info === "object" ? su.tool_info : {};
@@ -366,6 +377,7 @@ export async function executeCliCommand(
     clientToolNames = null,
   } = {}
 ) {
+  const earlyToolCall = earlyToolCallExitEnabled();
   const { argv, stdinInput } = parseCmdTemplate(cmdTemplate, promptText, modelName);
   const effectiveStall =
     stallTimeout !== null
@@ -486,6 +498,33 @@ export async function executeCliCommand(
             } else {
               console.log(`[TOOL STEP] profile=${profile || "default"}: ${it.text}`);
             }
+          }
+          if (it.kind === "agent_step_done") {
+            // API mode + client tools: a completed agent_response that is a client-side tool call is the
+            // whole answer. End the run now rather than let agy retry the model (it emits an empty native
+            // call alongside the JSON and burns ~3 retries before finishing). Same reply, no wait.
+            if (
+              !isSettled &&
+              !allowTools &&
+              earlyToolCall &&
+              Array.isArray(clientToolNames) &&
+              clientToolNames.length > 0 &&
+              it.text &&
+              it.text.trim()
+            ) {
+              const [, calls] = parseToolCallsFromResponse(it.text, clientToolNames);
+              if (calls && calls.length > 0) {
+                isSettled = true;
+                clearTimeout(totalTimer);
+                clearInterval(stallInterval);
+                killProcessTree(child, true);
+                console.warn(
+                  `[EARLY EXIT] profile=${profile || "default"}: returning the completed client-side tool call without waiting for agy to finish (retries skipped)`
+                );
+                resolve(it.text.trim());
+              }
+            }
+            continue;
           }
           if (!outputCallback) continue;
           try {
