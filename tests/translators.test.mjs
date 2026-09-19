@@ -142,3 +142,38 @@ test("translators: tool_calls JSON with raw newlines and non-JSON escapes inside
   assert.equal(repairJsonText('{"a":"C:\\Users\\x"}'), '{"a":"C:\\\\Users\\\\x"}', "non-escape backslashes become literal");
   assert.equal(repairJsonText('{"a":"\\u00e9 \\\\ \\""}'), '{"a":"\\u00e9 \\\\ \\""}', "real escapes are kept");
 });
+
+test("translators: a tool_calls object with an extra trailing brace (or prose around it) still parses", async () => {
+  const { parseToolCallsFromResponse, balancedObjectEnd } = await import("../src/translators/tools.mjs");
+  const tools = ["terminal", "read_file"];
+
+  // The exact leak seen from gemini-3.8-flash: one extra "}" after a valid tool_calls object. The
+  // greedy matcher grabbed through the stray brace and failed, so it leaked to the user as text.
+  const leak = '{\n  "tool_calls": [\n    {\n      "name": "terminal",\n      "arguments": {\n        "command": "ls -la /home/attasit/hermes-data/scripts/"\n      }\n    }\n  ]\n}\n}';
+  let [text, calls] = parseToolCallsFromResponse(leak, tools);
+  assert.equal(calls?.length, 1);
+  assert.equal(calls[0].name, "terminal");
+  assert.equal(calls[0].arguments.command, "ls -la /home/attasit/hermes-data/scripts/");
+
+  // Prose before + extra brace after.
+  [, calls] = parseToolCallsFromResponse('Let me run this.\n{"tool_calls":[{"name":"terminal","arguments":{"command":"date"}}]}}', tools);
+  assert.equal(calls[0].arguments.command, "date");
+
+  // Extra brace AND a raw newline inside a string value (both defects at once).
+  [, calls] = parseToolCallsFromResponse('{"tool_calls":[{"name":"terminal","arguments":{"command":"echo a\nb"}}]}}', tools);
+  assert.equal(calls[0].arguments.command, "echo a\nb");
+
+  // A brace inside a string value must not miscount the balance.
+  [, calls] = parseToolCallsFromResponse('{"tool_calls":[{"name":"terminal","arguments":{"command":"echo \\"}\\""}}]}}', tools);
+  assert.equal(calls[0].name, "terminal");
+
+  // Plain prose with no JSON is still returned as text, not a phantom call.
+  const [t2, c2] = parseToolCallsFromResponse("no json here, just an answer", tools);
+  assert.equal(c2, null);
+  assert.equal(t2, "no json here, just an answer");
+
+  // balancedObjectEnd finds the closing brace of the first object, ignoring a trailing one.
+  assert.equal(balancedObjectEnd('{"a":1}}', 0), 6);
+  assert.equal(balancedObjectEnd('{"a":"}"}', 0), 8); // brace inside a string does not close it
+  assert.equal(balancedObjectEnd("{unterminated", 0), -1);
+});

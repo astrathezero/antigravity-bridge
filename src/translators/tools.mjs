@@ -151,6 +151,30 @@ function normalizeToolCallItem(item, allowedTools = null) {
 // make JSON.parse throw, which turned a valid tool call into a plain-text reply that ended the
 // client's turn (seen with Hermes). Only string literals are touched: raw control characters are
 // escaped and a backslash that does not start a JSON escape becomes a literal backslash.
+// Find the index of the "}" that closes the object opened at `start`, scanning with string/escape
+// awareness so braces inside string values do not miscount. Returns -1 if it never balances.
+export function balancedObjectEnd(text, start) {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
 export function repairJsonText(raw) {
   let out = "";
   let inString = false;
@@ -273,7 +297,25 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
     return [null, parsed];
   }
 
-  // 4. Search for { ... } object containing tool_calls
+  // 4. Scan for the FIRST brace-balanced {...} object that parses as a tool call. This survives a
+  //    trailing extra "}" or prose after the JSON (gemini-3.8-flash does both), which the greedy
+  //    match below cannot: it would grab through the stray brace and fail to parse.
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    const end = balancedObjectEnd(text, i);
+    if (end === -1) continue; // this "{" never balances (e.g. an unclosed string); try the next one
+    const candidate = text.slice(i, end + 1);
+    const parsed = tryParseToolCallJson(candidate, allowedTools);
+    if (parsed) {
+      const prefix = text.slice(0, i).trim();
+      const suffix = text.slice(end + 1).trim();
+      const remainingText = prefix || suffix ? `${prefix}\n${suffix}`.trim() : null;
+      return [remainingText, parsed];
+    }
+    i = end; // this object did not parse as a tool call; continue after it
+  }
+
+  // 5. Search for { ... } object containing tool_calls
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     const candidate = jsonMatch[0].trim();
