@@ -10,6 +10,8 @@
 
 **Languages:** **English** | [🇹🇭 ภาษาไทย](README.th.md)
 
+> **Release status (v1.0.0, 2026-09-19).** v1.0.0 is the last release that ships both editions. The **Python edition (`antigravity_bridge.py`, port 8000) is frozen at v1.0.0**: it keeps working as released but gets no new features. **All development from here on is Node.js only** (`src/`, port 8008). If you are choosing today, pick Node.js.
+
 **Antigravity Bridge Server** is a zero-dependency, OpenAI & Anthropic compatible REST API bridge for the `antigravity` / `agy` CLI ecosystem. It turns the Google accounts logged into your local CLI into a resilient multi-profile API cluster with smart rotation, instant quota fallback, background OAuth refresh, native tool calling, SSE streaming and image generation.
 
 The repository ships **two editions of the same server** that live side by side in this one folder and share one `.env`, one profile store and one feature set:
@@ -71,7 +73,7 @@ Pick one, or run both at once on their default ports. See [Choosing an Edition](
 
 ## 🧭 Choosing an Edition
 
-Both editions expose the same HTTP API, read the same `.env`, rotate the same profiles under `~/.config/antigravity/profiles/`, and are developed together (every feature commit touches both). The differences that matter day to day:
+Both editions expose the same HTTP API, read the same `.env` and rotate the same profiles under `~/.config/antigravity/profiles/`. Up to **v1.0.0** they were developed together (every feature commit touched both); since then **only the Node.js edition is developed** and the Python edition stays as released in v1.0.0. The differences that matter day to day:
 
 | Topic | Python (`8000`) | Node.js (`8008`) |
 | :--- | :--- | :--- |

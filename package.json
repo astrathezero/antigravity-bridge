@@ -1,6 +1,6 @@
 {
   "name": "antigravity-bridge",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "Zero-dependency OpenAI & Anthropic Compatible REST API Bridge Server for Google Antigravity / agy CLI",
   "type": "module",
   "main": "src/index.mjs",
