@@ -4,7 +4,7 @@
  * High-performance, zero-dependency OpenAI & Anthropic compatible REST API Bridge.
  */
 
-import { DEFAULT_PORT, DEFAULT_HOST, detectCliCommand } from "./config.mjs";
+import { DEFAULT_PORT, DEFAULT_HOST, detectCliCommand, isBenignSocketError } from "./config.mjs";
 import { getConfiguredApiKeys } from "./auth.mjs";
 import { GLOBAL_PROFILE_MANAGER, getAvailableProfiles } from "./core/profile-manager.mjs";
 import { createBridgeServer } from "./server.mjs";
@@ -164,6 +164,27 @@ Press Ctrl+C to stop.
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 }
+
+// Last-resort process guards. The per-connection socket guard in server.mjs handles the normal
+// teardown race, but a stray async EPIPE/ECONNRESET from anywhere else must still never take the
+// whole bridge (and every bot on it) down. Benign socket disconnects are swallowed; a genuine bug
+// is logged and exits so systemd (Restart=always) restarts on clean code.
+process.on("uncaughtException", (err) => {
+  if (isBenignSocketError(err)) {
+    console.warn(`[SOCKET] swallowed uncaught ${err.code} (client disconnect)`);
+    return;
+  }
+  console.error(`[FATAL] Uncaught exception: ${err && (err.stack || err.message) ? (err.stack || err.message) : err}`);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  if (isBenignSocketError(reason)) {
+    console.warn(`[SOCKET] swallowed unhandled rejection ${reason.code} (client disconnect)`);
+    return;
+  }
+  console.error(`[FATAL] Unhandled rejection: ${reason && (reason.stack || reason.message) ? (reason.stack || reason.message) : reason}`);
+  process.exit(1);
+});
 
 main().catch((err) => {
   console.error(`[FATAL] Unhandled server exception: ${err.stack || err.message}`);

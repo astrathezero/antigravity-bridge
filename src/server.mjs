@@ -21,6 +21,7 @@ import {
   detectCliCommand,
   shouldShowProfileStatus,
   getBridgeConfigPath,
+  isBenignSocketError,
 } from "./config.mjs";
 import {
   getConfiguredApiKeys,
@@ -226,6 +227,21 @@ export function createBridgeServer(options = {}) {
   }
 
   const server = http.createServer(async (req, res) => {
+    // A client that hangs up mid-response (Hermes gives up, a proxy resets, the user hits stop) makes
+    // the next socket write fail ASYNCHRONOUSLY as an 'error' event on the socket, which a try/catch
+    // around res.write() cannot catch. With no listener Node treats it as unhandled and kills the whole
+    // process, taking every other in-flight request (all the bots) down with it. Swallow the benign
+    // disconnect errors here; anything else is re-thrown on the next tick to keep its stack.
+    // A per-request socket error only breaks that one connection; it must never crash the server and
+    // every other in-flight request with it. (The connection-level guard below covers the socket for
+    // its whole life, including the teardown window after the response finished; these cover the
+    // request/response streams.)
+    const swallowReqError = (err) => {
+      if (!isBenignSocketError(err)) console.warn(`[SOCKET] ${req.method || "?"} ${req.url || "?"}: ${(err && err.code) || err}`);
+    };
+    res.on("error", swallowReqError);
+    req.on("error", swallowReqError);
+
     const parsedUrl = new URL(req.url || "/", "http://127.0.0.1");
     const pathname = (parsedUrl.pathname || "").replace(/\/+$/, "") || "/";
 
@@ -947,6 +963,16 @@ export function createBridgeServer(options = {}) {
   server.headersTimeout = 30_000;
   server.requestTimeout = 120_000;
   server.keepAliveTimeout = 10_000;
+
+  // Connection-level socket guard. A queued write can complete with EPIPE/ECONNRESET AFTER the
+  // response finished and Node has already removed its own socket error handler (the teardown race
+  // that crashed the bridge in production on 2026-09-19). This listener lives for the whole socket,
+  // so that stray async error is absorbed instead of taking the process (and every other bot) down.
+  server.on("connection", (socket) => {
+    socket.on("error", (err) => {
+      if (!isBenignSocketError(err)) console.warn(`[SOCKET] connection error: ${(err && err.code) || err}`);
+    });
+  });
 
   return { server, port, host, allowedHosts };
 }

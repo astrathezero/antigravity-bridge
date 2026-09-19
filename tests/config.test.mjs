@@ -9,6 +9,7 @@ import {
   resolveModelFlags,
   isImageModel,
   getModelFamily,
+  isBenignSocketError,
 } from "../src/config.mjs";
 
 test("config: DEFAULT_PORT is 8008 unless overridden by the environment", () => {
@@ -80,4 +81,16 @@ test("config: getModelFamily", () => {
   assert.equal(getModelFamily("claude-opus-4.6"), "claude");
   assert.equal(getModelFamily("gpt-oss-120b"), "gpt-oss");
   assert.equal(getModelFamily("other-model"), "other");
+});
+
+test("config: isBenignSocketError classifies client-disconnect codes only", () => {
+  for (const code of ["EPIPE", "ECONNRESET", "ECONNABORTED", "ERR_STREAM_DESTROYED", "ERR_STREAM_WRITE_AFTER_END"]) {
+    assert.equal(isBenignSocketError(Object.assign(new Error("x"), { code })), true, code);
+  }
+  for (const code of ["EACCES", "ENOENT", "ESOMETHINGELSE", undefined, ""]) {
+    assert.equal(isBenignSocketError(Object.assign(new Error("x"), { code })), false, String(code));
+  }
+  assert.equal(isBenignSocketError(null), false);
+  assert.equal(isBenignSocketError(undefined), false);
+  assert.equal(isBenignSocketError(new Error("no code")), false);
 });

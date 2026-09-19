@@ -122,3 +122,47 @@ test("server: /v1/profiles and /v1/profiles/config endpoints", async () => {
   }
 });
 
+
+test("server: an EPIPE error on the connection socket is swallowed, not crashed on (matches the 13:41 production crash)", async () => {
+  const pm = new ProfileManager(["epipe_profile"]);
+  pm.reset_all();
+  const testPort = 8090;
+  const { server } = createBridgeServer({
+    port: testPort,
+    host: "127.0.0.1",
+    profileManager: pm,
+    apiKeys: {},
+  });
+
+  // Capture the server-side connection socket — the object that emitted the unhandled 'error' in prod.
+  let serverSocket = null;
+  server.on("connection", (sock) => {
+    serverSocket = sock;
+  });
+
+  await new Promise((resolve) => server.listen(testPort, "127.0.0.1", resolve));
+
+  try {
+    const healthResp = await fetch(`http://127.0.0.1:${testPort}/health`);
+    assert.equal(healthResp.status, 200);
+    assert.ok(serverSocket, "captured the server-side socket");
+
+    // The connection-level guard must have attached an error listener that outlives the request.
+    assert.ok(serverSocket.listenerCount("error") > 0, "connection guard attached an error listener");
+
+    // Re-create the exact prod failure: an async 'write EPIPE' on the socket. With no listener Node
+    // treats it as unhandled and terminates the process; the guard must absorb it.
+    const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE", syscall: "write", errno: -32 });
+    serverSocket.emit("error", epipe);
+
+    // Any other socket error is also swallowed (a broken connection must not crash the server).
+    serverSocket.emit("error", Object.assign(new Error("boom"), { code: "ESOMETHINGELSE" }));
+
+    // Proof the process is still alive and serving.
+    const after = await fetch(`http://127.0.0.1:${testPort}/health`);
+    assert.equal(after.status, 200);
+    assert.equal((await after.json()).status, "ok");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

@@ -463,6 +463,15 @@ export function blockedToolTranslationEnabled() {
   return !["0", "false", "no", "off"].includes(raw);
 }
 
+// Socket write / connection errors that only mean one client hung up (Hermes gave up, a proxy reset,
+// the user pressed stop). They must never crash the whole bridge and every other in-flight bot with it.
+const BENIGN_SOCKET_ERROR_CODES = new Set([
+  "EPIPE", "ECONNRESET", "ECONNABORTED", "ERR_STREAM_DESTROYED", "ERR_STREAM_WRITE_AFTER_END",
+]);
+export function isBenignSocketError(err) {
+  return Boolean(err) && BENIGN_SOCKET_ERROR_CODES.has(err.code);
+}
+
 export const TOOL_BLOCK_RETRY_NOTICE_HEADER = "[Bridge notice: previous attempt aborted]";
 
 export function toolBlockRetryNotice(toolText, clientToolNames = null) {
