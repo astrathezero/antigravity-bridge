@@ -107,3 +107,38 @@ test("translators: sanitizePromptForCli boundary slicing", () => {
   assert.ok(sanitized.includes("[System Instructions]"));
   assert.ok(sanitized.includes("Final question"));
 });
+
+test("translators: tool_calls JSON with raw newlines and non-JSON escapes inside strings still parses", async () => {
+  const { parseToolCallsFromResponse, repairJsonText } = await import("../src/translators/tools.mjs");
+  // What gemini-3.8-flash wrote for a multi-line python command: real newlines inside the JSON string
+  // and a regex \s escape. JSON.parse rejects both.
+  const reply = [
+    "{",
+    '  "tool_calls": [',
+    "    {",
+    '      "name": "terminal",',
+    '      "arguments": {',
+    "        \"command\": \"python3 -c '",
+    "import re",
+    'print(re.findall(r\\"a\\s+b\\", \\"a  b\\"))',
+    "'\"",
+    "      }",
+    "    }",
+    "  ]",
+    "}",
+  ].join("\n");
+  assert.throws(() => JSON.parse(reply));
+  const [text, calls] = parseToolCallsFromResponse(reply, ["terminal", "read_file"]);
+  assert.equal(text, null);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "terminal");
+  assert.equal(calls[0].arguments.command, "python3 -c '\nimport re\nprint(re.findall(r\"a\\s+b\", \"a  b\"))\n'");
+
+  // Valid JSON is returned unchanged; text that is not a tool call is still not one.
+  const valid = '{"tool_calls":[{"name":"read_file","arguments":{"path":"/x\\n\\t"}}]}';
+  assert.equal(repairJsonText(valid), valid);
+  assert.deepEqual(parseToolCallsFromResponse("just prose with a\nnewline", ["terminal"]), ["just prose with a\nnewline", null]);
+  assert.equal(repairJsonText('{"a":"tab\there"}'), '{"a":"tab\\there"}');
+  assert.equal(repairJsonText('{"a":"C:\\Users\\x"}'), '{"a":"C:\\\\Users\\\\x"}', "non-escape backslashes become literal");
+  assert.equal(repairJsonText('{"a":"\\u00e9 \\\\ \\""}'), '{"a":"\\u00e9 \\\\ \\""}', "real escapes are kept");
+});

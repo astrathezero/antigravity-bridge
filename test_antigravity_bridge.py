@@ -1876,5 +1876,41 @@ class TestApiModeToolGuard(unittest.TestCase):
         self.assertLess(time.time() - t0, 6.0)
 
 
+
+class TestToolCallJsonRepair(unittest.TestCase):
+    def test_tool_calls_json_with_raw_newlines_and_bad_escapes_still_parses(self):
+        # What gemini-3.8-flash wrote for a multi-line python command: real newlines inside the JSON
+        # string and a regex \s escape. json.loads rejects both.
+        reply = "\n".join([
+            "{",
+            '  "tool_calls": [',
+            "    {",
+            '      "name": "terminal",',
+            '      "arguments": {',
+            "        \"command\": \"python3 -c '",
+            "import re",
+            'print(re.findall(r\\"a\\s+b\\", \\"a  b\\"))',
+            "'\"",
+            "      }",
+            "    }",
+            "  ]",
+            "}",
+        ])
+        with self.assertRaises(Exception):
+            json.loads(reply)
+        text, calls = antigravity_bridge.parse_tool_calls_from_response(reply, allowed_tools=["terminal", "read_file"])
+        self.assertIsNone(text)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "terminal")
+        self.assertEqual(calls[0]["arguments"]["command"], "python3 -c '\nimport re\nprint(re.findall(r\"a\\s+b\", \"a  b\"))\n'")
+
+        repair = antigravity_bridge.repair_json_text
+        valid = '{"tool_calls":[{"name":"read_file","arguments":{"path":"/x\\n\\t"}}]}'
+        self.assertEqual(repair(valid), valid)
+        self.assertEqual(antigravity_bridge.parse_tool_calls_from_response("just prose with a\nnewline", allowed_tools=["terminal"]), ("just prose with a\nnewline", None))
+        self.assertEqual(repair('{"a":"tab\there"}'), '{"a":"tab\\there"}')
+        self.assertEqual(repair('{"a":"C:\\Users\\x"}'), '{"a":"C:\\\\Users\\\\x"}')
+        self.assertEqual(repair('{"a":"\\u00e9 \\\\ \\""}'), '{"a":"\\u00e9 \\\\ \\""}')
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

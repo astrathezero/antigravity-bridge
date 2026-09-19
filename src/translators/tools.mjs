@@ -141,6 +141,52 @@ function normalizeToolCallItem(item, allowedTools = null) {
   };
 }
 
+// Models (Gemini especially) hand back tool_calls JSON with raw newlines inside string values
+// (multi-line shell or python commands) and with non-JSON escapes such as the \s of a regex. Both
+// make JSON.parse throw, which turned a valid tool call into a plain-text reply that ended the
+// client's turn (seen with Hermes). Only string literals are touched: raw control characters are
+// escaped and a backslash that does not start a JSON escape becomes a literal backslash.
+export function repairJsonText(raw) {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "\\") {
+      const next = raw[i + 1];
+      if (next !== undefined && '"\\/bfnrt'.includes(next)) {
+        out += ch + next;
+        i++;
+      } else if (next === "u" && /^[0-9a-fA-F]{4}$/.test(raw.slice(i + 2, i + 6))) {
+        out += raw.slice(i, i + 6);
+        i += 5;
+      } else {
+        out += "\\\\";
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      continue;
+    }
+    const code = ch.charCodeAt(0);
+    if (code < 0x20) {
+      if (ch === "\n") out += "\\n";
+      else if (ch === "\r") out += "\\r";
+      else if (ch === "\t") out += "\\t";
+      else out += "\\u" + code.toString(16).padStart(4, "0");
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 function tryParseToolCallJson(rawStr, allowedTools = null) {
   if (!rawStr || !rawStr.trim()) return null;
 
@@ -148,7 +194,11 @@ function tryParseToolCallJson(rawStr, allowedTools = null) {
   try {
     data = JSON.parse(rawStr);
   } catch {
-    return null;
+    try {
+      data = JSON.parse(repairJsonText(rawStr));
+    } catch {
+      return null;
+    }
   }
 
   const toolCalls = [];

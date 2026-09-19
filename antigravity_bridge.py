@@ -921,6 +921,61 @@ def _normalize_tool_call_item(
     }
 
 
+_JSON_SIMPLE_ESCAPES = set('"\\/bfnrt')
+
+
+def repair_json_text(raw: str) -> str:
+    """Models (Gemini especially) hand back tool_calls JSON with raw newlines inside string values
+    (multi-line shell or python commands) and with non-JSON escapes such as the \\s of a regex. Both make
+    json.loads fail, which turned a valid tool call into a plain-text reply that ended the client's turn
+    (seen with Hermes). Only string literals are touched: raw control characters are escaped and a
+    backslash that does not start a JSON escape becomes a literal backslash."""
+    out: List[str] = []
+    in_string = False
+    i = 0
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            nxt = raw[i + 1] if i + 1 < n else None
+            if nxt is not None and nxt in _JSON_SIMPLE_ESCAPES:
+                out.append(ch + nxt)
+                i += 2
+            elif nxt == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", raw[i + 2:i + 6] or ""):
+                out.append(raw[i:i + 6])
+                i += 6
+            else:
+                out.append("\\\\")
+                i += 1
+            continue
+        if ch == '"':
+            in_string = False
+            out.append(ch)
+            i += 1
+            continue
+        code = ord(ch)
+        if code < 0x20:
+            if ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            else:
+                out.append("\\u%04x" % code)
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _try_parse_tool_call_json(
     raw_str: str,
     allowed_tools: Optional[List[str]] = None,
@@ -932,7 +987,10 @@ def _try_parse_tool_call_json(
     try:
         data = json.loads(raw_str)
     except Exception:
-        return None
+        try:
+            data = json.loads(repair_json_text(raw_str))
+        except Exception:
+            return None
 
     tool_calls: List[Dict[str, Any]] = []
 
