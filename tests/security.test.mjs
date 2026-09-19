@@ -522,3 +522,89 @@ test("config: the tool-block retry notice names the client-side tools when the r
   assert.ok(named.includes('{"tool_calls":[{"name":"<tool>"'));
   assert.ok(named.includes("run_command"));
 });
+
+// --- blocked agy tool -> client tool --------------------------------------------------------------
+
+const HERMES_LIKE_TOOLS = [
+  { name: "read_file", description: "read", parameters: { type: "object", properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", maximum: 2000 } }, required: ["path"] } },
+  { name: "terminal", description: "run", parameters: { type: "object", properties: { command: { type: "string" }, timeout: { type: "integer" } }, required: ["command"] } },
+  { name: "write_file", description: "write", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } } } },
+];
+
+test("translators: a blocked agy tool step maps onto the client's terminal / read_file tools", async () => {
+  const { translateBlockedToolCall } = await import("../src/translators/tools.mjs");
+  const t = (name, params, tools = HERMES_LIKE_TOOLS, opts) => translateBlockedToolCall({ name, params }, tools, opts);
+
+  let r = t("run_command", { CommandLine: 'grep "Alert sent" /x.log | head -n 5', Cwd: "/sb/astraleno" }, HERMES_LIKE_TOOLS, { sandboxPrefixes: ["/sb"] });
+  assert.equal(r.name, "terminal");
+  assert.deepEqual(r.arguments, { command: 'grep "Alert sent" /x.log | head -n 5' }, "agy's own sandbox cwd is dropped");
+  assert.equal(r.text, JSON.stringify({ tool_calls: [{ name: "terminal", arguments: r.arguments }] }));
+  r = t("run_command", { CommandLine: "ls", Cwd: "/home/u/data" });
+  assert.deepEqual(r.arguments, { command: "cd '/home/u/data' && ls" }, "a real cwd is honoured");
+  r = t("view_file", { AbsolutePath: "/a.py", StartLine: 500, EndLine: 699 });
+  assert.equal(r.name, "read_file");
+  assert.deepEqual(r.arguments, { path: "/a.py", offset: 501, limit: 200 }, "0-based agy lines become 1-based offset + limit");
+  r = t("view_file", { AbsolutePath: "/a.py", StartLine: 0, EndLine: 5000 });
+  assert.equal(r.arguments.limit, 2000, "limit is clamped to the schema maximum");
+  r = t("list_dir", { DirectoryPath: "/home/u/it's" });
+  assert.deepEqual(r.arguments, { command: "ls -la '/home/u/it'\\''s'" });
+  r = t("grep_search", { Query: "Alert sent", SearchPath: "/home/u", CaseInsensitive: true, IsRegex: false, Includes: ["*.log"] });
+  assert.deepEqual(r.arguments, { command: "grep -rn -i -F --include='*.log' 'Alert sent' '/home/u'" });
+  r = t("find_by_name", { SearchDirectory: "/home/u", Pattern: "*.py" });
+  assert.deepEqual(r.arguments, { command: "find '/home/u' -name '*.py'" });
+
+  // A tool the client has a cwd property for, and non-standard names.
+  r = t("run_command", { CommandLine: "make", Cwd: "/proj" }, [{ name: "execute_shell", parameters: { properties: { cmd: { type: "string" }, workdir: { type: "string" } } } }]);
+  assert.deepEqual(r, { name: "execute_shell", arguments: { cmd: "make", workdir: "/proj" }, text: r.text });
+
+  // Nothing fits: browser steps, missing params, or no matching client tool.
+  assert.equal(t("browser_subagent", { Task: "x" }), null);
+  assert.equal(t("run_command", {}), null);
+  assert.equal(t("run_command", { CommandLine: "ls" }, [{ name: "get_weather", parameters: { properties: { city: { type: "string" } } } }]), null);
+  assert.equal(t("view_file", { AbsolutePath: "/a" }, [{ name: "terminal", parameters: { properties: { command: { type: "string" } } } }]), null);
+  assert.equal(t("run_command", { CommandLine: "ls" }, []), null);
+  assert.equal(t("run_command", { CommandLine: "ls" }, null), null);
+});
+
+test("executor: a blocked run_command step is answered as the client's terminal call, without a retry", async () => {
+  const prev = process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  const prevRetries = process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES;
+  delete process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES;
+  const prevTranslate = process.env.ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS;
+  delete process.env.ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS;
+  const prevBase = process.env.ANTIGRAVITY_SANDBOX_BASE;
+  process.env.ANTIGRAVITY_SANDBOX_BASE = `${process.cwd()}/tests/.tmp-sandbox`;
+  const fsMod = await import("node:fs");
+  fsMod.mkdirSync(`${process.cwd()}/tests/.tmp-sandbox`, { recursive: true });
+  const helper = `${process.cwd()}/tests/.tmp-sandbox/tool-step-then-text.mjs`;
+  fsMod.writeFileSync(helper, TOOL_STEP_THEN_TEXT_SRC);
+  try {
+    const pm = new ProfileManager(["zz_x1", "zz_x2"]);
+    pm.reset_all();
+    const t0 = Date.now();
+    const res = await executeCliWithFallback(`node ${helper} {prompt}`, "hi", {
+      profileManager: pm,
+      timeout: 20,
+      totalTimeout: 40,
+      clientTools: HERMES_LIKE_TOOLS,
+    });
+    assert.equal(res.outputText, '{"tool_calls":[{"name":"terminal","arguments":{"command":"id"}}]}');
+    assert.equal(res.usedProfile, "zz_x1");
+    assert.ok(Date.now() - t0 < 8000, "answered right after the block, no second run");
+    assert.equal(pm.is_in_cooldown("zz_x1"), false);
+    assert.equal(pm.state["zz_x2"]?.last_used || 0, 0, "second profile never tried");
+
+    // Switched off: the old retry-with-notice path answers "text answer" on the second run.
+    process.env.ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS = "0";
+    const pm2 = new ProfileManager(["zz_x3"]);
+    pm2.reset_all();
+    const res2 = await executeCliWithFallback(`node ${helper} {prompt}`, "hi", { profileManager: pm2, timeout: 20, totalTimeout: 40, clientTools: HERMES_LIKE_TOOLS });
+    assert.equal(res2.outputText, "text answer");
+  } finally {
+    if (prev === undefined) delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS; else process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS = prev;
+    if (prevRetries === undefined) delete process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES; else process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES = prevRetries;
+    if (prevTranslate === undefined) delete process.env.ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS; else process.env.ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS = prevTranslate;
+    if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
+  }
+});

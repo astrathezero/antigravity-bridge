@@ -453,6 +453,16 @@ export function toolBlockRetries() {
   return Number.isFinite(v) && v >= 0 ? v : 1;
 }
 
+/**
+ * When agy starts one of its own tools and the request defines a client-side tool that does the same
+ * job, the bridge answers with that client tool call instead of killing the run and retrying
+ * (translateBlockedToolCall in translators/tools.mjs). ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS=0 disables it.
+ */
+export function blockedToolTranslationEnabled() {
+  const raw = (process.env.ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS || "").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
 export const TOOL_BLOCK_RETRY_NOTICE_HEADER = "[Bridge notice: previous attempt aborted]";
 
 export function toolBlockRetryNotice(toolText, clientToolNames = null) {

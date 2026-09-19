@@ -1782,6 +1782,69 @@ class TestApiModeToolGuard(unittest.TestCase):
         self.assertIn('{"tool_calls":[{"name":"<tool>"', named)
         self.assertIn("run_command", named)
 
+    _HERMES_LIKE_TOOLS = [
+        {"name": "read_file", "description": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 1}, "limit": {"type": "integer", "maximum": 2000}}, "required": ["path"]}},
+        {"name": "terminal", "description": "run", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}}, "required": ["command"]}},
+        {"name": "write_file", "description": "write", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
+    ]
+
+    def test_blocked_agy_tool_step_maps_onto_client_tools(self):
+        tr = antigravity_bridge.translate_blocked_tool_call
+        tools = self._HERMES_LIKE_TOOLS
+        r = tr(("run_command", {"CommandLine": 'grep "Alert sent" /x.log | head -n 5', "Cwd": "/sb/astraleno"}), tools, ["/sb"])
+        self.assertEqual(r["name"], "terminal")
+        self.assertEqual(r["arguments"], {"command": 'grep "Alert sent" /x.log | head -n 5'})
+        self.assertEqual(json.loads(r["text"]), {"tool_calls": [{"name": "terminal", "arguments": r["arguments"]}]})
+        r = tr(("run_command", {"CommandLine": "ls", "Cwd": "/home/u/data"}), tools)
+        self.assertEqual(r["arguments"], {"command": "cd '/home/u/data' && ls"})
+        r = tr(("view_file", {"AbsolutePath": "/a.py", "StartLine": 500, "EndLine": 699}), tools)
+        self.assertEqual(r["name"], "read_file")
+        self.assertEqual(r["arguments"], {"path": "/a.py", "offset": 501, "limit": 200})
+        r = tr(("view_file", {"AbsolutePath": "/a.py", "StartLine": 0, "EndLine": 5000}), tools)
+        self.assertEqual(r["arguments"]["limit"], 2000)
+        r = tr(("list_dir", {"DirectoryPath": "/home/u/it's"}), tools)
+        self.assertEqual(r["arguments"], {"command": "ls -la '/home/u/it'\\''s'"})
+        r = tr(("grep_search", {"Query": "Alert sent", "SearchPath": "/home/u", "CaseInsensitive": True, "IsRegex": False, "Includes": ["*.log"]}), tools)
+        self.assertEqual(r["arguments"], {"command": "grep -rn -i -F --include='*.log' 'Alert sent' '/home/u'"})
+        r = tr(("find_by_name", {"SearchDirectory": "/home/u", "Pattern": "*.py"}), tools)
+        self.assertEqual(r["arguments"], {"command": "find '/home/u' -name '*.py'"})
+        r = tr(("run_command", {"CommandLine": "make", "Cwd": "/proj"}), [{"name": "execute_shell", "parameters": {"properties": {"cmd": {"type": "string"}, "workdir": {"type": "string"}}}}])
+        self.assertEqual((r["name"], r["arguments"]), ("execute_shell", {"cmd": "make", "workdir": "/proj"}))
+        self.assertIsNone(tr(("browser_subagent", {"Task": "x"}), tools))
+        self.assertIsNone(tr(("run_command", {}), tools))
+        self.assertIsNone(tr(("run_command", {"CommandLine": "ls"}), [{"name": "get_weather", "parameters": {"properties": {"city": {"type": "string"}}}}]))
+        self.assertIsNone(tr(("view_file", {"AbsolutePath": "/a"}), [{"name": "terminal", "parameters": {"properties": {"command": {"type": "string"}}}}]))
+        self.assertIsNone(tr(("run_command", {"CommandLine": "ls"}), []))
+        self.assertIsNone(tr(None, tools))
+
+    def test_blocked_run_command_is_answered_as_client_terminal_call_without_retry(self):
+        os.environ.pop("ANTIGRAVITY_TOOL_BLOCK_RETRIES", None)
+        os.environ.pop("ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS", None)
+        helper = self._write_helper("tool_step_then_text.py", self._TOOL_STEP_THEN_TEXT_SRC)
+        pm = ProfileManager(profiles=["zz_x1", "zz_x2"], concurrency_per_profile=1)
+        t0 = time.time()
+        out, used = execute_cli_with_fallback(
+            f"python3 {helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm,
+            client_tools=self._HERMES_LIKE_TOOLS,
+        )
+        self.assertEqual(json.loads(out), {"tool_calls": [{"name": "terminal", "arguments": {"command": "id"}}]})
+        self.assertEqual(used, "zz_x1")
+        self.assertLess(time.time() - t0, 8.0)
+        self.assertFalse(pm.is_in_cooldown("zz_x1"))
+        self.assertEqual(pm.state.get("zz_x2", {}).get("last_used", 0), 0)
+
+        # Switched off: the old retry-with-notice path answers "text answer" on the second run.
+        os.environ["ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS"] = "0"
+        try:
+            pm2 = ProfileManager(profiles=["zz_x3"], concurrency_per_profile=1)
+            out2, _ = execute_cli_with_fallback(
+                f"python3 {helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm2,
+                client_tools=self._HERMES_LIKE_TOOLS,
+            )
+        finally:
+            os.environ.pop("ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS", None)
+        self.assertEqual(out2, "text answer")
+
     def test_parser_keeps_tool_name_and_full_params(self):
         out = antigravity_bridge.AgyStreamOutput()
         long_path = "/tmp/" + "x" * 300 + "/transcript_full.jsonl"

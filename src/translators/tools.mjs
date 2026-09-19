@@ -288,3 +288,161 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
 
   return [outputText, null];
 }
+
+// --- Blocked agy tool -> client tool ---------------------------------------------------------------
+//
+// In API mode agy must not run its own tools, but the model keeps reaching for run_command / view_file
+// when it wants to act on a machine - and the client usually offers a tool for exactly that. Instead
+// of killing the run and retrying, the bridge turns the blocked step into the equivalent client-side
+// tool call: the model's intent is preserved and no second model run is needed.
+
+const COMMAND_TOOL_NAMES = new Set([
+  "terminal", "shell", "bash", "sh", "zsh", "run_command", "execute_command", "run_shell_command",
+  "execute_shell", "shell_command", "run_terminal_cmd", "exec", "execute", "execute_bash", "bash_tool",
+  "command", "run_shell", "shell_exec", "run", "cmd",
+]);
+const COMMAND_PROPS = ["command", "cmd", "command_line", "commandLine", "CommandLine", "shell_command"];
+const READ_TOOL_NAMES = new Set([
+  "read_file", "read", "view_file", "file_read", "read_text_file", "cat", "open_file", "get_file_contents",
+  "view", "read_files", "file", "readfile",
+]);
+const PATH_PROPS = ["path", "file_path", "filepath", "filePath", "filename", "file", "absolute_path", "absolutePath", "AbsolutePath", "target_file"];
+const OFFSET_PROPS = ["offset", "start_line", "startLine", "start", "line"];
+const LIMIT_PROPS = ["limit", "max_lines", "maxLines", "num_lines", "count"];
+const END_PROPS = ["end_line", "endLine", "end"];
+const CWD_PROPS = ["cwd", "workdir", "working_directory", "workingDirectory", "directory", "dir"];
+
+function schemaProps(tool) {
+  const params = tool && tool.parameters && typeof tool.parameters === "object" ? tool.parameters : {};
+  const props = params.properties && typeof params.properties === "object" ? params.properties : {};
+  return props;
+}
+
+function firstProp(props, candidates) {
+  for (const c of candidates) if (Object.prototype.hasOwnProperty.call(props, c)) return c;
+  return null;
+}
+
+function findCommandTool(tools) {
+  for (const t of tools || []) {
+    const name = String(t?.name || "");
+    const props = schemaProps(t);
+    const prop = firstProp(props, COMMAND_PROPS);
+    if (!prop) continue;
+    if (COMMAND_TOOL_NAMES.has(name.toLowerCase()) || /term|shell|bash|cmd|command|exec/i.test(name)) {
+      return { tool: t, prop, cwdProp: firstProp(props, CWD_PROPS) };
+    }
+  }
+  return null;
+}
+
+function findReadTool(tools) {
+  for (const t of tools || []) {
+    const name = String(t?.name || "");
+    const props = schemaProps(t);
+    const prop = firstProp(props, PATH_PROPS);
+    if (!prop) continue;
+    if (READ_TOOL_NAMES.has(name.toLowerCase()) || /read|view|cat/i.test(name)) {
+      const limitProp = firstProp(props, LIMIT_PROPS);
+      const limitMax = limitProp && Number.isFinite(props[limitProp]?.maximum) ? props[limitProp].maximum : null;
+      return { tool: t, prop, offsetProp: firstProp(props, OFFSET_PROPS), limitProp, limitMax, endProp: firstProp(props, END_PROPS) };
+    }
+  }
+  return null;
+}
+
+export function shellQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+function pick(params, names) {
+  for (const n of names) {
+    const v = params?.[n];
+    if (v !== undefined && v !== null && v !== "") return v;
+  }
+  return undefined;
+}
+
+function underAny(p, prefixes) {
+  const s = String(p || "");
+  return (prefixes || []).some((pre) => pre && (s === pre || s.startsWith(pre.endsWith("/") ? pre : pre + "/")));
+}
+
+/**
+ * Map one blocked agy tool step {name, params} onto the client's tools. Returns
+ * {name, arguments, text} (text = the tool_calls JSON the server parses) or null when nothing fits.
+ * `sandboxPrefixes`: agy working directories; a Cwd inside them is agy's own scratch space and is
+ * dropped, any other Cwd is honoured with a `cd` prefix (or the tool's own cwd property).
+ */
+export function translateBlockedToolCall(call, clientTools, { sandboxPrefixes = [] } = {}) {
+  if (!call || typeof call !== "object" || !call.name) return null;
+  if (!Array.isArray(clientTools) || clientTools.length === 0) return null;
+  const params = call.params && typeof call.params === "object" ? call.params : {};
+  const agyName = String(call.name).toLowerCase();
+  let name = null;
+  let args = null;
+
+  if (agyName === "run_command") {
+    const cmd = pick(params, ["CommandLine", "command_line", "command", "Command", "cmd"]);
+    const target = findCommandTool(clientTools);
+    if (typeof cmd !== "string" || !cmd.trim() || !target) return null;
+    args = { [target.prop]: cmd };
+    const cwd = pick(params, ["Cwd", "cwd", "WorkingDirectory"]);
+    if (typeof cwd === "string" && cwd.trim() && !underAny(cwd, sandboxPrefixes)) {
+      if (target.cwdProp) args[target.cwdProp] = cwd;
+      else args[target.prop] = `cd ${shellQuote(cwd)} && ${cmd}`;
+    }
+    name = target.tool.name;
+  } else if (agyName === "view_file" || agyName === "view_file_outline" || agyName === "view_content_chunk") {
+    const file = pick(params, ["AbsolutePath", "absolute_path", "path", "file_path", "File"]);
+    const target = findReadTool(clientTools);
+    if (typeof file !== "string" || !file.trim() || !target) return null;
+    args = { [target.prop]: file };
+    const start = Number(params.StartLine);
+    const end = Number(params.EndLine);
+    if (Number.isFinite(start) && start >= 0) {
+      if (target.offsetProp) args[target.offsetProp] = start + 1; // agy lines are 0-based
+      if (Number.isFinite(end) && end >= start) {
+        if (target.limitProp) {
+          let limit = end - start + 1;
+          if (target.limitMax) limit = Math.min(limit, target.limitMax);
+          args[target.limitProp] = limit;
+        } else if (target.endProp) {
+          args[target.endProp] = end + 1;
+        }
+      }
+    }
+    name = target.tool.name;
+  } else if (agyName === "list_dir") {
+    const dir = pick(params, ["DirectoryPath", "directory_path", "path", "Path"]);
+    const target = findCommandTool(clientTools);
+    if (typeof dir !== "string" || !dir.trim() || !target) return null;
+    args = { [target.prop]: `ls -la ${shellQuote(dir)}` };
+    name = target.tool.name;
+  } else if (agyName === "grep_search") {
+    const query = pick(params, ["Query", "query", "Pattern", "pattern"]);
+    const searchPath = pick(params, ["SearchPath", "search_path", "path", "SearchDirectory"]) || ".";
+    const target = findCommandTool(clientTools);
+    if (typeof query !== "string" || !query || !target) return null;
+    const flags = ["-rn"];
+    if (params.CaseInsensitive === true) flags.push("-i");
+    if (params.IsRegex === false) flags.push("-F");
+    const includes = Array.isArray(params.Includes) ? params.Includes.filter((x) => typeof x === "string" && x) : [];
+    const inc = includes.map((g) => `--include=${shellQuote(g)}`);
+    args = { [target.prop]: ["grep", ...flags, ...inc, shellQuote(query), shellQuote(searchPath)].join(" ") };
+    name = target.tool.name;
+  } else if (agyName === "find_by_name") {
+    const dir = pick(params, ["SearchDirectory", "search_directory", "path"]);
+    const pattern = pick(params, ["Pattern", "pattern"]);
+    const target = findCommandTool(clientTools);
+    if (typeof dir !== "string" || !dir.trim() || !target) return null;
+    const parts = ["find", shellQuote(dir)];
+    if (typeof pattern === "string" && pattern) parts.push("-name", shellQuote(pattern));
+    args = { [target.prop]: parts.join(" ") };
+    name = target.tool.name;
+  } else {
+    return null;
+  }
+
+  return { name, arguments: args, text: JSON.stringify({ tool_calls: [{ name, arguments: args }] }) };
+}

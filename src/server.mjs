@@ -806,6 +806,7 @@ export function createBridgeServer(options = {}) {
             outputCallback: liveOutputCallback,
             signal: abortCtl.signal,
             clientToolNames,
+            clientTools: clientToolNames ? normalizedTools : null,
           }
         );
 

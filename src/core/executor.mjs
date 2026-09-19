@@ -16,9 +16,10 @@ import {
   ownTranscriptReadsAllowed,
   toolBlockRetries,
   toolBlockRetryNotice,
+  blockedToolTranslationEnabled,
 } from "../config.mjs";
 import { sanitizePromptForCli } from "../translators/context-compactor.mjs";
-import { parseToolCallsFromResponse } from "../translators/tools.mjs";
+import { parseToolCallsFromResponse, translateBlockedToolCall } from "../translators/tools.mjs";
 import {
   acquireSandboxLock,
   getProfileSandboxDir,
@@ -479,6 +480,7 @@ export async function executeCliCommand(
                 );
                 blockedErr.code = "TOOL_BLOCKED";
                 blockedErr.toolViolation = it.text;
+                blockedErr.toolCall = { name: it.name, params: it.params && typeof it.params === "object" ? it.params : {} };
                 reject(blockedErr);
               }
             } else {
@@ -643,9 +645,13 @@ export async function executeCliWithFallback(
     allowCliTools = null,
     signal = null,
     clientToolNames = null,
+    clientTools = null,
   } = {}
 ) {
   const mgr = profileManager || GLOBAL_PROFILE_MANAGER;
+  if (!clientToolNames && Array.isArray(clientTools) && clientTools.length > 0) {
+    clientToolNames = clientTools.map((t) => t?.name).filter(Boolean);
+  }
   if (profiles) {
     mgr.set_profiles(profiles);
   }
@@ -738,6 +744,18 @@ export async function executeCliWithFallback(
           });
           break;
         } catch (err) {
+          if (err?.code === "TOOL_BLOCKED" && !deltaForwarded && blockedToolTranslationEnabled()) {
+            const translated = translateBlockedToolCall(err.toolCall, clientTools, {
+              sandboxPrefixes: [getProfileSandboxBasePath(profile), getProfileSandboxDir(profile)],
+            });
+            if (translated) {
+              console.warn(
+                `[TOOL TRANSLATED] profile=${profileKey}: agy's ${err.toolCall.name} step became a client-side ${translated.name} call`
+              );
+              output = translated.text;
+              break;
+            }
+          }
           if (err?.code !== "TOOL_BLOCKED" || toolBlockRetriesLeft <= 0 || deltaForwarded) throw err;
           toolBlockRetriesLeft--;
           console.warn(

@@ -489,12 +489,21 @@ def tool_block_retry_notice(tool_text: Optional[str], client_tool_names: Optiona
     return "\n".join(lines)
 
 
+def blocked_tool_translation_enabled() -> bool:
+    """When agy starts one of its own tools and the request defines a client-side tool that does the same
+    job, the bridge answers with that client tool call instead of killing the run and retrying
+    (translate_blocked_tool_call). ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS=0 disables it."""
+    raw = os.environ.get("ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS", "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 class CLIToolUseBlockedError(RuntimeError):
     """agy tried to execute one of its own tools while the bridge runs in API mode."""
 
-    def __init__(self, message: str, tool_violation: Optional[str] = None):
+    def __init__(self, message: str, tool_violation: Optional[str] = None, tool_call: Optional[Tuple[str, Dict[str, Any]]] = None):
         super().__init__(message)
         self.tool_violation = tool_violation
+        self.tool_call = tool_call
 
 
 class CLIClientDisconnectedError(RuntimeError):
@@ -1079,6 +1088,184 @@ def parse_tool_calls_from_response(
             return remaining_text, parsed
 
     return output_text, None
+
+
+# --- Blocked agy tool -> client tool ---------------------------------------------------------------
+#
+# In API mode agy must not run its own tools, but the model keeps reaching for run_command / view_file
+# when it wants to act on a machine - and the client usually offers a tool for exactly that. Instead
+# of killing the run and retrying, the bridge turns the blocked step into the equivalent client-side
+# tool call: the model's intent is preserved and no second model run is needed.
+
+_COMMAND_TOOL_NAMES = {
+    "terminal", "shell", "bash", "sh", "zsh", "run_command", "execute_command", "run_shell_command",
+    "execute_shell", "shell_command", "run_terminal_cmd", "exec", "execute", "execute_bash", "bash_tool",
+    "command", "run_shell", "shell_exec", "run", "cmd",
+}
+_COMMAND_PROPS = ["command", "cmd", "command_line", "commandLine", "CommandLine", "shell_command"]
+_READ_TOOL_NAMES = {
+    "read_file", "read", "view_file", "file_read", "read_text_file", "cat", "open_file", "get_file_contents",
+    "view", "read_files", "file", "readfile",
+}
+_PATH_PROPS = ["path", "file_path", "filepath", "filePath", "filename", "file", "absolute_path", "absolutePath", "AbsolutePath", "target_file"]
+_OFFSET_PROPS = ["offset", "start_line", "startLine", "start", "line"]
+_LIMIT_PROPS = ["limit", "max_lines", "maxLines", "num_lines", "count"]
+_END_PROPS = ["end_line", "endLine", "end"]
+_CWD_PROPS = ["cwd", "workdir", "working_directory", "workingDirectory", "directory", "dir"]
+
+
+def _schema_props(tool: Dict[str, Any]) -> Dict[str, Any]:
+    params = tool.get("parameters") if isinstance(tool, dict) and isinstance(tool.get("parameters"), dict) else {}
+    props = params.get("properties") if isinstance(params.get("properties"), dict) else {}
+    return props
+
+
+def _first_prop(props: Dict[str, Any], candidates: List[str]) -> Optional[str]:
+    for c in candidates:
+        if c in props:
+            return c
+    return None
+
+
+def _find_command_tool(tools: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for t in tools or []:
+        name = str((t or {}).get("name") or "")
+        props = _schema_props(t)
+        prop = _first_prop(props, _COMMAND_PROPS)
+        if not prop:
+            continue
+        if name.lower() in _COMMAND_TOOL_NAMES or re.search(r"term|shell|bash|cmd|command|exec", name, re.IGNORECASE):
+            return {"tool": t, "prop": prop, "cwd_prop": _first_prop(props, _CWD_PROPS)}
+    return None
+
+
+def _find_read_tool(tools: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for t in tools or []:
+        name = str((t or {}).get("name") or "")
+        props = _schema_props(t)
+        prop = _first_prop(props, _PATH_PROPS)
+        if not prop:
+            continue
+        if name.lower() in _READ_TOOL_NAMES or re.search(r"read|view|cat", name, re.IGNORECASE):
+            limit_prop = _first_prop(props, _LIMIT_PROPS)
+            limit_max = None
+            if limit_prop and isinstance(props.get(limit_prop), dict) and isinstance(props[limit_prop].get("maximum"), (int, float)):
+                limit_max = int(props[limit_prop]["maximum"])
+            return {
+                "tool": t, "prop": prop, "offset_prop": _first_prop(props, _OFFSET_PROPS),
+                "limit_prop": limit_prop, "limit_max": limit_max, "end_prop": _first_prop(props, _END_PROPS),
+            }
+    return None
+
+
+def shell_quote(s: Any) -> str:
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def _pick(params: Dict[str, Any], names: List[str]) -> Any:
+    for n in names:
+        v = params.get(n)
+        if v is not None and v != "":
+            return v
+    return None
+
+
+def _under_any(p: Any, prefixes: List[str]) -> bool:
+    s = str(p or "")
+    for pre in prefixes or []:
+        if pre and (s == pre or s.startswith(pre if pre.endswith("/") else pre + "/")):
+            return True
+    return False
+
+
+def translate_blocked_tool_call(
+    call: Optional[Tuple[str, Dict[str, Any]]],
+    client_tools: Optional[List[Dict[str, Any]]],
+    sandbox_prefixes: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Map one blocked agy tool step (name, params) onto the client's tools. Returns
+    {"name", "arguments", "text"} (text = the tool_calls JSON the server parses) or None when nothing fits.
+    sandbox_prefixes: agy working directories; a Cwd inside them is agy's own scratch space and is
+    dropped, any other Cwd is honoured with a `cd` prefix (or the tool's own cwd property)."""
+    if not call or not client_tools:
+        return None
+    agy_name = str(call[0] or "").lower()
+    params = call[1] if isinstance(call[1], dict) else {}
+    name: Optional[str] = None
+    args: Optional[Dict[str, Any]] = None
+
+    if agy_name == "run_command":
+        cmd = _pick(params, ["CommandLine", "command_line", "command", "Command", "cmd"])
+        target = _find_command_tool(client_tools)
+        if not isinstance(cmd, str) or not cmd.strip() or not target:
+            return None
+        args = {target["prop"]: cmd}
+        cwd = _pick(params, ["Cwd", "cwd", "WorkingDirectory"])
+        if isinstance(cwd, str) and cwd.strip() and not _under_any(cwd, sandbox_prefixes or []):
+            if target["cwd_prop"]:
+                args[target["cwd_prop"]] = cwd
+            else:
+                args[target["prop"]] = f"cd {shell_quote(cwd)} && {cmd}"
+        name = target["tool"]["name"]
+    elif agy_name in ("view_file", "view_file_outline", "view_content_chunk"):
+        file_path = _pick(params, ["AbsolutePath", "absolute_path", "path", "file_path", "File"])
+        target = _find_read_tool(client_tools)
+        if not isinstance(file_path, str) or not file_path.strip() or not target:
+            return None
+        args = {target["prop"]: file_path}
+        start = params.get("StartLine")
+        end = params.get("EndLine")
+        if isinstance(start, (int, float)) and not isinstance(start, bool) and start >= 0:
+            start = int(start)
+            if target["offset_prop"]:
+                args[target["offset_prop"]] = start + 1  # agy lines are 0-based
+            if isinstance(end, (int, float)) and not isinstance(end, bool) and end >= start:
+                end = int(end)
+                if target["limit_prop"]:
+                    limit = end - start + 1
+                    if target["limit_max"]:
+                        limit = min(limit, target["limit_max"])
+                    args[target["limit_prop"]] = limit
+                elif target["end_prop"]:
+                    args[target["end_prop"]] = end + 1
+        name = target["tool"]["name"]
+    elif agy_name == "list_dir":
+        d = _pick(params, ["DirectoryPath", "directory_path", "path", "Path"])
+        target = _find_command_tool(client_tools)
+        if not isinstance(d, str) or not d.strip() or not target:
+            return None
+        args = {target["prop"]: f"ls -la {shell_quote(d)}"}
+        name = target["tool"]["name"]
+    elif agy_name == "grep_search":
+        query = _pick(params, ["Query", "query", "Pattern", "pattern"])
+        search_path = _pick(params, ["SearchPath", "search_path", "path", "SearchDirectory"]) or "."
+        target = _find_command_tool(client_tools)
+        if not isinstance(query, str) or not query or not target:
+            return None
+        flags = ["-rn"]
+        if params.get("CaseInsensitive") is True:
+            flags.append("-i")
+        if params.get("IsRegex") is False:
+            flags.append("-F")
+        includes = [g for g in (params.get("Includes") or []) if isinstance(g, str) and g] if isinstance(params.get("Includes"), list) else []
+        inc = [f"--include={shell_quote(g)}" for g in includes]
+        args = {target["prop"]: " ".join(["grep", *flags, *inc, shell_quote(query), shell_quote(search_path)])}
+        name = target["tool"]["name"]
+    elif agy_name == "find_by_name":
+        d = _pick(params, ["SearchDirectory", "search_directory", "path"])
+        pattern = _pick(params, ["Pattern", "pattern"])
+        target = _find_command_tool(client_tools)
+        if not isinstance(d, str) or not d.strip() or not target:
+            return None
+        parts = ["find", shell_quote(d)]
+        if isinstance(pattern, str) and pattern:
+            parts += ["-name", shell_quote(pattern)]
+        args = {target["prop"]: " ".join(parts)}
+        name = target["tool"]["name"]
+    else:
+        return None
+
+    return {"name": name, "arguments": args, "text": json.dumps({"tool_calls": [{"name": name, "arguments": args}]}, ensure_ascii=False)}
 
 
 def compact_tool_output(content: Any, max_chars: int = 1500) -> Any:
@@ -3938,6 +4125,7 @@ def execute_cli_command(
                 "The bridge runs in API mode and does not let agy execute tools on this machine; "
                 f"ask for a text answer or a client-side tool call instead (set ANTIGRAVITY_ALLOW_CLI_TOOLS=1 to allow).{hint}",
                 tool_violation=tool_violation,
+                tool_call=tool_violation_call,
             )
 
         if parsed_stream.is_failure():
@@ -3992,8 +4180,11 @@ def execute_cli_with_fallback(
     allow_cli_tools: Optional[bool] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     client_tool_names: Optional[List[str]] = None,
+    client_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Execute CLI command trying profiles dynamically in parallel-safe worker pool until one succeeds or total timeout budget is reached."""
+    if not client_tool_names and client_tools:
+        client_tool_names = [t.get("name") for t in client_tools if isinstance(t, dict) and t.get("name")]
     mgr = profile_manager or GLOBAL_PROFILE_MANAGER
     if profiles is not None:
         mgr.set_profiles(profiles)
@@ -4153,6 +4344,18 @@ def execute_cli_with_fallback(
                     output = _run_once(attempt_prompt, attempt_budget)
                     break
                 except CLIToolUseBlockedError as blocked:
+                    if not delta_forwarded[0] and blocked_tool_translation_enabled():
+                        translated = translate_blocked_tool_call(
+                            blocked.tool_call, client_tools,
+                            sandbox_prefixes=[get_profile_sandbox_base_path(profile), get_profile_sandbox_dir(profile)],
+                        )
+                        if translated:
+                            logger.warning(
+                                "[TOOL TRANSLATED] Profile '%s': agy's %s step became a client-side %s call",
+                                profile_key, blocked.tool_call[0] if blocked.tool_call else "tool", translated["name"],
+                            )
+                            output = translated["text"]
+                            break
                     if tool_block_retries_left <= 0 or delta_forwarded[0]:
                         raise
                     tool_block_retries_left -= 1
@@ -5699,6 +5902,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     output_callback=live_output_callback,
                     cancel_check=self._client_disconnected,
                     client_tool_names=[t.get("name") for t in normalized_tools if t.get("name")] if normalized_tools else None,
+                    client_tools=normalized_tools or None,
                 )
                 actual_model = getattr(output_text, "effective_model", None) or profile_manager.get_last_execution_model(used_profile) or model
                 logger.info(
