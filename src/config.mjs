@@ -455,14 +455,27 @@ export function toolBlockRetries() {
 
 export const TOOL_BLOCK_RETRY_NOTICE_HEADER = "[Bridge notice: previous attempt aborted]";
 
-export function toolBlockRetryNotice(toolText) {
+export function toolBlockRetryNotice(toolText, clientToolNames = null) {
   const shown = String(toolText || "a built-in tool").replace(/\s+/g, " ").slice(0, 160);
-  return [
+  const names = Array.isArray(clientToolNames) ? clientToolNames.filter((n) => typeof n === "string" && n) : [];
+  const lines = [
     TOOL_BLOCK_RETRY_NOTICE_HEADER,
     `Your previous attempt at this exact request was killed because you tried to run your own built-in tool (${shown}).`,
     "That is forbidden here and would be killed again. Do NOT run commands, read or list files, or browse.",
-    "Answer from the conversation above only: reply in plain text, or, if the request defines client-side tools and one is truly needed, output that tool call JSON exactly as instructed and stop.",
-  ].join("\n");
+  ];
+  if (names.length > 0) {
+    // Name the client's tools: the model usually reached for run_command/view_file because it wanted to
+    // act on the machine, and the client already offers that as a tool it will run itself.
+    lines.push(
+      `The client-side tools defined in this request are: ${names.join(", ")}. Anything that touches a machine ` +
+        "(running a command, reading or editing a file, scheduling) must be done by replying with the tool_calls JSON " +
+        'for one of those tools, e.g. {"tool_calls":[{"name":"<tool>","arguments":{...}}]}, and then stopping; the client runs it and sends the result back.'
+    );
+  }
+  lines.push(
+    "Answer from the conversation above only: reply in plain text, or, if the request defines client-side tools and one is truly needed, output that tool call JSON exactly as instructed and stop."
+  );
+  return lines.join("\n");
 }
 
 function envInt(name, dflt) {

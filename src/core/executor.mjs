@@ -18,6 +18,7 @@ import {
   toolBlockRetryNotice,
 } from "../config.mjs";
 import { sanitizePromptForCli } from "../translators/context-compactor.mjs";
+import { parseToolCallsFromResponse } from "../translators/tools.mjs";
 import {
   acquireSandboxLock,
   getProfileSandboxDir,
@@ -150,7 +151,15 @@ export class AgyStreamParser {
     this.error = null;
     this.rawLines = [];
     this.toolSteps = [];
+    // agent_response text grouped per agy step (in stream order). agy retries the model in place when
+    // Gemini returns a malformed native function call, so one run can hold several separate replies.
+    this._steps = [];
     this._buf = "";
+  }
+
+  /** Text of each agent_response step, in order. */
+  agentResponses() {
+    return this._steps.map((s) => s.text);
   }
 
   /** Feed a raw stdout chunk. Returns an array of {kind:"delta"|"raw", text} items. */
@@ -191,6 +200,10 @@ export class AgyStreamParser {
           const su = ev.step_update;
           if (su.step_type === "agent_response" && typeof su.text_delta === "string" && su.text_delta) {
             this.deltas.push(su.text_delta);
+            const stepKey = su.step_index === undefined || su.step_index === null ? null : su.step_index;
+            const last = this._steps[this._steps.length - 1];
+            if (last && last.key === stepKey) last.text += su.text_delta;
+            else this._steps.push({ key: stepKey, text: su.text_delta });
             return [{ kind: "delta", text: su.text_delta }];
           }
           if (su.step_type === "tool" && su.state === "ACTIVE") {
@@ -237,6 +250,26 @@ export class AgyStreamParser {
   errorText() {
     return this.error || this.finalResponse || this.rawLines.join("").trim() || `agy result status=${this.status}`;
   }
+}
+
+// agy's own harness error when Gemini answers with a malformed native function call. Seen with Hermes:
+// the model writes the client-side tool_calls JSON as text (which is what the bridge asked for) and
+// additionally emits an empty native call; agy then retries the model up to 3 times and ends the run
+// with status ERROR although a complete, usable reply is already in the stream.
+const MALFORMED_FUNCTION_CALL_RE = /improperly formatted function call|malformed function call/i;
+
+/**
+ * When agy ended the run with the malformed-function-call error, return the first agent_response
+ * text that is a well-formed call to one of the client's tools, else null.
+ */
+export function salvageClientToolCall(parser, clientToolNames) {
+  if (!Array.isArray(clientToolNames) || clientToolNames.length === 0) return null;
+  if (!MALFORMED_FUNCTION_CALL_RE.test(parser.errorText() || "")) return null;
+  for (const text of parser.agentResponses()) {
+    const [, calls] = parseToolCallsFromResponse(text, clientToolNames);
+    if (calls && calls.length > 0) return text.trim();
+  }
+  return null;
 }
 
 // agy's read-only tools. Anything else (run_command, writes, browser, web, subagents) is never matched.
@@ -329,6 +362,7 @@ export async function executeCliCommand(
     outputCallback = null,
     allowCliTools = null,
     signal = null,
+    clientToolNames = null,
   } = {}
 ) {
   const { argv, stdinInput } = parseCmdTemplate(cmdTemplate, promptText, modelName);
@@ -555,6 +589,14 @@ export async function executeCliCommand(
           `[EXEC] profile=${profile || "default"} finished in ${((Date.now() - execStart) / 1000).toFixed(1)}s exit=${code} status=${parser.status || (parser.seenEvents ? "?" : "text")} deltas=${parser.deltas.length} tool_steps=${parser.toolSteps.length}`
         );
         if (parser.isFailure()) {
+          const salvaged = salvageClientToolCall(parser, clientToolNames);
+          if (salvaged !== null) {
+            console.warn(
+              `[SALVAGED] profile=${profile || "default"}: agy ended with "${String(parser.errorText()).replace(/\s+/g, " ").slice(0, 100)}" but the model had already replied with a client-side tool call; using that reply`
+            );
+            resolve(salvaged);
+            return;
+          }
           reject(
             new Error(
               `CLI Execution Error (profile=${profile || "default"}, status=${parser.status}): ${parser.errorText()}`
@@ -600,6 +642,7 @@ export async function executeCliWithFallback(
     outputCallback = null,
     allowCliTools = null,
     signal = null,
+    clientToolNames = null,
   } = {}
 ) {
   const mgr = profileManager || GLOBAL_PROFILE_MANAGER;
@@ -691,6 +734,7 @@ export async function executeCliWithFallback(
             outputCallback: trackedOutputCallback,
             allowCliTools,
             signal,
+            clientToolNames,
           });
           break;
         } catch (err) {
@@ -699,7 +743,7 @@ export async function executeCliWithFallback(
           console.warn(
             `[TOOL BLOCKED] profile=${profileKey}: retrying on the same profile with a reinforced no-tools notice (${toolBlockRetriesLeft} retry left)`
           );
-          attemptPrompt = `${promptText}\n\n${toolBlockRetryNotice(err.toolViolation)}`;
+          attemptPrompt = `${promptText}\n\n${toolBlockRetryNotice(err.toolViolation, clientToolNames)}`;
           attemptBudget = Math.max(1.0, Math.min(timeout, totalTimeout - (Date.now() - startTime) / 1000));
         }
       }

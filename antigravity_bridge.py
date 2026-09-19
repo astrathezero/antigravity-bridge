@@ -465,15 +465,28 @@ def tool_block_retries() -> int:
 TOOL_BLOCK_RETRY_NOTICE_HEADER = "[Bridge notice: previous attempt aborted]"
 
 
-def tool_block_retry_notice(tool_text: Optional[str]) -> str:
+def tool_block_retry_notice(tool_text: Optional[str], client_tool_names: Optional[List[str]] = None) -> str:
     shown = " ".join((tool_text or "a built-in tool").split())[:160]
-    return (
-        f"{TOOL_BLOCK_RETRY_NOTICE_HEADER}\n"
-        f"Your previous attempt at this exact request was killed because you tried to run your own built-in tool ({shown}).\n"
-        "That is forbidden here and would be killed again. Do NOT run commands, read or list files, or browse.\n"
+    names = [n for n in (client_tool_names or []) if isinstance(n, str) and n]
+    lines = [
+        TOOL_BLOCK_RETRY_NOTICE_HEADER,
+        f"Your previous attempt at this exact request was killed because you tried to run your own built-in tool ({shown}).",
+        "That is forbidden here and would be killed again. Do NOT run commands, read or list files, or browse.",
+    ]
+    if names:
+        # Name the client's tools: the model usually reached for run_command/view_file because it wanted to
+        # act on the machine, and the client already offers that as a tool it will run itself.
+        lines.append(
+            f"The client-side tools defined in this request are: {', '.join(names)}. Anything that touches a machine "
+            "(running a command, reading or editing a file, scheduling) must be done by replying with the tool_calls JSON "
+            'for one of those tools, e.g. {"tool_calls":[{"name":"<tool>","arguments":{...}}]}, and then stopping; '
+            "the client runs it and sends the result back."
+        )
+    lines.append(
         "Answer from the conversation above only: reply in plain text, or, if the request defines client-side tools "
         "and one is truly needed, output that tool call JSON exactly as instructed and stop."
     )
+    return "\n".join(lines)
 
 
 class CLIToolUseBlockedError(RuntimeError):
@@ -3262,6 +3275,13 @@ class AgyStreamOutput:
         # (tool name, full parameters, summary) per tool step; last_tool is the most recent one.
         self.tool_calls: List[Tuple[str, Dict[str, Any], str]] = []
         self.last_tool: Optional[Tuple[str, Dict[str, Any]]] = None
+        # agent_response text grouped per agy step (in stream order). agy retries the model in place when
+        # Gemini returns a malformed native function call, so one run can hold several separate replies.
+        self._steps: List[Tuple[Any, List[str]]] = []
+
+    def agent_responses(self) -> List[str]:
+        """Text of each agent_response step, in order."""
+        return ["".join(parts) for _, parts in self._steps]
 
     def feed_line(self, line: str) -> Tuple[str, Optional[str]]:
         """Consume one stdout line. Returns (kind, text): kind is 'delta' (text to forward),
@@ -3280,6 +3300,11 @@ class AgyStreamOutput:
                     delta = su.get("text_delta")
                     if su.get("step_type") == "agent_response" and isinstance(delta, str) and delta:
                         self.deltas.append(delta)
+                        step_key = su.get("step_index")
+                        if self._steps and self._steps[-1][0] == step_key:
+                            self._steps[-1][1].append(delta)
+                        else:
+                            self._steps.append((step_key, [delta]))
                         return "delta", delta
                     if su.get("step_type") == "tool" and su.get("state") == "ACTIVE":
                         info = su.get("tool_info") if isinstance(su.get("tool_info"), dict) else {}
@@ -3319,6 +3344,27 @@ class AgyStreamOutput:
 
     def error_text(self) -> str:
         return self.error or self.final_response or "".join(self.raw_lines).strip() or f"agy result status={self.status}"
+
+
+# agy's own harness error when Gemini answers with a malformed native function call. Seen with Hermes:
+# the model writes the client-side tool_calls JSON as text (which is what the bridge asked for) and
+# additionally emits an empty native call; agy then retries the model up to 3 times and ends the run
+# with status ERROR although a complete, usable reply is already in the stream.
+MALFORMED_FUNCTION_CALL_RE = re.compile(r"improperly formatted function call|malformed function call", re.IGNORECASE)
+
+
+def salvage_client_tool_call(parsed_stream: AgyStreamOutput, client_tool_names: Optional[List[str]]) -> Optional[str]:
+    """When agy ended the run with the malformed-function-call error, return the first agent_response
+    text that is a well-formed call to one of the client's tools, else None."""
+    if not client_tool_names:
+        return None
+    if not MALFORMED_FUNCTION_CALL_RE.search(parsed_stream.error_text() or ""):
+        return None
+    for text in parsed_stream.agent_responses():
+        _, calls = parse_tool_calls_from_response(text, allowed_tools=list(client_tool_names))
+        if calls:
+            return text.strip()
+    return None
 
 
 def parse_agy_stream_output(raw_stdout: str) -> AgyStreamOutput:
@@ -3654,6 +3700,7 @@ def execute_cli_command(
     output_callback: Optional[Callable[[str], None]] = None,
     allow_cli_tools: Optional[bool] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    client_tool_names: Optional[List[str]] = None,
 ) -> str:
     """Execute local CLI command with prompt substitution or stdin piping for a given profile in an isolated sandbox."""
     argv, stdin_input = parse_cmd_template(cmd_template, prompt_text, model_name=model_name)
@@ -3831,6 +3878,13 @@ def execute_cli_command(
 
         if parsed_stream.is_failure():
             err_msg = parsed_stream.error_text()
+            salvaged = salvage_client_tool_call(parsed_stream, client_tool_names)
+            if salvaged is not None:
+                logger.warning(
+                    "[SALVAGED] Profile '%s': agy ended with \"%s\" but the model had already replied with a client-side tool call; using that reply",
+                    profile or "default", " ".join(str(err_msg).split())[:100],
+                )
+                return salvaged
             logger.error("CLI reported failure for profile '%s' (status=%s): %s", profile or "default", parsed_stream.status, err_msg)
             raise RuntimeError(f"CLI Execution Error (profile={profile or 'default'}): {err_msg}")
 
@@ -3873,6 +3927,7 @@ def execute_cli_with_fallback(
     output_callback: Optional[Callable[[str], None]] = None,
     allow_cli_tools: Optional[bool] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    client_tool_names: Optional[List[str]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Execute CLI command trying profiles dynamically in parallel-safe worker pool until one succeeds or total timeout budget is reached."""
     mgr = profile_manager or GLOBAL_PROFILE_MANAGER
@@ -4004,6 +4059,7 @@ def execute_cli_with_fallback(
                 ("output_callback", tracked_output_callback),
                 ("allow_cli_tools", allow_cli_tools),
                 ("cancel_check", cancel_check),
+                ("client_tool_names", client_tool_names),
             ):
                 if k_name in sig_params:
                     extra_kwargs[k_name] = k_val
@@ -4041,7 +4097,7 @@ def execute_cli_with_fallback(
                         profile_key,
                         tool_block_retries_left,
                     )
-                    attempt_prompt = f"{prompt_text}\n\n{tool_block_retry_notice(blocked.tool_violation)}"
+                    attempt_prompt = f"{prompt_text}\n\n{tool_block_retry_notice(blocked.tool_violation, client_tool_names)}"
                     attempt_budget = max(1.0, min(timeout, total_timeout - (time.time() - start_time)))
             mgr.mark_success(profile, model=effective_model)
             mgr.set_last_execution_model(profile, effective_model or "default")
@@ -5578,6 +5634,7 @@ class AntigravityBridgeHandler(BaseHTTPRequestHandler):
                     stall_timeout=stall_timeout,
                     output_callback=live_output_callback,
                     cancel_check=self._client_disconnected,
+                    client_tool_names=[t.get("name") for t in normalized_tools if t.get("name")] if normalized_tools else None,
                 )
                 actual_model = getattr(output_text, "effective_model", None) or profile_manager.get_last_execution_model(used_profile) or model
                 logger.info(

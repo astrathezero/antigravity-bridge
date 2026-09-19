@@ -789,6 +789,9 @@ export function createBridgeServer(options = {}) {
         reqProfile = null; // ignore unsafe / malformed profile hints
       }
 
+      const clientToolNames =
+        normalizedTools && normalizedTools.length > 0 ? normalizedTools.map((t) => t.name).filter(Boolean) : null;
+
       try {
         const { outputText, usedProfile, effectiveModel } = await executeCliWithFallback(
           cmdTpl,
@@ -802,6 +805,7 @@ export function createBridgeServer(options = {}) {
             stallTimeout,
             outputCallback: liveOutputCallback,
             signal: abortCtl.signal,
+            clientToolNames,
           }
         );
 
@@ -813,9 +817,8 @@ export function createBridgeServer(options = {}) {
         // Tool calling parse
         let parsedContentText = null;
         let parsedToolCalls = null;
-        if (normalizedTools && normalizedTools.length > 0) {
-          const allowedNames = normalizedTools.map((t) => t.name).filter(Boolean);
-          [parsedContentText, parsedToolCalls] = parseToolCallsFromResponse(outputText, allowedNames);
+        if (clientToolNames) {
+          [parsedContentText, parsedToolCalls] = parseToolCallsFromResponse(outputText, clientToolNames);
         }
 
         const showStatus = shouldShowProfileStatus();

@@ -442,3 +442,83 @@ test("executor: tool-block retry is skipped once text was streamed, and when ANT
     if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
   }
 });
+
+// --- malformed-function-call salvage -------------------------------------------------------------
+
+test("parser: agent_response text is grouped per step and a malformed-function-call run is salvageable", async () => {
+  const { salvageClientToolCall } = await import("../src/core/executor.mjs");
+  const call = '{"tool_calls":[{"name":"read_file","arguments":{"path":"/x"}}]}';
+  const p = new AgyStreamParser();
+  p.feed(JSON.stringify({ event: "step_update", step_update: { step_index: 1, state: "ACTIVE", step_type: "agent_response", text_delta: call.slice(0, 20) } }) + "\n");
+  p.feed(JSON.stringify({ event: "step_update", step_update: { step_index: 1, state: "DONE", step_type: "agent_response", text_delta: call.slice(20) } }) + "\n");
+  p.feed(JSON.stringify({ event: "step_update", step_update: { step_index: 3, state: "ACTIVE", step_type: "agent_response", text_delta: "second " } }) + "\n");
+  p.feed(JSON.stringify({ event: "step_update", step_update: { step_index: 3, state: "DONE", step_type: "agent_response", text_delta: "reply" } }) + "\n");
+  p.feed(JSON.stringify({ event: "result", result: { status: "ERROR", error: "Your previous response contained an improperly formatted function call\nPlease retry with a properly formatted function call\nRetries remaining: 3" } }) + "\n");
+  assert.deepEqual(p.agentResponses(), [call, "second reply"]);
+  assert.equal(p.isFailure(), true);
+  assert.equal(salvageClientToolCall(p, ["terminal", "read_file"]), call, "first step that calls a client tool wins");
+  assert.equal(salvageClientToolCall(p, ["terminal"]), null, "a call to a tool the client did not offer is not salvaged");
+  assert.equal(salvageClientToolCall(p, null), null, "no client tools: nothing to salvage");
+  assert.equal(salvageClientToolCall(p, []), null);
+
+  // Any other agy failure is still a failure.
+  const q = new AgyStreamParser();
+  q.feed(JSON.stringify({ event: "step_update", step_update: { step_index: 1, state: "DONE", step_type: "agent_response", text_delta: call } }) + "\n");
+  q.feed(JSON.stringify({ event: "result", result: { status: "ERROR", error: "API error (attempt 1): UNAVAILABLE (code 503)" } }) + "\n");
+  assert.equal(salvageClientToolCall(q, ["read_file"]), null);
+});
+
+const MALFORMED_CALL_RUN_SRC = [
+  'const call = JSON.stringify({tool_calls:[{name:"read_file",arguments:{path:"/etc/hostname"}}]});',
+  'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"DONE",step_type:"agent_response",text_delta:call}})+"\\n");',
+  'process.stdout.write(JSON.stringify({event:"step_update",step_update:{step_index:3,state:"DONE",step_type:"agent_response",text_delta:"```json\\n"+call+"\\n```"}})+"\\n");',
+  'process.stdout.write(JSON.stringify({event:"result",result:{status:"ERROR",error:"Your previous response contained an improperly formatted function call: Malformed function call: Failed to parse function call: Function call is empty - no input to parse.\\nPlease retry with a properly formatted function call\\nRetries remaining: 3"}})+"\\n");',
+  "",
+].join("\n");
+
+test("executor: a run agy ends with 'improperly formatted function call' is salvaged when the model already replied with a client-side tool call", async () => {
+  const prev = process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS;
+  const prevBase = process.env.ANTIGRAVITY_SANDBOX_BASE;
+  process.env.ANTIGRAVITY_SANDBOX_BASE = `${process.cwd()}/tests/.tmp-sandbox`;
+  const fsMod = await import("node:fs");
+  fsMod.mkdirSync(`${process.cwd()}/tests/.tmp-sandbox`, { recursive: true });
+  const helper = `${process.cwd()}/tests/.tmp-sandbox/malformed-call-run.mjs`;
+  fsMod.writeFileSync(helper, MALFORMED_CALL_RUN_SRC);
+  try {
+    const pm = new ProfileManager(["zz_s1", "zz_s2"]);
+    pm.reset_all();
+    const res = await executeCliWithFallback(`node ${helper} {prompt}`, "hi", {
+      profileManager: pm,
+      timeout: 20,
+      totalTimeout: 40,
+      clientToolNames: ["terminal", "read_file"],
+    });
+    assert.equal(res.outputText, '{"tool_calls":[{"name":"read_file","arguments":{"path":"/etc/hostname"}}]}');
+    assert.equal(res.usedProfile, "zz_s1", "no failover to another profile");
+    assert.equal(pm.state["zz_s2"]?.last_used || 0, 0, "second profile never tried");
+    assert.equal(pm.is_in_cooldown("zz_s1"), false);
+
+    // Without client tools the same run is the failure it always was.
+    const pm2 = new ProfileManager(["zz_s3", "zz_s4"]);
+    pm2.reset_all();
+    await assert.rejects(
+      executeCliWithFallback(`node ${helper} {prompt}`, "hi", { profileManager: pm2, timeout: 20, totalTimeout: 40 }),
+      /improperly formatted function call/
+    );
+  } finally {
+    if (prev === undefined) delete process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS; else process.env.ANTIGRAVITY_ALLOW_CLI_TOOLS = prev;
+    if (prevBase === undefined) delete process.env.ANTIGRAVITY_SANDBOX_BASE; else process.env.ANTIGRAVITY_SANDBOX_BASE = prevBase;
+  }
+});
+
+test("config: the tool-block retry notice names the client-side tools when the request has them", async () => {
+  const { toolBlockRetryNotice, TOOL_BLOCK_RETRY_NOTICE_HEADER } = await import("../src/config.mjs");
+  const plain = toolBlockRetryNotice('run_command {"CommandLine":"ls"}');
+  assert.ok(plain.startsWith(TOOL_BLOCK_RETRY_NOTICE_HEADER));
+  assert.ok(!plain.includes("client-side tools defined in this request"));
+  const named = toolBlockRetryNotice('run_command {"CommandLine":"ls"}', ["terminal", "read_file", ""]);
+  assert.ok(named.includes("The client-side tools defined in this request are: terminal, read_file."));
+  assert.ok(named.includes('{"tool_calls":[{"name":"<tool>"'));
+  assert.ok(named.includes("run_command"));
+});

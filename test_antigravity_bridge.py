@@ -1724,6 +1724,64 @@ class TestApiModeToolGuard(unittest.TestCase):
             os.environ.pop("ANTIGRAVITY_TOOL_BLOCK_RETRIES", None)
         self.assertIn("CLI tool execution blocked", str(ctx2.exception))
 
+    # agy stand-in for the salvage test: the model answers with the client-side tool_calls JSON (twice,
+    # because agy retried it in place), then agy ends the run with its malformed-function-call error.
+    _MALFORMED_CALL_RUN_SRC = (
+        "import json\n"
+        "call=json.dumps({'tool_calls':[{'name':'read_file','arguments':{'path':'/etc/hostname'}}]})\n"
+        "print(json.dumps({'event':'step_update','step_update':{'step_index':1,'state':'DONE','step_type':'agent_response','text_delta':call}}),flush=True)\n"
+        "print(json.dumps({'event':'step_update','step_update':{'step_index':3,'state':'DONE','step_type':'agent_response','text_delta':'```json\\n'+call+'\\n```'}}),flush=True)\n"
+        "print(json.dumps({'event':'result','result':{'status':'ERROR','error':'Your previous response contained an improperly formatted function call: Malformed function call: Failed to parse function call: Function call is empty - no input to parse.\\nPlease retry with a properly formatted function call\\nRetries remaining: 3'}}),flush=True)\n"
+    )
+
+    def test_parser_groups_agent_responses_per_step_and_salvage_helper(self):
+        call = '{"tool_calls":[{"name":"read_file","arguments":{"path":"/x"}}]}'
+        out = antigravity_bridge.AgyStreamOutput()
+        out.feed_line(json.dumps({"event": "step_update", "step_update": {"step_index": 1, "state": "ACTIVE", "step_type": "agent_response", "text_delta": call[:20]}}) + "\n")
+        out.feed_line(json.dumps({"event": "step_update", "step_update": {"step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": call[20:]}}) + "\n")
+        out.feed_line(json.dumps({"event": "step_update", "step_update": {"step_index": 3, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "second "}}) + "\n")
+        out.feed_line(json.dumps({"event": "step_update", "step_update": {"step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "reply"}}) + "\n")
+        out.feed_line(json.dumps({"event": "result", "result": {"status": "ERROR", "error": "Your previous response contained an improperly formatted function call\nPlease retry with a properly formatted function call\nRetries remaining: 3"}}) + "\n")
+        self.assertEqual(out.agent_responses(), [call, "second reply"])
+        self.assertTrue(out.is_failure())
+        salvage = antigravity_bridge.salvage_client_tool_call
+        self.assertEqual(salvage(out, ["terminal", "read_file"]), call)
+        self.assertIsNone(salvage(out, ["terminal"]))
+        self.assertIsNone(salvage(out, None))
+        self.assertIsNone(salvage(out, []))
+        other = antigravity_bridge.AgyStreamOutput()
+        other.feed_line(json.dumps({"event": "step_update", "step_update": {"step_index": 1, "state": "DONE", "step_type": "agent_response", "text_delta": call}}) + "\n")
+        other.feed_line(json.dumps({"event": "result", "result": {"status": "ERROR", "error": "API error (attempt 1): UNAVAILABLE (code 503)"}}) + "\n")
+        self.assertIsNone(salvage(other, ["read_file"]))
+
+    def test_malformed_function_call_run_is_salvaged_when_client_tools_offered(self):
+        helper = self._write_helper("malformed_call_run.py", self._MALFORMED_CALL_RUN_SRC)
+        pm = ProfileManager(profiles=["zz_s1", "zz_s2"], concurrency_per_profile=1)
+        out, used = execute_cli_with_fallback(
+            f"python3 {helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm,
+            client_tool_names=["terminal", "read_file"],
+        )
+        self.assertEqual(out, '{"tool_calls": [{"name": "read_file", "arguments": {"path": "/etc/hostname"}}]}')
+        self.assertEqual(used, "zz_s1")
+        self.assertEqual(pm.state.get("zz_s2", {}).get("last_used", 0), 0)
+        self.assertFalse(pm.is_in_cooldown("zz_s1"))
+
+        # Without client tools the same run is the failure it always was.
+        pm2 = ProfileManager(profiles=["zz_s3", "zz_s4"], concurrency_per_profile=1)
+        with self.assertRaises(RuntimeError) as ctx:
+            execute_cli_with_fallback(f"python3 {helper} {{prompt}}", "hi", timeout=20.0, total_timeout=40.0, profile_manager=pm2)
+        self.assertIn("improperly formatted function call", str(ctx.exception))
+
+    def test_retry_notice_names_client_tools(self):
+        notice = antigravity_bridge.tool_block_retry_notice
+        plain = notice('run_command {"CommandLine":"ls"}')
+        self.assertTrue(plain.startswith(antigravity_bridge.TOOL_BLOCK_RETRY_NOTICE_HEADER))
+        self.assertNotIn("client-side tools defined in this request", plain)
+        named = notice('run_command {"CommandLine":"ls"}', ["terminal", "read_file", ""])
+        self.assertIn("The client-side tools defined in this request are: terminal, read_file.", named)
+        self.assertIn('{"tool_calls":[{"name":"<tool>"', named)
+        self.assertIn("run_command", named)
+
     def test_parser_keeps_tool_name_and_full_params(self):
         out = antigravity_bridge.AgyStreamOutput()
         long_path = "/tmp/" + "x" * 300 + "/transcript_full.jsonl"
