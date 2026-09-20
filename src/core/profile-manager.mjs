@@ -790,8 +790,8 @@ export class ProfileManager {
       ...this._order_bucket(readyAvail),
       ...this._order_bucket(fallbackIdle),
       ...this._order_bucket(fallbackAvail),
-      ...busy,
-      ...exhausted,
+      ...this._order_bucket(busy),
+      ...this._order_bucket(exhausted),
     ];
   }
 

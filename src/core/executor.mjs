@@ -539,14 +539,18 @@ export async function executeCliCommand(
       // can succeed (agy makes 8 of them, ~2.5 min): end the run now so the fallback loop can put this
       // profile in cooldown until the reset and move on within seconds. Anything else (a busy model, a
       // per-minute limit) is left to agy's own retry. The transcript line can land a moment after the
-      // stdout event, so a missing line, or one that belongs to an earlier step than the one that
-      // triggered the read, is re-read a couple of times before giving up on this step.
+      // stdout event, so a missing line, or a non-quota line that belongs to an earlier step than the
+      // one that triggered the read, is re-read every 400 ms for up to 2 s before giving up on this
+      // step. A hard quota line is decisive whatever its step: a quota used up at an earlier attempt
+      // of this run is still used up now, so a line that lags more than that is judged on the next step.
       const checkForQuotaError = (rereads, stepIndex) => {
         readLatestAgyRunError(sandboxDir, parser.conversationId)
           .then((found) => {
             if (isSettled) return;
+            const hardQuota = found !== null && isHardQuotaError(found.error);
             const stale =
               found !== null &&
+              !hardQuota &&
               Number.isInteger(found.stepIndex) &&
               Number.isInteger(stepIndex) &&
               found.stepIndex < stepIndex;
@@ -561,7 +565,7 @@ export async function executeCliCommand(
             }
             quotaCheckPending = false;
             const errText = found.error;
-            if (!isHardQuotaError(errText)) return;
+            if (!hardQuota) return;
             isSettled = true;
             clearTimeout(totalTimer);
             clearInterval(stallInterval);
@@ -582,7 +586,7 @@ export async function executeCliCommand(
           if (it.kind === "api_error") {
             if (fastFailQuota && !isSettled && !quotaCheckPending) {
               quotaCheckPending = true;
-              checkForQuotaError(2, it.index);
+              checkForQuotaError(5, it.index);
             }
             continue;
           }
@@ -853,9 +857,11 @@ export async function executeCliWithFallback(
 
     let profile = mgr.acquire_profile(available, 0, modelName);
     if (!profile && available.length > 0) {
-      // Sort least-loaded
-      available.sort((a, b) => mgr.get_in_flight(a) - mgr.get_in_flight(b));
-      profile = available[0];
+      // Last resort: nothing is both free and runnable. Prefer a free profile that is merely in a
+      // short error back-off over one whose sandbox is locked (that attempt fails before it starts).
+      const free = available.filter((p) => !mgr.is_profile_busy(p));
+      const pool = [...(free.length > 0 ? free : available)].sort((a, b) => mgr.get_in_flight(a) - mgr.get_in_flight(b));
+      profile = pool[0];
       mgr.acquire_specific_profile(profile);
     }
 
@@ -960,10 +966,17 @@ export async function executeCliWithFallback(
         mgr.mark_error(profile, errMsg);
         verdict = `error, cooldown ${cooldownLeft()}`;
       }
-      // Only profiles the loop can still run count as "left" (not ones sitting in cooldown at the back).
-      const left = candidateProfiles.filter((p) => !triedProfiles.has(p) && mgr.is_executable(p, modelName)).length;
+      // What this loop can still try, judged the way the loop itself admits a profile: ready ones, plus
+      // the ones in a short error back-off that only get a run as a last resort.
+      const untried = candidateProfiles.filter((p) => !triedProfiles.has(p));
+      const inBackoff = untried.filter((p) => mgr.is_in_error_cooldown(p));
+      const runnable = (p) =>
+        fam === "gemini" && ANTIGRAVITY_MODEL_FALLBACK_ENABLED
+          ? !mgr.is_family_in_cooldown(p, "gemini") || mgr.get_available_fallback_model(p, modelName) !== null
+          : !mgr.is_in_cooldown(p, modelName);
+      const left = untried.filter((p) => !mgr.is_in_error_cooldown(p) && runnable(p)).length;
       console.warn(
-        `[FALLBACK] Profile '${profileKey}' failed after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s (${verdict}): ${errMsg.replace(/\s+/g, " ").slice(0, 160)}; ${left} profile(s) left`
+        `[FALLBACK] Profile '${profileKey}' failed after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s (${verdict}): ${errMsg.replace(/\s+/g, " ").slice(0, 160)}; ${left} profile(s) left${inBackoff.length ? ` (+${inBackoff.length} in error back-off)` : ""}`
       );
     } finally {
       mgr.release_profile(profile);

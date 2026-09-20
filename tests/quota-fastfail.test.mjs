@@ -117,10 +117,48 @@ function transcriptAttempts(profile) {
 function alive(pid) {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
   }
+  if (process.platform === "linux") {
+    // A zombie answers signal 0; when the runner is PID 1 without an init nobody reaps the orphaned grandchild.
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+      if (stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) === "Z") return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Registered first in every test that expects a kill: whatever an earlier assertion does, nothing is left running. */
+function killLeftovers(t, profile) {
+  t.after(() => {
+    for (const pid of runPids(profile)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // gone
+      }
+    }
+  });
+}
+
+/** Captures [FALLBACK] / [QUOTA] lines while fn runs. */
+async function captureWarnings(fn) {
+  const lines = [];
+  const orig = console.warn;
+  console.warn = (...args) => {
+    lines.push(args.join(" "));
+    orig(...args);
+  };
+  try {
+    await fn();
+  } finally {
+    console.warn = orig;
+  }
+  return lines;
 }
 
 // SIGKILL is asynchronous and a killed child is briefly a zombie; poll a little.
@@ -222,9 +260,10 @@ test("executor: readLatestAgyRunError finds the newest error (and its step) at t
   }
 });
 
-test("executor: a used-up quota ends the run within seconds (killing agy and its children), cools the profile down until the reset and moves on", async () => {
+test("executor: a used-up quota ends the run within seconds (killing agy and its children), cools the profile down until the reset and moves on", async (t) => {
   const tpl = fakeAgyTemplate();
   freshProfiles("zz_q1", "zz_q2");
+  killLeftovers(t, "zz_q1");
   await withEnv(
     {
       ...FAKE_ENV_OFF,
@@ -256,9 +295,10 @@ test("executor: a used-up quota ends the run within seconds (killing agy and its
   );
 });
 
-test("executor: the transcript line landing after the stdout step (and before init) is still caught within the same attempt", async () => {
+test("executor: the transcript line landing after the stdout step (and before init) is still caught within the same attempt", async (t) => {
   const tpl = fakeAgyTemplate();
   freshProfiles("zz_q7", "zz_q8");
+  killLeftovers(t, "zz_q7");
   await withEnv(
     {
       ...FAKE_ENV_OFF,
@@ -274,7 +314,7 @@ test("executor: the transcript line landing after the stdout step (and before in
       const res = await executeCliWithFallback(tpl, "hi", { profileManager: pm, timeout: 30, totalTimeout: 60 });
       const elapsed = Date.now() - t0;
       assert.equal(res.usedProfile, "zz_q8");
-      assert.ok(elapsed < 3000, `caught on the re-read, ${elapsed}ms in (attempt 2 would be at 8 s)`);
+      assert.ok(elapsed < 6000, `caught on the re-read, ${elapsed}ms in (attempt 2 would be at 8 s)`);
       assert.deepEqual(transcriptAttempts("zz_q7"), [1], "killed during attempt 1");
       assert.equal(pm.state.zz_q7.status, "EXHAUSTED");
       await assertProcessGroupGone(runPids("zz_q7"), "lagging run's process group");
@@ -282,9 +322,10 @@ test("executor: the transcript line landing after the stdout step (and before in
   );
 });
 
-test("executor: a stale earlier error line does not hide a quota error whose line is still landing (503 then 429)", async () => {
+test("executor: a stale earlier error line does not hide a quota error whose line is still landing (503 then 429)", async (t) => {
   const tpl = fakeAgyTemplate();
   freshProfiles("zz_q9", "zz_q10");
+  killLeftovers(t, "zz_q9");
   await withEnv(
     {
       ...FAKE_ENV_OFF,
@@ -303,7 +344,7 @@ test("executor: a stale earlier error line does not hide a quota error whose lin
       assert.equal(res.usedProfile, "zz_q10");
       // attempt 1 (503) at 0 s is agy's to retry; attempt 2 (429) at 3 s must be caught on its own
       // re-read, not on attempt 3 at 6 s.
-      assert.ok(elapsed >= 2900 && elapsed < 5000, `caught during attempt 2, ${elapsed}ms in`);
+      assert.ok(elapsed >= 2900 && elapsed < 5900, `caught during attempt 2, ${elapsed}ms in (attempt 3 would be at 6 s)`);
       assert.deepEqual(transcriptAttempts("zz_q9"), [2], "killed during attempt 2");
       assert.equal(pm.state.zz_q9.status, "EXHAUSTED");
       assert.match(pm.state.zz_q9.last_reason, /attempt 2.*Individual quota reached/);
@@ -430,5 +471,101 @@ test("executor: consecutive requests alternate between accounts under the defaul
     // A profile asked for by the request still wins.
     const res = await executeCliWithFallback(tpl, "hi", { profileManager: pm, preferredProfile: "zz_r2", timeout: 30, totalTimeout: 60 });
     assert.equal(res.usedProfile, "zz_r2");
+  });
+});
+
+test("executor: a transcript line lagging beyond the re-read window is still judged (a hard quota line is decisive whatever its step)", async (t) => {
+  const tpl = fakeAgyTemplate();
+  freshProfiles("zz_q11", "zz_q12");
+  killLeftovers(t, "zz_q11");
+  await withEnv(
+    {
+      ...FAKE_ENV_OFF,
+      ANTIGRAVITY_TEST_FAILING_PROFILE: "zz_q11",
+      ANTIGRAVITY_TEST_ERROR_TEXT: QUOTA_429,
+      ANTIGRAVITY_TEST_RETRY_MS: "3000",
+      ANTIGRAVITY_TEST_TRANSCRIPT_LAG_MS: "2600", // beyond the 5 x 400 ms re-reads
+    },
+    async () => {
+      const pm = new ProfileManager(["zz_q11", "zz_q12"]);
+      pm.reset_all();
+      const t0 = Date.now();
+      const res = await executeCliWithFallback(tpl, "hi", { profileManager: pm, timeout: 30, totalTimeout: 60 });
+      const elapsed = Date.now() - t0;
+      assert.equal(res.usedProfile, "zz_q12");
+      // attempt 1's line lands at 2.6 s, after its own re-reads; attempt 2's step at 3 s must judge it.
+      assert.ok(elapsed < 5900, `caught by attempt 2's check at the latest, ${elapsed}ms in (natural end would be 12 s+)`);
+      assert.ok([1, 2].includes(transcriptAttempts("zz_q11")[0]), `killed during attempt 1 or 2, got ${transcriptAttempts("zz_q11")}`);
+      assert.equal(runFinishedNaturally("zz_q11"), false);
+      assert.equal(pm.state.zz_q11.status, "EXHAUSTED");
+      await assertProcessGroupGone(runPids("zz_q11"), "lagging run's process group");
+    }
+  );
+});
+
+test("executor: the [FALLBACK] line counts the profiles the loop can still try, back-off ones apart", async (t) => {
+  const tpl = fakeAgyTemplate();
+  freshProfiles("zz_c1", "zz_c2", "zz_c3", "zz_c4");
+  killLeftovers(t, "zz_c1");
+  await withEnv(
+    {
+      ...FAKE_ENV_OFF,
+      ANTIGRAVITY_TEST_FAILING_PROFILE: "zz_c1",
+      ANTIGRAVITY_TEST_ERROR_TEXT: QUOTA_429,
+      ANTIGRAVITY_TEST_RETRY_MS: "8000",
+    },
+    async () => {
+      const pm = new ProfileManager(["zz_c1", "zz_c2", "zz_c3", "zz_c4"]);
+      pm.reset_all();
+      const far = Math.floor(Date.now() / 1000) + 86400;
+      // zz_c3: every model family used up, nothing the loop could run it with.
+      pm.state.zz_c3.status = "EXHAUSTED";
+      pm.state.zz_c3.exhausted_until = far;
+      pm.state.zz_c3.family_cooldowns = { gemini: far, claude: far, "gpt-oss": far };
+      // zz_c4: a short error back-off, a last resort only.
+      pm.mark_error("zz_c4", "CLI Execution Error (profile=zz_c4, exit=1): boom");
+      const lines = await captureWarnings(async () => {
+        const res = await executeCliWithFallback(tpl, "hi", { profileManager: pm, modelName: null, timeout: 30, totalTimeout: 60 });
+        assert.equal(res.usedProfile, "zz_c2");
+      });
+      const fallback = lines.find((l) => l.startsWith("[FALLBACK] Profile 'zz_c1'"));
+      assert.ok(fallback, `no [FALLBACK] line in ${JSON.stringify(lines)}`);
+      assert.ok(fallback.endsWith("; 1 profile(s) left (+1 in error back-off)"), fallback);
+      assert.ok(lines.some((l) => l.startsWith("[QUOTA] profile=zz_c1")), "the [QUOTA] line names the profile");
+    }
+  );
+});
+
+test("executor: as a last resort a free profile in error back-off is tried before one whose sandbox is locked", async () => {
+  const tpl = fakeAgyTemplate();
+  freshProfiles("zz_k1", "zz_k2");
+  const lockDir = path.join(SANDBOX_BASE, "zz_k1");
+  fs.mkdirSync(lockDir, { recursive: true });
+  fs.writeFileSync(path.join(lockDir, ".sandbox.lock"), String(process.pid)); // held by a live process
+  try {
+    await withEnv({ ...FAKE_ENV_OFF, ANTIGRAVITY_TEST_FAILING_PROFILE: "none" }, async () => {
+      const pm = new ProfileManager(["zz_k1", "zz_k2"]);
+      pm.reset_all();
+      pm.mark_error("zz_k2", "CLI Execution Error (profile=zz_k2, exit=1): boom");
+      const res = await executeCliWithFallback(tpl, "hi", { profileManager: pm, timeout: 30, totalTimeout: 60 });
+      assert.equal(res.usedProfile, "zz_k2", "the back-off profile answered");
+      assert.equal(pm.state.zz_k1.last_used || 0, 0, "the locked profile was never attempted");
+      assert.equal(pm.state.zz_k2.status, "OK", "a success ends the back-off");
+    });
+  } finally {
+    fs.rmSync(path.join(lockDir, ".sandbox.lock"), { force: true });
+  }
+});
+
+test("profiles: the last-resort bucket rotates least-recently-used as well", async () => {
+  await withEnv({ ANTIGRAVITY_PROFILE_SELECTION: undefined, ANTIGRAVITY_PROFILE: undefined }, async () => {
+    const pm = new ProfileManager(["zz_x1", "zz_x2", "zz_x3"]);
+    pm.reset_all();
+    const now = Math.floor(Date.now() / 1000);
+    for (const p of ["zz_x1", "zz_x2", "zz_x3"]) pm.mark_error(p, "boom");
+    pm.state.zz_x1.last_used = now;
+    pm.state.zz_x2.last_used = now - 50;
+    pm.state.zz_x3.last_used = now - 100;
+    assert.deepEqual(pm.get_ordered_profiles("gemini-3.8-flash"), ["zz_x3", "zz_x2", "zz_x1"]);
   });
 });
