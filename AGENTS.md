@@ -42,7 +42,7 @@ So: never restart a bridge before the change is verified, and never leave a brid
    curl -s http://127.0.0.1:8008/health
    ```
    Restart only when no request is in flight if you can help it: clients get an error for requests cut by the restart.
-5. **Diagnose from the right place.** The journal shows `[REQUEST]`, `[EXEC]`, `[DONE]`, `[FAILED]`, `[TOOL BLOCKED]`, `[TOOL TRANSLATED]`, `[SALVAGED]` lines. What the model actually answered, and agy's own harness errors, are only in the agy run transcripts: `<sandbox base>/<profile>/.gemini/antigravity-cli/brain/<run>/.system_generated/logs/transcript.jsonl` (`transcript_full.jsonl` is untruncated).
+5. **Diagnose from the right place.** The journal shows `[REQUEST]`, `[EXEC]`, `[DONE]`, `[FAILED]`, `[TOOL BLOCKED]`, `[TOOL TRANSLATED]`, `[SALVAGED]`, `[QUOTA]` (a run ended early because the account's quota is used up) and `[FALLBACK]` (one line per profile switch: cause, cost, cooldown, candidates left) lines. What the model actually answered, and agy's own harness errors, are only in the agy run transcripts: `<sandbox base>/<profile>/.gemini/antigravity-cli/brain/<run>/.system_generated/logs/transcript.jsonl` (`transcript_full.jsonl` is untruncated).
 
 ### Quick commands (Node.js)
 

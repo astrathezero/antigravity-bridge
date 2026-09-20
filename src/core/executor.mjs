@@ -18,6 +18,7 @@ import {
   toolBlockRetryNotice,
   blockedToolTranslationEnabled,
   earlyToolCallExitEnabled,
+  quotaFastFailEnabled,
 } from "../config.mjs";
 import { sanitizePromptForCli } from "../translators/context-compactor.mjs";
 import { parseToolCallsFromResponse, translateBlockedToolCall } from "../translators/tools.mjs";
@@ -29,7 +30,9 @@ import {
 import { syncProfileToSystem, getOsType } from "./keyring-sync.mjs";
 import {
   isQuotaOrRateLimitError,
+  isHardQuotaError,
   parseQuotaResetSeconds,
+  formatCooldownDuration,
   GLOBAL_PROFILE_MANAGER,
 } from "./profile-manager.mjs";
 
@@ -153,6 +156,10 @@ export class AgyStreamParser {
     this.error = null;
     this.rawLines = [];
     this.toolSteps = [];
+    // The run's conversation id (from the init event); names its transcript directory in the sandbox.
+    this.conversationId = null;
+    // error_message steps seen: agy's API call failed and agy retried it in place.
+    this.errorSteps = 0;
     // agent_response text grouped per agy step (in stream order). agy retries the model in place when
     // Gemini returns a malformed native function call, so one run can hold several separate replies.
     this._steps = [];
@@ -198,8 +205,19 @@ export class AgyStreamParser {
       }
       if (ev && typeof ev === "object" && ev.event) {
         this.seenEvents = true;
+        if (!this.conversationId) {
+          const cid =
+            ev.conversation_id || ev.init?.conversation_id || ev.step_update?.conversation_id || ev.result?.conversation_id;
+          if (typeof cid === "string" && cid) this.conversationId = cid;
+        }
         if (ev.event === "step_update" && ev.step_update) {
           const su = ev.step_update;
+          if (su.step_type === "error_message") {
+            // agy's API call failed and agy is about to retry it in place. The error text is not on
+            // stdout; it is in the run's transcript (readLatestAgyRunError).
+            this.errorSteps++;
+            return [{ kind: "api_error", index: su.step_index ?? null }];
+          }
           if (su.step_type === "agent_response") {
             const stepKey = su.step_index === undefined || su.step_index === null ? null : su.step_index;
             const out = [];
@@ -359,6 +377,55 @@ export class OwnConversationReadPolicy {
   }
 }
 
+const SAFE_CONVERSATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Where agy writes a run's steps: the model's replies, and every API error it retried on. */
+export function agyRunTranscriptPath(sandboxDir, conversationId) {
+  if (typeof conversationId !== "string" || !SAFE_CONVERSATION_ID_RE.test(conversationId) || conversationId.includes("..")) {
+    return null;
+  }
+  return path.join(sandboxDir, ".gemini", "antigravity-cli", "brain", conversationId, ".system_generated", "logs", "transcript.jsonl");
+}
+
+/**
+ * The newest ERROR_MESSAGE step of a run as { error, stepIndex }, read from the tail of its transcript
+ * (the first line holds the whole prompt, often hundreds of KB, so the file is not read from the
+ * start). null when there is none yet or the file cannot be read: the caller then leaves the run alone.
+ * stepIndex is the step number agy wrote (it matches the step_index of the stdout error_message event),
+ * or null when the line has none.
+ */
+export async function readLatestAgyRunError(sandboxDir, conversationId, { tailBytes = 64 * 1024 } = {}) {
+  const file = agyRunTranscriptPath(sandboxDir, conversationId);
+  if (!file) return null;
+  let fh = null;
+  try {
+    fh = await fs.promises.open(file, "r");
+    const { size } = await fh.stat();
+    const len = Math.min(size, tailBytes);
+    if (len <= 0) return null;
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, size - len);
+    const lines = buf.toString("utf-8").split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (!line.includes("ERROR_MESSAGE")) continue;
+      try {
+        const step = JSON.parse(line);
+        if (step && step.type === "ERROR_MESSAGE" && typeof step.error === "string" && step.error.trim()) {
+          return { error: step.error.trim(), stepIndex: Number.isInteger(step.step_index) ? step.step_index : null };
+        }
+      } catch {
+        // The first line of the tail window can be cut mid-line; the newer lines are whole.
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fh) await fh.close().catch(() => {});
+  }
+}
+
 export const TRANSCRIPT_READ_HINT =
   "This step was agy reading its own conversation log for this run (it does that when the prompt is too large for one turn); " +
   "ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 allows only that read, nothing else.";
@@ -378,6 +445,7 @@ export async function executeCliCommand(
   } = {}
 ) {
   const earlyToolCall = earlyToolCallExitEnabled();
+  const fastFailQuota = quotaFastFailEnabled();
   const { argv, stdinInput } = parseCmdTemplate(cmdTemplate, promptText, modelName);
   const effectiveStall =
     stallTimeout !== null
@@ -466,8 +534,58 @@ export async function executeCliCommand(
       let isSettled = false;
       const parser = new AgyStreamParser();
       let toolViolation = null;
+      let quotaCheckPending = false;
+      // agy logged an API error and is retrying in place. When the reason is a used-up quota no retry
+      // can succeed (agy makes 8 of them, ~2.5 min): end the run now so the fallback loop can put this
+      // profile in cooldown until the reset and move on within seconds. Anything else (a busy model, a
+      // per-minute limit) is left to agy's own retry. The transcript line can land a moment after the
+      // stdout event, so a missing line, or one that belongs to an earlier step than the one that
+      // triggered the read, is re-read a couple of times before giving up on this step.
+      const checkForQuotaError = (rereads, stepIndex) => {
+        readLatestAgyRunError(sandboxDir, parser.conversationId)
+          .then((found) => {
+            if (isSettled) return;
+            const stale =
+              found !== null &&
+              Number.isInteger(found.stepIndex) &&
+              Number.isInteger(stepIndex) &&
+              found.stepIndex < stepIndex;
+            if (found === null || stale) {
+              if (rereads > 0) {
+                const t = setTimeout(() => checkForQuotaError(rereads - 1, stepIndex), 400);
+                if (typeof t.unref === "function") t.unref();
+              } else {
+                quotaCheckPending = false;
+              }
+              return;
+            }
+            quotaCheckPending = false;
+            const errText = found.error;
+            if (!isHardQuotaError(errText)) return;
+            isSettled = true;
+            clearTimeout(totalTimer);
+            clearInterval(stallInterval);
+            killProcessTree(child, true);
+            console.warn(
+              `[QUOTA] profile=${profile || "default"}: agy reported "${errText.replace(/\s+/g, " ").slice(0, 160)}" ${((Date.now() - execStart) / 1000).toFixed(1)}s into the run; ending it now instead of waiting for agy's own retries`
+            );
+            const quotaErr = new Error(`CLI Execution Error (profile=${profile || "default"}, status=ERROR): ${errText}`);
+            quotaErr.code = "QUOTA_EXHAUSTED";
+            reject(quotaErr);
+          })
+          .catch(() => {
+            quotaCheckPending = false;
+          });
+      };
       const emit = (items) => {
         for (const it of items) {
+          if (it.kind === "api_error") {
+            if (fastFailQuota && !isSettled && !quotaCheckPending) {
+              quotaCheckPending = true;
+              checkForQuotaError(2, it.index);
+            }
+            continue;
+          }
           if (it.kind === "tool") {
             if (!allowTools) {
               if (readPolicy && readPolicy.allows(it.name, it.params)) {
@@ -765,6 +883,8 @@ export async function executeCliWithFallback(
       continue;
     }
 
+    mgr.note_attempt(profile);
+    const attemptStart = Date.now();
     try {
       let attemptPrompt = promptText;
       let attemptBudget = attemptTimeout;
@@ -818,20 +938,33 @@ export async function executeCliWithFallback(
         console.warn(`[FALLBACK] Profile '${profileKey}': ${errMsg} (not retrying)`);
         throw err;
       }
+      // One journal line per profile switch: what failed, how long it cost, what the profile's state is
+      // now and how many candidates remain. (Quota exhaustion used to be marked silently.)
+      const cooldownLeft = () =>
+        formatCooldownDuration(Math.max(0, (mgr.state?.[profileKey]?.exhausted_until || 0) - Math.floor(Date.now() / 1000)));
+      let verdict;
       if (errLower.includes("sandbox is currently locked")) {
-        console.log(`[CONCURRENCY] Profile '${profileKey}' sandbox is locked/busy by another process. Routing to alternative profile.`);
+        verdict = "busy, no cooldown";
       } else if (errLower.includes("authentication required") || errLower.includes("not signed in")) {
         mgr.mark_exhausted(profile, errMsg, 3600.0, effectiveModel);
+        verdict = `not signed in, cooldown ${cooldownLeft()}`;
       } else if (isQuotaOrRateLimitError(errMsg)) {
         const cooldown = parseQuotaResetSeconds(errMsg);
         mgr.mark_exhausted(profile, errMsg, cooldown, effectiveModel);
+        verdict = `quota, cooldown ${cooldownLeft()}`;
       } else if (errLower.includes("stalled")) {
         // A quiet CLI is usually a model still thinking, not a broken profile:
         // route onward but do NOT put the profile into error cooldown.
-        console.warn(`[FALLBACK] Profile '${profileKey}' produced no output for the stall window. Routing to alternative profile without cooldown.`);
+        verdict = "no output for the stall window, no cooldown";
       } else {
         mgr.mark_error(profile, errMsg);
+        verdict = `error, cooldown ${cooldownLeft()}`;
       }
+      // Only profiles the loop can still run count as "left" (not ones sitting in cooldown at the back).
+      const left = candidateProfiles.filter((p) => !triedProfiles.has(p) && mgr.is_executable(p, modelName)).length;
+      console.warn(
+        `[FALLBACK] Profile '${profileKey}' failed after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s (${verdict}): ${errMsg.replace(/\s+/g, " ").slice(0, 160)}; ${left} profile(s) left`
+      );
     } finally {
       mgr.release_profile(profile);
     }

@@ -9,6 +9,7 @@ import {
   ANTIGRAVITY_MODEL_FALLBACK_ENABLED,
   DEFAULT_QUOTA_WINDOW_SECONDS,
   DEFAULT_FLASH_QUOTA_CAPACITY,
+  profileSelectionMode,
 } from "../config.mjs";
 import { isProfileSandboxLocked } from "./sandbox.mjs";
 import { isSafeProfileName } from "./security.mjs";
@@ -55,6 +56,20 @@ export function isQuotaOrRateLimitError(errorMsg) {
     return true;
   }
   return QUOTA_ERROR_PATTERNS.some((pat) => pat.test(errorMsg));
+}
+
+// The account's quota is used up for hours or days, as opposed to a per-minute rate limit or a busy
+// model that a retry a few seconds later can get past. agy retries these in place anyway (8 attempts,
+// ~2.5 min); the bridge ends such a run at once (see quotaFastFailEnabled in config.mjs).
+const HARD_QUOTA_RE =
+  /individual\s+quota\s+reached|upgrade\s+your\s+subscription|insufficient_quota|daily\s+quota|exceeded\s+your\s+current\s+quota/i;
+const QUOTA_RESET_TIMER_RE = /resets?\s+in\s+\d/i;
+
+export function isHardQuotaError(errorMsg) {
+  if (!errorMsg || typeof errorMsg !== "string") return false;
+  if (HARD_QUOTA_RE.test(errorMsg)) return true;
+  // Any quota/rate-limit error that names its reset time: retrying before then is pointless.
+  return QUOTA_RESET_TIMER_RE.test(errorMsg) && isQuotaOrRateLimitError(errorMsg);
 }
 
 export function parseQuotaResetSeconds(errorMessage) {
@@ -224,6 +239,10 @@ export class ProfileManager {
     this.state = {};
     this.in_flight = new Map();
     this.last_execution_models = new Map();
+    // Order of attempts in this process, for the LRU rotation: last_used in the cache is whole
+    // seconds, so several attempts in one second would otherwise tie.
+    this.attempt_seq = new Map();
+    this._seq = 0;
     this.load_cache();
   }
 
@@ -397,6 +416,7 @@ export class ProfileManager {
     const k = profile || "default";
     const info = this.state[k] || {};
     if (info.status === "DISABLED") return false;
+    if (this.is_in_error_cooldown(profile)) return false;
     const now = Math.floor(Date.now() / 1000);
 
     if (!model) {
@@ -467,6 +487,42 @@ export class ProfileManager {
   set_last_execution_model(profile, model) {
     const k = profile || "default";
     this.last_execution_models.set(k, model);
+  }
+
+  /** An attempt is starting on this profile: it moves to the back of the LRU rotation whatever the outcome. */
+  note_attempt(profile) {
+    const k = profile || "default";
+    if (!this.state[k]) return;
+    this.state[k].last_used = Math.floor(Date.now() / 1000);
+    this.attempt_seq.set(k, ++this._seq);
+  }
+
+  /** A profile mark_error() put in its short back-off (as opposed to a quota cooldown). */
+  is_in_error_cooldown(profile) {
+    const info = this.state[profile || "default"] || {};
+    return info.status === "ERROR_COOLDOWN" && Math.floor(Date.now() / 1000) < (info.exhausted_until || 0);
+  }
+
+  /**
+   * LRU order within one readiness bucket: the profile pinned with ANTIGRAVITY_PROFILE first (it took
+   * every request before the rotation existed), then longest-unused first, then configuration order.
+   */
+  _order_bucket(list) {
+    if (profileSelectionMode() !== "lru" || list.length < 2) return list;
+    const pinned = (process.env.ANTIGRAVITY_PROFILE || "").trim();
+    const position = new Map(this._profiles.map((p, i) => [p || "default", i]));
+    return [...list].sort((a, b) => {
+      const ka = a || "default";
+      const kb = b || "default";
+      if (pinned && (ka === pinned) !== (kb === pinned)) return ka === pinned ? -1 : 1;
+      const la = this.state[ka]?.last_used || 0;
+      const lb = this.state[kb]?.last_used || 0;
+      if (la !== lb) return la - lb;
+      const sa = this.attempt_seq.get(ka) || 0;
+      const sb = this.attempt_seq.get(kb) || 0;
+      if (sa !== sb) return sa - sb;
+      return (position.get(ka) ?? 0) - (position.get(kb) ?? 0);
+    });
   }
 
   get_last_execution_model(profile) {
@@ -685,6 +741,14 @@ export class ProfileManager {
       const geminiCd = fCds.gemini || 0;
       const exUntil = info.exhausted_until || 0;
 
+      // mark_error's back-off sets no family cooldown, so the Gemini branch below used to hand such a
+      // profile out first again on the very next request. It goes to the back with the exhausted ones
+      // (still reachable as a last resort, unlike a quota cooldown).
+      if (this.is_in_error_cooldown(p)) {
+        exhausted.push(p);
+        continue;
+      }
+
       if (useFallback) {
         const isGeminiDown = now < geminiCd || (info.status === "EXHAUSTED" && geminiCd === 0 && now < exUntil);
         const fbCand = isGeminiDown ? this.get_available_fallback_model(p, model) : null;
@@ -721,7 +785,14 @@ export class ProfileManager {
       }
     }
 
-    return [...readyIdle, ...readyAvail, ...fallbackIdle, ...fallbackAvail, ...busy, ...exhausted];
+    return [
+      ...this._order_bucket(readyIdle),
+      ...this._order_bucket(readyAvail),
+      ...this._order_bucket(fallbackIdle),
+      ...this._order_bucket(fallbackAvail),
+      ...busy,
+      ...exhausted,
+    ];
   }
 
   get_status_summary() {

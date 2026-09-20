@@ -458,6 +458,34 @@ export function earlyToolCallExitEnabled() {
   return !["0", "false", "no", "off"].includes(raw);
 }
 
+/**
+ * A profile whose Gemini quota is used up answers every call with
+ * `RESOURCE_EXHAUSTED (code 429): Individual quota reached ... Resets in 64h`. agy retries that in
+ * place up to 8 times with growing backoff (about 2.5 minutes per run, seen on the production journal
+ * 2026-09-20) although no retry can succeed, and the bridge used to wait for it before switching
+ * profile; with several exhausted profiles in a row a request took 5+ minutes and the client gave up.
+ * stdout carries only bare `error_message` steps; the error text is in the run's own transcript.
+ * With this on, the bridge reads that text as soon as an error step appears and, when it is a hard
+ * quota error, ends the run within seconds, puts the profile in cooldown until the reset and moves
+ * on to the next profile. ANTIGRAVITY_QUOTA_FAST_FAIL=0 disables it.
+ */
+export function quotaFastFailEnabled() {
+  const raw = (process.env.ANTIGRAVITY_QUOTA_FAST_FAIL || "").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
+/**
+ * Which idle profile takes the next request. `lru` (default): the one that has waited longest, so
+ * the load spreads over every account and none burns through its quota while the others sit unused
+ * (before 2026-09-20 the first profiles in configuration order absorbed all traffic and hit their
+ * multi-day quota within minutes of each other). `ordered`: the first idle profile in configuration
+ * order, the previous behaviour.
+ */
+export function profileSelectionMode() {
+  const raw = (process.env.ANTIGRAVITY_PROFILE_SELECTION || "").trim().toLowerCase();
+  return raw === "ordered" ? "ordered" : "lru";
+}
+
 export function toolBlockRetries() {
   const raw = (process.env.ANTIGRAVITY_TOOL_BLOCK_RETRIES || "").trim();
   if (raw === "") return 1;
