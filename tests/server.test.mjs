@@ -166,3 +166,46 @@ test("server: an EPIPE error on the connection socket is swallowed, not crashed 
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+// A model reply that is a client-side tool call. Non-JSON stdout is passed through as the reply text.
+const TOOL_CALL_REPLY_CMD =
+  'node -e "console.log(JSON.stringify({tool_calls:[{name:\'get_time\',arguments:{zone:\'Asia/Bangkok\'}}]}))"';
+const TEXT_REPLY_CMD = 'node -e "console.log(\'It is noon.\')"';
+
+test("server: a tool-call reply carries neither the profile banner nor the raw tool_calls JSON (OpenAI and Anthropic); a text reply keeps the banner", async () => {
+  const prevHide = process.env.ANTIGRAVITY_HIDE_PROFILE_STATUS;
+  delete process.env.ANTIGRAVITY_HIDE_PROFILE_STATUS;
+  const pm = new ProfileManager(["zz_sv1"]);
+  pm.reset_all();
+  const tools = [{ type: "function", function: { name: "get_time", description: "time", parameters: { type: "object", properties: { zone: { type: "string" } } } } }];
+  const run = async (port, customCmd, body, pathname = "/v1/chat/completions") => {
+    const { server } = createBridgeServer({ port, host: "127.0.0.1", profileManager: pm, customCmd, apiKeys: {} });
+    await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}${pathname}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      return await r.json();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  };
+  try {
+    const oai = await run(8121, TOOL_CALL_REPLY_CMD, { model: "antigravity", messages: [{ role: "user", content: "time?" }], tools });
+    assert.ok(oai.choices, `unexpected reply: ${JSON.stringify(oai).slice(0, 400)}`);
+    assert.equal(oai.choices[0].finish_reason, "tool_calls");
+    assert.equal(oai.choices[0].message.tool_calls[0].function.name, "get_time");
+    assert.equal(oai.choices[0].message.content, null, "no raw JSON and no banner in content");
+    assert.ok(!JSON.stringify(oai).includes("Antigravity Profile"), "no banner anywhere in a tool-call reply");
+
+    const anth = await run(8122, TOOL_CALL_REPLY_CMD, { model: "antigravity", max_tokens: 100, messages: [{ role: "user", content: "time?" }], tools: [{ name: "get_time", description: "time", input_schema: { type: "object", properties: { zone: { type: "string" } } } }] }, "/v1/messages");
+    assert.equal(anth.stop_reason, "tool_use");
+    assert.deepEqual(anth.content.map((c) => c.type), ["tool_use"], "only the tool_use block");
+    assert.equal(anth.content[0].name, "get_time");
+
+    const text = await run(8123, TEXT_REPLY_CMD, { model: "antigravity", messages: [{ role: "user", content: "time?" }], tools });
+    assert.equal(text.choices[0].finish_reason, "stop");
+    assert.ok(text.choices[0].message.content.startsWith("It is noon."));
+    assert.ok(text.choices[0].message.content.includes("Antigravity Profile"), "a text reply still carries the banner");
+  } finally {
+    if (prevHide === undefined) delete process.env.ANTIGRAVITY_HIDE_PROFILE_STATUS; else process.env.ANTIGRAVITY_HIDE_PROFILE_STATUS = prevHide;
+  }
+});

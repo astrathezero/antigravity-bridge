@@ -838,8 +838,14 @@ export function createBridgeServer(options = {}) {
           [parsedContentText, parsedToolCalls] = parseToolCallsFromResponse(outputText, clientToolNames);
         }
 
-        const showStatus = shouldShowProfileStatus();
+        // A tool-call reply is not shown to a person: the client runs the tool and stores the reply in
+        // its history. Neither the profile banner nor the raw tool_calls JSON belongs there (an agent
+        // fed its own history back started to imitate the banner and to echo the JSON as text), so a
+        // tool-call reply carries only the prose the model wrote around the call, or nothing.
+        const isToolCallReply = Boolean(parsedToolCalls && parsedToolCalls.length > 0);
+        const showStatus = shouldShowProfileStatus() && !isToolCallReply;
         const banner = showStatus ? profileManager.build_profile_quota_banner(usedProfile) : "";
+        const replyText = isToolCallReply ? parsedContentText || "" : parsedContentText || outputText;
         const actualModel = effectiveModel || model;
 
         const extraRespHeaders = {
@@ -867,24 +873,13 @@ export function createBridgeServer(options = {}) {
         if (isAnthropic) {
           if (stream) {
             const msgId = `msg_${crypto.randomBytes(12).toString("hex")}`;
-            const events = buildAnthropicStreamEvents(
-              msgId,
-              actualModel,
-              parsedContentText || outputText,
-              parsedToolCalls,
-              banner
-            );
+            const events = buildAnthropicStreamEvents(msgId, actualModel, replyText, parsedToolCalls, banner);
             for (const [evType, evData] of events) {
               res.write(`event: ${evType}\ndata: ${JSON.stringify(evData)}\n\n`);
             }
             res.end();
           } else {
-            sendJson(
-              res,
-              buildAnthropicResponse(parsedContentText || outputText, actualModel, parsedToolCalls, banner),
-              200,
-              extraRespHeaders
-            );
+            sendJson(res, buildAnthropicResponse(replyText, actualModel, parsedToolCalls, banner), 200, extraRespHeaders);
           }
         } else {
           // OpenAI
@@ -920,12 +915,7 @@ export function createBridgeServer(options = {}) {
             res.write("data: [DONE]\n\n");
             res.end();
           } else {
-            sendJson(
-              res,
-              buildOpenAIResponse(parsedContentText || outputText, actualModel, parsedToolCalls, banner),
-              200,
-              extraRespHeaders
-            );
+            sendJson(res, buildOpenAIResponse(replyText, actualModel, parsedToolCalls, banner), 200, extraRespHeaders);
           }
         }
       } catch (err) {
