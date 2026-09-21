@@ -255,6 +255,24 @@ function tryParseToolCallJson(rawStr, allowedTools = null) {
   return toolCalls.length > 0 ? toolCalls : null;
 }
 
+/**
+ * The text left over once a tool call has been lifted out of the reply, or null when there is none
+ * worth keeping. The model regularly closes its JSON with one brace or one fence too many
+ * (gemini-3.8-flash does both), and that leftover is not prose: a client that stores the assistant
+ * message verbatim would keep "}" or "```" as the whole turn and feed it back on the next request
+ * (seen with zeroclaw, whose session history filled up with exactly those). Anything carrying no
+ * letter and no digit is punctuation, so it is dropped.
+ */
+export function toolCallRemainder(...parts) {
+  const joined = parts
+    .map((p) => (typeof p === "string" ? p.trim() : ""))
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (!joined) return null;
+  return /\p{L}|\p{N}/u.test(joined) ? joined : null;
+}
+
 export function parseToolCallsFromResponse(outputText, allowedTools = null) {
   if (!outputText || !outputText.trim()) {
     return [outputText, null];
@@ -271,7 +289,7 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
     if (parsed) {
       const prefix = text.slice(0, match.index).trim();
       const suffix = text.slice(match.index + match[0].length).trim();
-      const remainingText = prefix || suffix ? `${prefix}\n${suffix}`.trim() : null;
+      const remainingText = toolCallRemainder(prefix, suffix);
       return [remainingText, parsed];
     }
   }
@@ -288,7 +306,7 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
   }
   if (allParsed.length > 0) {
     const cleanText = text.replace(/<(?:tool_call|function_call)>[\s\S]*?<\/(?:tool_call|function_call)>/gi, "").trim();
-    return [cleanText || null, allParsed];
+    return [toolCallRemainder(cleanText), allParsed];
   }
 
   // 3. Direct JSON parse on whole text
@@ -309,7 +327,7 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
     if (parsed) {
       const prefix = text.slice(0, i).trim();
       const suffix = text.slice(end + 1).trim();
-      const remainingText = prefix || suffix ? `${prefix}\n${suffix}`.trim() : null;
+      const remainingText = toolCallRemainder(prefix, suffix);
       return [remainingText, parsed];
     }
     i = end; // this object did not parse as a tool call; continue after it
@@ -323,7 +341,7 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
     if (parsedObj) {
       const prefix = text.slice(0, jsonMatch.index).trim();
       const suffix = text.slice(jsonMatch.index + jsonMatch[0].length).trim();
-      const remainingText = prefix || suffix ? `${prefix}\n${suffix}`.trim() : null;
+      const remainingText = toolCallRemainder(prefix, suffix);
       return [remainingText, parsedObj];
     }
   }

@@ -177,3 +177,29 @@ test("translators: a tool_calls object with an extra trailing brace (or prose ar
   assert.equal(balancedObjectEnd('{"a":"}"}', 0), 8); // brace inside a string does not close it
   assert.equal(balancedObjectEnd("{unterminated", 0), -1);
 });
+
+test("translators: a tool-call reply whose leftover is only a stray brace or fence carries no text", async () => {
+  const { parseToolCallsFromResponse, toolCallRemainder } = await import("../src/translators/tools.mjs");
+  const tools = ["shell", "read_file"];
+  const call = '{"tool_calls":[{"name":"shell","arguments":{"command":"ls"}}]}';
+
+  // Exactly what zeroclaw stored as whole assistant turns on 2026-09-21: content "}" and "```".
+  for (const reply of [`${call}}`, "```json\n" + call + "\n```\n```", `${call}\n}`, "```\n" + call + "\n```"]) {
+    const [text, calls] = parseToolCallsFromResponse(reply, tools);
+    assert.equal(calls.length, 1, reply);
+    assert.equal(calls[0].name, "shell");
+    assert.equal(text, null, `no punctuation leftover for ${JSON.stringify(reply)}, got ${JSON.stringify(text)}`);
+  }
+
+  // Real prose around a call is still kept.
+  const [kept, withProse] = parseToolCallsFromResponse(`Let me look.\n${call}`, tools);
+  assert.equal(withProse.length, 1);
+  assert.equal(kept, "Let me look.");
+
+  assert.equal(toolCallRemainder("}", "```"), null);
+  assert.equal(toolCallRemainder("", "   "), null);
+  assert.equal(toolCallRemainder("]}", ""), null);
+  assert.equal(toolCallRemainder("ok"), "ok");
+  assert.equal(toolCallRemainder("เสร็จแล้ว"), "เสร็จแล้ว", "Thai text is not punctuation");
+  assert.equal(toolCallRemainder("2"), "2");
+});
