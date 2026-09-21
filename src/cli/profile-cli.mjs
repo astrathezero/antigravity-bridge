@@ -222,7 +222,7 @@ export async function handleProfileCli(argv) {
     const { refreshProfileToken } = await import("../core/token-daemon.mjs");
     if (target) {
       console.log(`[INFO] Refreshing OAuth token for profile '${target}'...`);
-      const [ok, msg] = refreshProfileToken(target);
+      const [ok, msg] = await refreshProfileToken(target);
       if (ok) console.log(`[OK] Profile '${target}': ${msg}`);
       else console.error(`[ERROR] Profile '${target}': ${msg}`);
       return ok ? 0 : 1;
@@ -231,7 +231,7 @@ export async function handleProfileCli(argv) {
       console.log(`[INFO] Refreshing OAuth tokens for ${profiles.length} profiles...`);
       let successCount = 0;
       for (const p of profiles) {
-        const [ok, msg] = refreshProfileToken(p);
+        const [ok, msg] = await refreshProfileToken(p);
         if (ok) {
           successCount++;
           console.log(`[OK] Profile '${p || "default"}': ${msg}`);
