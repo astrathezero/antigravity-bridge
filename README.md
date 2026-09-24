@@ -10,7 +10,10 @@
 
 **Languages:** **English** | [🇹🇭 ภาษาไทย](README.th.md)
 
-> **Release status (v1.0.0, 2026-09-19).** v1.0.0 is the last release that ships both editions. The **Python edition (`antigravity_bridge.py`, port 8000) is frozen at v1.0.0**: it keeps working as released but gets no new features. **All development from here on is Node.js only** (`src/`, port 8008). If you are choosing today, pick Node.js.
+> [!CAUTION]
+> **The Python edition is deprecated. Use the Node.js edition only.**
+> v1.0.0 (2026-09-19) is the last release that ships both editions. The Python edition (`antigravity_bridge.py`, port `8000`) is frozen at v1.0.0 and gets **no further updates**: no features, no bug fixes, and it does not receive the fixes made in Node.js since then (quota fast-fail, non-blocking OAuth refresh, tool-call reply cleanup). The only exception is a security fix the owner explicitly asks for.
+> **All development is Node.js only** (`src/`, port `8008`). If you still run Python: point your clients at `:8008` instead of `:8000`, and move your API keys from `ANTIGRAVITY_BRIDGE_API_KEYS` to `ANTIGRAVITY_API_KEYS` (`node src/index.mjs key create <label>`). The Python profile CLI (`python3 antigravity_bridge.py profile login`) is still the way to log a Google profile in; profiles are shared, so both editions see them.
 
 **Antigravity Bridge Server** is a zero-dependency, OpenAI & Anthropic compatible REST API bridge for the `antigravity` / `agy` CLI ecosystem. It turns the Google accounts logged into your local CLI into a resilient multi-profile API cluster with smart rotation, instant quota fallback, background OAuth refresh, native tool calling, SSE streaming and image generation.
 
@@ -26,7 +29,7 @@ The repository ships **two editions of the same server** that live side by side 
 | Typical RSS | ~80–150 MB | ~35–55 MB |
 | Tests | `test_antigravity_bridge.py` (73 tests) | `tests/*.test.mjs` (37 tests) |
 
-Pick one, or run both at once on their default ports. See [Choosing an Edition](#-choosing-an-edition).
+Use the Node.js edition. The Python column describes v1.0.0 for existing installs; see [Choosing an Edition](#-choosing-an-edition).
 
 ---
 
@@ -61,6 +64,7 @@ Pick one, or run both at once on their default ports. See [Choosing an Edition](
 - [⚙️ Configuration & Environment Variables](#️-configuration--environment-variables)
 - [🤖 Hermes Agent Integration](#-hermes-agent-integration-configyaml)
 - [🦞 OpenClaw Integration](#-openclaw-integration-openclawjson)
+- [🧩 Agent Client Tuning (zeroclaw, Hermes, OpenClaw)](#-agent-client-tuning-zeroclaw-hermes-openclaw)
 - [💻 Client SDK Examples](#-client-sdk-examples)
 - [⏱️ Custom Timeout Options & Large Prompt Handling](#️-custom-timeout-options--large-prompt-handling)
 - [🚀 Production Deployment](#-production-deployment)
@@ -461,7 +465,7 @@ Shared by both editions unless a column says otherwise.
 
 ## 🤖 Hermes Agent Integration (`config.yaml`)
 
-**Hermes Agent** can use the bridge as a custom OpenAI-compatible provider with streaming and tool calling. Add a provider under `custom_providers` in `~/.hermes/config.yaml` or `~/.hermes/profiles/<profile>/config.yaml`. Point `api` at whichever edition you run (`8000` Python, `8008` Node.js); you can define one provider per port.
+**Hermes Agent** can use the bridge as a custom OpenAI-compatible provider with streaming and tool calling. Add a provider under `custom_providers` in `~/.hermes/config.yaml` or `~/.hermes/profiles/<profile>/config.yaml`. Point `api` at the Node.js edition (`8008`); the deprecated Python edition answers on `8000`.
 
 ```yaml
 model:
@@ -470,8 +474,8 @@ model:
 
 custom_providers:
   agy-cli:
-    api: http://127.0.0.1:8000/v1
-    api_key: sk-antigravity  # a key from the edition's key list, or any string if auth is off
+    api: http://127.0.0.1:8008/v1
+    api_key: sk-antigravity  # a key from `node src/index.mjs key list`, or any string if auth is off
     name: Antigravity Multi-Profile Bridge
     models:
       gemini-3.7-flash-high:
@@ -510,7 +514,7 @@ hermes chat -m agy-cli/gemini-3.7-flash-high   # chat through the bridge
     "mode": "merge",
     "providers": {
       "antigravity": {
-        "baseUrl": "http://127.0.0.1:8000/v1",   // or :8008 for the Node.js edition
+        "baseUrl": "http://127.0.0.1:8008/v1",   // Node.js edition
         "apiKey": "sk-antigravity",
         "api": "openai-completions",
         "models": [
@@ -538,14 +542,96 @@ hermes chat -m agy-cli/gemini-3.7-flash-high   # chat through the bridge
 
 Or via the CLI:
 ```bash
-openclaw config set models.providers.antigravity.baseUrl "http://127.0.0.1:8000/v1"
+openclaw config set models.providers.antigravity.baseUrl "http://127.0.0.1:8008/v1"
 openclaw config set models.providers.antigravity.apiKey "sk-antigravity"
 openclaw config set models.providers.antigravity.api "openai-completions"
 openclaw models set antigravity/gemini-3.7-flash-high
 openclaw config validate && openclaw models list
 ```
 
-**OpenClaw in Docker:** reach the host with `http://172.17.0.1:8000/v1` or `http://host.docker.internal:8000/v1` (add `extra_hosts: ["host.docker.internal:host-gateway"]` on Linux), e.g. `OPENAI_BASE_URL=http://172.17.0.1:8000/v1` and `OPENAI_API_KEY=sk-antigravity` in the container's `.env`.
+**OpenClaw in Docker:** reach the host with `http://172.17.0.1:8008/v1` or `http://host.docker.internal:8008/v1` (add `extra_hosts: ["host.docker.internal:host-gateway"]` on Linux), e.g. `OPENAI_BASE_URL=http://172.17.0.1:8008/v1` and `OPENAI_API_KEY=sk-antigravity` in the container's `.env`.
+
+---
+
+## 🧩 Agent Client Tuning (zeroclaw, Hermes, OpenClaw)
+
+The bridge keeps no conversation state. Each request is answered from exactly the messages the client sends, so **what the model remembers is decided by the client's settings, not by the bridge**. When a bot "keeps repeating itself", "answers the previous message" or "re-investigates something it already did", check the client first. In every case investigated on the production host, the prompt was missing the earlier conversation, or one turn was looping through dozens of tool calls while the user sent more messages.
+
+**How to check what the model actually received.** The journal line `[REQUEST] ... prompt_len=... tools=N` gives the size and tool count. The first `USER_INPUT` step of the agy transcript (`<sandbox base>/<profile>/.gemini/antigravity-cli/brain/<run>/.system_generated/logs/transcript_full.jsonl`) holds the full prompt: if your earlier messages are not in it, the client did not send them.
+
+### Rules that apply to every agent client
+
+| Rule | Why |
+| :--- | :--- |
+| Keep the user's messages and the final answers in history. Do not let tool rows crowd them out. | A turn with 60 tool calls writes about 120 history rows. With a row cap of 150, that one turn pushes every earlier question and answer out of the prompt. |
+| Expose only the tools the bot needs. | Each tool definition is sent on every request. 50 tools were 96 KB of a 176 KB prompt; cutting to 20 tools took a bare prompt from 93,568 to 38,007 bytes. |
+| Cap tool iterations per turn. | Every iteration re-sends the whole prompt. Uncapped turns ran 22-41 iterations and 4-8 minutes, and a user who re-sends meanwhile sees "the same answer" from the stale turn. |
+| Turn off pre-flight classifiers or reply-intent checks with short timeouts. | An agy run never answers within 5 s, so each such check becomes a cancelled run (`[CLIENT DISCONNECTED] ... after 5.0s`) that costs quota and adds nothing. |
+| Set the provider timeout to at least 300 s. | Large prompts and profile fallback can take minutes. |
+| Do not restart the client while a turn is running. | The in-flight message is dropped, not resumed; the user has to send it again. |
+
+### zeroclaw (verified on 0.8.5)
+
+Provider, pointing at the Node.js edition:
+
+```toml
+[providers.models.llamacpp.agybridgenodejs]
+uri = "http://127.0.0.1:8008/v1"
+model = "gemini-3.8-flash"
+timeout_secs = 300
+```
+
+Agent and runtime profile settings that worked for long Telegram coding turns:
+
+```toml
+[agents.<agent>.precheck]
+enabled = false              # the 5 s reply-intent precheck is always cancelled by the bridge
+
+[runtime_profiles.unbounded]
+max_tool_iterations = 60
+agentic_timeout_secs = 3600  # 60 iterations at 15-30 s each can pass 1800 s
+max_history_messages = 400
+keep_tool_context_turns = 0  # store only the user message and the final answer
+compact_context = true
+max_context_tokens = 128000  # whole oldest turns are dropped above this
+
+[risk_profiles.<profile>]
+excluded_tools = ["browser", "canvas", "weather", "..."]  # the tools this bot never uses
+```
+
+Things that are not obvious from the zeroclaw docs (read in the v0.8.5 source):
+
+- **`keep_tool_context_turns` is an on/off switch, not a turn count.** Any value above 0 stores every tool call and tool result of every turn in the session, and `max_history_messages` trims one message at a time. That is how long turns pushed the user's own questions out of the prompt. With `0`, a follow-up such as "now do scripts 4 and 5" still sees the answer that listed the scripts. The trade-off: later turns see the earlier final answers, not the raw tool output.
+- **Leave `history_pruning.enabled = false`.** In 0.8.5, enabling it does not collapse old tool results; it only lowers the context budget to `history_pruning.max_tokens` (8192 by default), which drops far more history.
+- **`channels.telegram.<alias>.excluded_tools` has no effect in 0.8.5.** Use `risk_profiles.<profile>.excluded_tools`.
+- **`/new` deletes the whole session** from `~/.zeroclaw/data/sessions/sessions.db`. It is the only command that does, so if a conversation suddenly starts from nothing, someone sent `/new`.
+- **A restart keeps sessions, but reloads only the last 50 rows of each one** (a fixed limit, not `max_history_messages`), and it closes a message that was still being answered as `[Session interrupted]`. With `keep_tool_context_turns = 0`, 50 rows is about 25 question-answer pairs.
+- zeroclaw picks up `config.toml` edits while running (it logs `Applied updated channel runtime config from disk`), so a restart may not be needed. Use `zeroclaw config set <dotted.path> <value>`, which validates the value.
+
+Measured on production after these changes: the prompt went from 106-160 KB to 47 KB per request, and a follow-up question was answered in 21 s.
+
+### Hermes Agent
+
+Configure the provider as in [Hermes Agent Integration](#-hermes-agent-integration-configyaml), then:
+
+```yaml
+agent:
+  max_turns: 150          # hard cap on tool iterations per turn
+  gateway_timeout: 1800
+  environment_hint: |
+    - To run multi-line Python or Node code, first write it to a file with write_file,
+      then run that file with one terminal command. Do NOT inline multi-line scripts
+      (python3 -c, node -e, bash -c, heredocs).
+    - After write_file or patch reports success, the file IS saved. Do not re-read or
+      re-write it to double-check, and do not repeat a step you already completed.
+    - Prefer the read_file and search_files tools over cat/grep/find in terminal.
+```
+
+`environment_hint` is read at every prompt build and the config file is re-read when it changes, so no gateway restart is needed. The hint above stopped a loop in which the model re-wrote the same file over and over, and it keeps multi-line code out of the JSON tool arguments.
+
+### OpenClaw and other OpenAI-compatible agents
+
+Connect them as in [OpenClaw Integration](#-openclaw-integration-openclawjson) with `baseUrl` on port `8008`, then apply the rules in the table above using the client's own setting names: a history or context limit that keeps user messages, a tool allowlist, a maximum number of tool iterations per turn, a provider timeout of at least 300 s, and no short pre-flight model calls. If a client offers a "summarise or drop old tool results" option, prefer it to raising the history limit.
 
 ---
 

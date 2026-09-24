@@ -10,7 +10,10 @@
 
 **ภาษา:** [🇺🇸 English](README.md) | **ภาษาไทย**
 
-> **สถานะ release (v1.0.0, 2026-09-19)** v1.0.0 คือ release สุดท้ายที่มีทั้งสองรุ่น **รุ่น Python (`antigravity_bridge.py`, พอร์ต 8000) ถูก freeze ไว้ที่ v1.0.0** ยังใช้งานได้ตามที่ release ไว้แต่จะไม่มีฟีเจอร์ใหม่ **การพัฒนาหลังจากนี้มีเฉพาะรุ่น Node.js เท่านั้น** (`src/`, พอร์ต 8008) ถ้าเพิ่งเริ่มใช้วันนี้ให้เลือก Node.js
+> [!CAUTION]
+> **รุ่น Python เลิกพัฒนาแล้ว (deprecated) ให้ใช้รุ่น Node.js เท่านั้น**
+> v1.0.0 (2026-09-19) คือ release สุดท้ายที่มีทั้งสองรุ่น รุ่น Python (`antigravity_bridge.py`, พอร์ต `8000`) ถูก freeze ไว้ที่ v1.0.0 และ **จะไม่มีการอัปเดตอีก** ทั้งฟีเจอร์ใหม่และการแก้บั๊ก และไม่ได้รับการแก้ไขที่ทำในรุ่น Node.js หลังจากนั้น (ตัดรันทันทีเมื่อโควตาหมด, OAuth refresh ที่ไม่ทำให้เซิร์ฟเวอร์ค้าง, คำตอบ tool call ที่ไม่มีข้อความปน) ยกเว้นเพียงการแก้ช่องโหว่ความปลอดภัยที่เจ้าของโปรเจกต์ขอเท่านั้น
+> **การพัฒนาทั้งหมดทำในรุ่น Node.js เท่านั้น** (`src/`, พอร์ต `8008`) ถ้ายังใช้รุ่น Python อยู่: เปลี่ยน client ให้ชี้ไปที่ `:8008` แทน `:8000` และย้าย API key จาก `ANTIGRAVITY_BRIDGE_API_KEYS` ไปที่ `ANTIGRAVITY_API_KEYS` (`node src/index.mjs key create <label>`) ส่วนการล็อกอินโปรไฟล์ Google ยังใช้ CLI ของรุ่น Python (`python3 antigravity_bridge.py profile login`) โปรไฟล์ใช้ร่วมกัน ทั้งสองรุ่นจึงเห็นโปรไฟล์เดียวกัน
 
 **Antigravity Bridge Server** คือ REST API Bridge แบบ Zero External Dependencies ที่รองรับมาตรฐาน OpenAI และ Anthropic สำหรับระบบนิเวศของ `antigravity` / `agy` CLI โดยเปลี่ยนบัญชี Google ที่ล็อกอินไว้ใน CLI บนเครื่องของคุณให้กลายเป็น API Cluster หลายโปรไฟล์ที่ทนทาน พร้อมระบบสลับโปรไฟล์อัจฉริยะ, fallback ทันทีเมื่อโควตาเต็ม, รีเฟรช OAuth อัตโนมัติในเบื้องหลัง, Tool Calling, SSE Streaming และการสร้างรูปภาพ
 
@@ -26,7 +29,7 @@ Repository นี้มี **เซิร์ฟเวอร์ตัวเดี
 | หน่วยความจำโดยประมาณ | ~80–150 MB | ~35–55 MB |
 | ชุดทดสอบ | `test_antigravity_bridge.py` (73 tests) | `tests/*.test.mjs` (37 tests) |
 
-เลือกใช้รุ่นใดรุ่นหนึ่ง หรือรันทั้งสองรุ่นพร้อมกันบนพอร์ตเริ่มต้นของแต่ละรุ่นก็ได้ ดู [การเลือกรุ่นที่จะใช้](#-การเลือกรุ่นที่จะใช้-choosing-an-edition)
+ให้ใช้รุ่น Node.js คอลัมน์ Python อธิบาย v1.0.0 ไว้สำหรับเครื่องที่ติดตั้งไว้แล้ว ดู [การเลือกรุ่นที่จะใช้](#-การเลือกรุ่นที่จะใช้-choosing-an-edition)
 
 ---
 
@@ -61,6 +64,7 @@ Repository นี้มี **เซิร์ฟเวอร์ตัวเดี
 - [⚙️ การตั้งค่าและตัวแปรสภาพแวดล้อม](#️-การตั้งค่าและตัวแปรสภาพแวดล้อม-environment-variables)
 - [🤖 การเชื่อมต่อกับ Hermes Agent](#-การเชื่อมต่อกับ-hermes-agent-configyaml)
 - [🦞 การเชื่อมต่อกับ OpenClaw](#-การเชื่อมต่อกับ-openclaw-openclawjson)
+- [🧩 การตั้งค่า Agent Client (zeroclaw, Hermes, OpenClaw)](#-การตั้งค่า-agent-client-zeroclaw-hermes-openclaw)
 - [💻 ตัวอย่างการเรียกใช้งานผ่าน SDK](#-ตัวอย่างการเรียกใช้งานผ่าน-sdk-client-sdks)
 - [⏱️ ตัวเลือก Timeout และ Prompt ขนาดใหญ่](#️-ตัวเลือก-timeout-และการจัดการ-prompt-ขนาดใหญ่)
 - [🚀 การติดตั้งเพื่อใช้งานจริง](#-การติดตั้งเพื่อใช้งานจริง-production-deployment)
@@ -461,7 +465,7 @@ Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดั�
 
 ## 🤖 การเชื่อมต่อกับ Hermes Agent (`config.yaml`)
 
-**Hermes Agent** ใช้ Bridge เป็น custom provider แบบ OpenAI-compatible ได้ทั้ง streaming และ tool calling เพิ่ม provider ใต้ `custom_providers` ใน `~/.hermes/config.yaml` หรือ `~/.hermes/profiles/<profile>/config.yaml` ชี้ `api` ไปยังรุ่นที่รัน (`8000` Python, `8008` Node.js) จะกำหนด provider แยกต่อพอร์ตก็ได้
+**Hermes Agent** ใช้ Bridge เป็น custom provider แบบ OpenAI-compatible ได้ทั้ง streaming และ tool calling เพิ่ม provider ใต้ `custom_providers` ใน `~/.hermes/config.yaml` หรือ `~/.hermes/profiles/<profile>/config.yaml` ชี้ `api` ไปที่รุ่น Node.js (`8008`) ส่วนรุ่น Python ที่เลิกพัฒนาแล้วตอบที่ `8000`
 
 ```yaml
 model:
@@ -470,8 +474,8 @@ model:
 
 custom_providers:
   agy-cli:
-    api: http://127.0.0.1:8000/v1
-    api_key: sk-antigravity  # key จากรายการ key ของรุ่นนั้น หรือค่าอะไรก็ได้ถ้าปิด auth
+    api: http://127.0.0.1:8008/v1
+    api_key: sk-antigravity  # key จาก `node src/index.mjs key list` หรือค่าอะไรก็ได้ถ้าปิด auth
     name: Antigravity Multi-Profile Bridge
     models:
       gemini-3.7-flash-high:
@@ -510,7 +514,7 @@ hermes chat -m agy-cli/gemini-3.7-flash-high   # แชตผ่าน Bridge
     "mode": "merge",
     "providers": {
       "antigravity": {
-        "baseUrl": "http://127.0.0.1:8000/v1",   // หรือ :8008 สำหรับรุ่น Node.js
+        "baseUrl": "http://127.0.0.1:8008/v1",   // รุ่น Node.js
         "apiKey": "sk-antigravity",
         "api": "openai-completions",
         "models": [
@@ -538,14 +542,96 @@ hermes chat -m agy-cli/gemini-3.7-flash-high   # แชตผ่าน Bridge
 
 หรือผ่าน CLI:
 ```bash
-openclaw config set models.providers.antigravity.baseUrl "http://127.0.0.1:8000/v1"
+openclaw config set models.providers.antigravity.baseUrl "http://127.0.0.1:8008/v1"
 openclaw config set models.providers.antigravity.apiKey "sk-antigravity"
 openclaw config set models.providers.antigravity.api "openai-completions"
 openclaw models set antigravity/gemini-3.7-flash-high
 openclaw config validate && openclaw models list
 ```
 
-**OpenClaw บน Docker:** เข้าถึง host ด้วย `http://172.17.0.1:8000/v1` หรือ `http://host.docker.internal:8000/v1` (บน Linux เพิ่ม `extra_hosts: ["host.docker.internal:host-gateway"]`) เช่นตั้ง `OPENAI_BASE_URL=http://172.17.0.1:8000/v1` และ `OPENAI_API_KEY=sk-antigravity` ใน `.env` ของ container
+**OpenClaw บน Docker:** เข้าถึง host ด้วย `http://172.17.0.1:8008/v1` หรือ `http://host.docker.internal:8008/v1` (บน Linux เพิ่ม `extra_hosts: ["host.docker.internal:host-gateway"]`) เช่นตั้ง `OPENAI_BASE_URL=http://172.17.0.1:8008/v1` และ `OPENAI_API_KEY=sk-antigravity` ใน `.env` ของ container
+
+---
+
+## 🧩 การตั้งค่า Agent Client (zeroclaw, Hermes, OpenClaw)
+
+Bridge ไม่เก็บสถานะบทสนทนา ทุก request ตอบจากข้อความที่ client ส่งมาเท่านั้น **สิ่งที่โมเดลจำได้จึงขึ้นกับการตั้งค่าของ client ไม่ใช่ของ bridge** ถ้าบอท "ตอบซ้ำเดิม" "ตอบข้อความก่อนหน้า" หรือ "ไปค้นหาสิ่งที่เคยทำไปแล้วใหม่" ให้ตรวจ client ก่อน ทุกกรณีที่ตรวจบนเครื่อง production พบว่า prompt ไม่มีบทสนทนาก่อนหน้า หรือ turn เดียววนเรียก tool หลายสิบรอบระหว่างที่ผู้ใช้ส่งข้อความเพิ่ม
+
+**วิธีตรวจว่าโมเดลได้รับอะไรจริง** บรรทัด `[REQUEST] ... prompt_len=... tools=N` ใน journal บอกขนาดและจำนวน tool ส่วน step `USER_INPUT` แรกใน agy transcript (`<sandbox base>/<profile>/.gemini/antigravity-cli/brain/<run>/.system_generated/logs/transcript_full.jsonl`) มี prompt เต็ม ถ้าข้อความก่อนหน้าของคุณไม่อยู่ในนั้น แปลว่า client ไม่ได้ส่งมา
+
+### หลักที่ใช้กับ agent client ทุกตัว
+
+| หลัก | เหตุผล |
+| :--- | :--- |
+| เก็บข้อความของผู้ใช้และคำตอบสุดท้ายไว้ในประวัติ อย่าให้แถวของ tool เบียดออกไป | turn ที่เรียก tool 60 รอบเขียนประวัติราว 120 แถว ถ้าเพดานอยู่ที่ 150 แถว turn เดียวก็ดันคำถามและคำตอบก่อนหน้าออกจาก prompt หมด |
+| เปิดเฉพาะ tool ที่บอทต้องใช้ | นิยาม tool ถูกส่งไปทุก request tool 50 ตัวกินไป 96 KB จาก prompt 176 KB ลดเหลือ 20 ตัวทำให้ prompt เปล่าลดจาก 93,568 เหลือ 38,007 byte |
+| จำกัดจำนวนรอบเรียก tool ต่อ turn | ทุกรอบส่ง prompt ทั้งก้อนซ้ำ turn ที่ไม่จำกัดวิ่ง 22-41 รอบ ใช้ 4-8 นาที ผู้ใช้ที่ส่งข้อความซ้ำระหว่างนั้นจะเห็น "คำตอบเดิม" จาก turn ที่ค้างอยู่ |
+| ปิดการเรียกโมเดลล่วงหน้า (classifier, reply-intent check) ที่มี timeout สั้น | agy ไม่เคยตอบภายใน 5 วินาที การเรียกแบบนี้จึงกลายเป็นการรันที่ถูกยกเลิก (`[CLIENT DISCONNECTED] ... after 5.0s`) เสียโควตาเปล่า |
+| ตั้ง timeout ของ provider อย่างน้อย 300 วินาที | prompt ใหญ่และการสลับโปรไฟล์อาจใช้เวลาหลายนาที |
+| อย่า restart client ระหว่างที่ turn กำลังทำงาน | ข้อความที่กำลังตอบจะหายไป ไม่ถูกทำต่อ ผู้ใช้ต้องส่งใหม่ |
+
+### zeroclaw (ตรวจแล้วกับเวอร์ชัน 0.8.5)
+
+Provider ชี้ไปที่รุ่น Node.js:
+
+```toml
+[providers.models.llamacpp.agybridgenodejs]
+uri = "http://127.0.0.1:8008/v1"
+model = "gemini-3.8-flash"
+timeout_secs = 300
+```
+
+ค่าของ agent และ runtime profile ที่ใช้ได้ดีกับงานเขียนโค้ดยาว ๆ ผ่าน Telegram:
+
+```toml
+[agents.<agent>.precheck]
+enabled = false              # precheck 5 วินาทีถูก bridge ตัดทุกครั้ง
+
+[runtime_profiles.unbounded]
+max_tool_iterations = 60
+agentic_timeout_secs = 3600  # 60 รอบ รอบละ 15-30 วินาที อาจเกิน 1800 วินาที
+max_history_messages = 400
+keep_tool_context_turns = 0  # เก็บแค่ข้อความผู้ใช้กับคำตอบสุดท้าย
+compact_context = true
+max_context_tokens = 128000  # เกินนี้จะตัด turn เก่าสุดออกทั้งก้อน
+
+[risk_profiles.<profile>]
+excluded_tools = ["browser", "canvas", "weather", "..."]  # tool ที่บอทนี้ไม่เคยใช้
+```
+
+สิ่งที่เอกสารของ zeroclaw ไม่ได้บอกชัด (อ่านจาก source v0.8.5):
+
+- **`keep_tool_context_turns` เป็นสวิตช์เปิด/ปิด ไม่ใช่จำนวน turn** ค่ามากกว่า 0 จะเก็บทุก tool call และผล tool ของทุก turn ลง session และ `max_history_messages` ตัดทีละข้อความ turn ยาว ๆ จึงดันคำถามของผู้ใช้ออกจาก prompt ถ้าตั้งเป็น `0` คำสั่งต่อเนื่องอย่าง "ทำ script 4 กับ 5 ต่อ" จะยังเห็นคำตอบที่ลิสต์ script ไว้ ข้อแลกเปลี่ยนคือ turn ถัดไปเห็นคำตอบสุดท้าย ไม่เห็นผล tool ดิบ
+- **ให้ `history_pruning.enabled = false` ไว้** ใน 0.8.5 การเปิดไม่ได้ย่อผล tool เก่า แต่ลดงบ context ลงเหลือ `history_pruning.max_tokens` (ค่าเริ่มต้น 8192) ประวัติจะหายมากกว่าเดิม
+- **`channels.telegram.<alias>.excluded_tools` ไม่มีผลใน 0.8.5** ให้ใช้ `risk_profiles.<profile>.excluded_tools`
+- **`/new` ลบทั้ง session** ออกจาก `~/.zeroclaw/data/sessions/sessions.db` และเป็นคำสั่งเดียวที่ลบ ถ้าบทสนทนาเริ่มจากศูนย์กะทันหัน แปลว่ามีคนส่ง `/new`
+- **restart ไม่ลบ session แต่โหลดกลับมาแค่ 50 แถวล่าสุดต่อ session** (ค่าตายตัว ไม่ใช่ `max_history_messages`) และปิดข้อความที่กำลังตอบอยู่เป็น `[Session interrupted]` เมื่อ `keep_tool_context_turns = 0` 50 แถวเท่ากับคู่ถาม-ตอบราว 25 คู่
+- zeroclaw อ่าน `config.toml` ที่แก้ไขระหว่างรันได้เอง (log ว่า `Applied updated channel runtime config from disk`) จึงอาจไม่ต้อง restart ใช้ `zeroclaw config set <dotted.path> <value>` ซึ่งตรวจค่าให้ด้วย
+
+ผลที่วัดบน production หลังปรับ: prompt ต่อ request ลดจาก 106-160 KB เหลือ 47 KB และคำถามต่อเนื่องได้คำตอบใน 21 วินาที
+
+### Hermes Agent
+
+ตั้ง provider ตาม [การเชื่อมต่อกับ Hermes Agent](#-การเชื่อมต่อกับ-hermes-agent-configyaml) แล้วเพิ่ม:
+
+```yaml
+agent:
+  max_turns: 150          # เพดานรอบเรียก tool ต่อ turn
+  gateway_timeout: 1800
+  environment_hint: |
+    - To run multi-line Python or Node code, first write it to a file with write_file,
+      then run that file with one terminal command. Do NOT inline multi-line scripts
+      (python3 -c, node -e, bash -c, heredocs).
+    - After write_file or patch reports success, the file IS saved. Do not re-read or
+      re-write it to double-check, and do not repeat a step you already completed.
+    - Prefer the read_file and search_files tools over cat/grep/find in terminal.
+```
+
+Hermes อ่าน `environment_hint` ทุกครั้งที่สร้าง prompt และอ่าน config ใหม่เมื่อไฟล์เปลี่ยน จึงไม่ต้อง restart gateway ข้อความข้างบนหยุดอาการที่โมเดลเขียนไฟล์เดิมซ้ำไปซ้ำมาได้ และกันไม่ให้โค้ดหลายบรรทัดไปอยู่ใน JSON argument ของ tool
+
+### OpenClaw และ agent แบบ OpenAI-compatible อื่น ๆ
+
+เชื่อมต่อตาม [การเชื่อมต่อกับ OpenClaw](#-การเชื่อมต่อกับ-openclaw-openclawjson) โดยให้ `baseUrl` ชี้พอร์ต `8008` แล้วใช้หลักในตารางข้างบนกับชื่อค่าของ client นั้น ๆ: เพดานประวัติหรือ context ที่ยังเก็บข้อความผู้ใช้, รายการ tool ที่อนุญาต, จำนวนรอบเรียก tool สูงสุดต่อ turn, timeout ของ provider อย่างน้อย 300 วินาที และไม่มีการเรียกโมเดลล่วงหน้าที่ timeout สั้น ถ้า client มีตัวเลือก "สรุปหรือทิ้งผล tool เก่า" ให้ใช้ตัวนั้นก่อนจะเพิ่มเพดานประวัติ
 
 ---
 
