@@ -188,6 +188,19 @@ export function revokeApiKeyFromEnv(target, envPath = null) {
     });
 
     writePrivateFile(targetPath, newLines.join("\n"));
+    // The server takes its keys from process.env (getConfiguredApiKeys): drop the revoked ones there as
+    // well, or a revoked key keeps working until the next restart.
+    if (removed.length && process.env.ANTIGRAVITY_API_KEYS) {
+      const gone = new Set(removed.map(([lbl, k]) => k || lbl));
+      process.env.ANTIGRAVITY_API_KEYS = process.env.ANTIGRAVITY_API_KEYS.split(",")
+        .map((e) => e.trim())
+        .filter(Boolean)
+        .filter((entry) => {
+          const [, ...kParts] = entry.split(":");
+          return !gone.has(kParts.length ? kParts.join(":").trim() : entry);
+        })
+        .join(",");
+    }
     return [true, targetPath, removed];
   } catch (err) {
     return [false, err.message, []];

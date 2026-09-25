@@ -58,13 +58,51 @@ export const DEFAULT_PORT = parseInt(
 export const DEFAULT_HOST = process.env.HOST || process.env.ANTIGRAVITY_HOST || "127.0.0.1";
 
 export const MAX_BODY_SIZE = 32 * 1024 * 1024; // 32 MB
+
+export function defaultMaxCliArgBytes(platform = process.platform) {
+  return platform === "win32" ? 24000 : 120000;
+}
 // Linux limits a SINGLE argv string to MAX_ARG_STRLEN = 131072 bytes (spawn E2BIG above that), so the
-// prompt passed as `-p "<prompt>"` must stay below it; 120000 leaves headroom. Thai text is 3 bytes/char.
-export const MAX_CLI_ARG_BYTES = parseInt(process.env.ANTIGRAVITY_MAX_CLI_ARG_BYTES || "120000", 10) || 120000;
+// prompt passed as `-p "<prompt>"` must stay below it; 120000 leaves headroom. On Windows, CreateProcessW
+// caps the entire command line at 32767 chars (so 24000 leaves safe headroom for binary path and flags).
+export const MAX_CLI_ARG_BYTES =
+  parseInt(process.env.ANTIGRAVITY_MAX_CLI_ARG_BYTES || "", 10) || defaultMaxCliArgBytes();
 // Prompts larger than MAX_CLI_ARG_BYTES are handed to agy over stdin as one NDJSON line
 // ({"event":"user","message":{"role":"user","content":...}} with --input-format stream-json),
 // which has no argv size limit. This is the hard cap for that path.
 export const MAX_STDIN_PROMPT_BYTES = parseInt(process.env.ANTIGRAVITY_MAX_STDIN_PROMPT_BYTES || "2000000", 10) || 2000000;
+
+// Where agy keeps its OAuth token. agy (zalando/go-keyring) uses the OS keyring, which holds ONE
+// `gemini`/`antigravity` entry per machine, unless it believes it runs in an SSH session: its
+// codeassistclient.shouldBypassKeyring() checks SSH_CONNECTION/SSH_CLIENT/SSH_TTY (and WSL, containers,
+// no D-Bus) and then stores the token as a file, $HOME/.gemini/antigravity-cli/antigravity-oauth-token
+// (agy log: "Using file-based token storage because SSH session detected"). No SSH connection is made;
+// the variable is only that signal. Every profile runs with its own sandbox HOME, so "file" mode gives
+// every profile its own token file on every OS. "keyring" (ANTIGRAVITY_AGY_TOKEN_MODE=keyring) is the
+// way back if a later agy stops honouring the signal.
+export function agyTokenMode() {
+  return (process.env.ANTIGRAVITY_AGY_TOKEN_MODE || "file").trim().toLowerCase() === "keyring" ? "keyring" : "file";
+}
+// Set for agy only, never for the bridge itself. A fixed value, not a real address: agy only checks
+// that the variable is non-empty (verified with agy 1.2.3 on macOS; SSH_CONNECTION alone is enough).
+export const AGY_FILE_MODE_ENV = { SSH_CONNECTION: "127.0.0.1 0 127.0.0.1 22" };
+
+// Keyring mode on macOS/Windows: the single keyring entry is rewritten before each run, so runs must not
+// overlap or one profile's agy can read another profile's token. File mode has nothing shared to protect
+// (each profile's token lives in its own sandbox), so it never serializes: a machine-wide mutex there
+// would queue every request behind the one in flight.
+export function keyringSerialized(platform = process.platform, tokenMode = agyTokenMode()) {
+  if (tokenMode !== "keyring") return false;
+  const raw = (process.env.ANTIGRAVITY_KEYRING_SERIALIZE || "").trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  return platform === "darwin" || platform === "win32";
+}
+
+/** Split a command template into argv the way the bridge does: whitespace-separated, "double quotes" group. */
+export function splitCommandLine(cmd) {
+  return (String(cmd || "").match(/(?:[^\s"]+|"[^"]*")+/g) || []).map((s) => s.replace(/^"|"$/g, ""));
+}
 
 export const DEFAULT_PROFILE_TIMEOUT = parseFloat(process.env.ANTIGRAVITY_PROFILE_TIMEOUT || "600.0");
 export const DEFAULT_TOTAL_TIMEOUT = parseFloat(process.env.ANTIGRAVITY_TOTAL_TIMEOUT || "1800.0");
@@ -362,45 +400,66 @@ export function resolveModelFlags(modelName) {
   return flags;
 }
 
-export function detectCliCommand() {
-  const envCmd = (process.env.ANTIGRAVITY_BRIDGE_CMD || "").trim();
+export function detectCliCommand({
+  platform = process.platform,
+  env = process.env,
+  exists = fs.existsSync,
+  homedir = os.homedir(),
+} = {}) {
+  const envCmd = (env.ANTIGRAVITY_BRIDGE_CMD || "").trim();
   if (envCmd) {
-    const binary = envCmd.split(/\s+/)[0];
-    return { binary, template: envCmd };
+    return { binary: splitCommandLine(envCmd)[0] || envCmd, template: envCmd };
   }
 
-  // 1. Search PATH
-  const isWindows = process.platform === "win32";
-  const pathDirs = (process.env.PATH || "").split(isWindows ? ";" : ":");
+  const isWindows = platform === "win32";
+  const pathLib = isWindows ? path.win32 : path.posix;
   const binName = isWindows ? "agy.exe" : "agy";
+  // `binary` is the resolved path, not the bare name: the token daemon and `profile login` spawn it
+  // directly, and a GUI app (desktop edition, LaunchAgent) has no shell PATH to find a bare `agy` in.
+  const found = (full) => ({
+    binary: full,
+    template: `"${full}" --dangerously-skip-permissions --print-timeout 20m0s --output-format stream-json -p "{prompt}"`,
+  });
 
+  // 1. Search PATH
+  const pathDirs = (env.PATH || "").split(isWindows ? ";" : ":");
   for (const d of pathDirs) {
     if (!d) continue;
-    const full = path.join(d, binName);
+    const full = pathLib.join(d, binName);
     try {
-      if (fs.existsSync(full)) {
-        return {
-          binary: "agy",
-          template: `"${full}" --dangerously-skip-permissions --print-timeout 20m0s --output-format stream-json -p "{prompt}"`,
-        };
-      }
+      if (exists(full)) return found(full);
     } catch {
       // Ignore
     }
   }
 
-  // 2. Check ~/.local/bin/agy
-  const home = os.homedir();
-  const localBin = path.join(home, ".local", "bin", binName);
-  try {
-    if (fs.existsSync(localBin)) {
-      return {
-        binary: "agy",
-        template: `"${localBin}" --dangerously-skip-permissions --print-timeout 20m0s --output-format stream-json -p "{prompt}"`,
-      };
+  // 2. Standard installation paths per OS
+  const candidates = [];
+  if (isWindows) {
+    if (env.LOCALAPPDATA) {
+      candidates.push(pathLib.join(env.LOCALAPPDATA, "agy", "bin", "agy.exe"));
     }
-  } catch {
-    // Ignore
+    candidates.push(pathLib.join(homedir, ".local", "bin", "agy.exe"));
+  } else if (platform === "darwin") {
+    candidates.push(
+      pathLib.join(homedir, ".local", "bin", "agy"),
+      "/opt/homebrew/bin/agy",
+      "/usr/local/bin/agy"
+    );
+  } else {
+    candidates.push(
+      pathLib.join(homedir, ".local", "bin", "agy"),
+      "/usr/local/bin/agy",
+      "/usr/bin/agy"
+    );
+  }
+
+  for (const c of candidates) {
+    try {
+      if (exists(c)) return found(c);
+    } catch {
+      // Ignore
+    }
   }
 
   return {

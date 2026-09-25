@@ -19,6 +19,10 @@ import {
   blockedToolTranslationEnabled,
   earlyToolCallExitEnabled,
   quotaFastFailEnabled,
+  agyTokenMode,
+  AGY_FILE_MODE_ENV,
+  keyringSerialized,
+  splitCommandLine,
 } from "../config.mjs";
 import { sanitizePromptForCli } from "../translators/context-compactor.mjs";
 import { parseToolCallsFromResponse, translateBlockedToolCall } from "../translators/tools.mjs";
@@ -26,8 +30,11 @@ import {
   acquireSandboxLock,
   getProfileSandboxDir,
   getProfileSandboxBasePath,
+  copyRefreshedTokenBack,
+  readSandboxAccessToken,
 } from "./sandbox.mjs";
 import { syncProfileToSystem, getOsType } from "./keyring-sync.mjs";
+import { registerChild, unregisterChild, isShuttingDown } from "./host.mjs";
 import {
   isQuotaOrRateLimitError,
   isHardQuotaError,
@@ -58,7 +65,7 @@ export function buildStdinPromptArgv(parts, placeholder, cmdTemplate) {
   return null;
 }
 
-export function parseCmdTemplate(cmdTemplate, promptText, modelName = null) {
+export function parseCmdTemplate(cmdTemplate, promptText, modelName = null, { maxArgBytes = MAX_CLI_ARG_BYTES } = {}) {
   const rawFlags = resolveModelFlags(modelName);
   const normalizedFlags = [];
   for (const f of rawFlags) {
@@ -81,23 +88,23 @@ export function parseCmdTemplate(cmdTemplate, promptText, modelName = null) {
       .replace("{prompt}", placeholder);
 
     // Simple shell split
-    const parts = temp.match(/(?:[^\s"]+|"[^"]*")+/g).map((s) => s.replace(/^"|"$/g, ""));
+    const parts = splitCommandLine(temp);
     let finalArgs = parts;
     if (normalizedFlags.length > 0) {
       finalArgs = [parts[0], ...normalizedFlags, ...parts.slice(1)];
     }
 
     let finalPrompt = promptText;
-    if (promptBytesLen > MAX_CLI_ARG_BYTES) {
+    if (promptBytesLen > maxArgBytes) {
       const stdinArgv = buildStdinPromptArgv(finalArgs, placeholder, cmdTemplate);
       if (stdinArgv) {
         // Linux caps a single argv string at 128KB (spawn E2BIG): hand the prompt to agy over stdin.
         const payloadText =
           promptBytesLen > MAX_STDIN_PROMPT_BYTES ? sanitizePromptForCli(promptText, MAX_STDIN_PROMPT_BYTES) : promptText;
-        console.log(`[EXEC] prompt is ${promptBytesLen} bytes (> ${MAX_CLI_ARG_BYTES} argv limit): delivering via stdin NDJSON`);
+        console.log(`[EXEC] prompt is ${promptBytesLen} bytes (> ${maxArgBytes} argv limit): delivering via stdin NDJSON`);
         return { argv: stdinArgv, stdinInput: buildStdinPromptPayload(payloadText) };
       }
-      finalPrompt = sanitizePromptForCli(promptText, MAX_CLI_ARG_BYTES);
+      finalPrompt = sanitizePromptForCli(promptText, maxArgBytes);
     }
 
     finalArgs = finalArgs.map((arg) => (arg === placeholder ? finalPrompt : arg));
@@ -112,8 +119,8 @@ export function parseCmdTemplate(cmdTemplate, promptText, modelName = null) {
   }
 
   let finalPrompt = promptText;
-  if (promptBytesLen > MAX_CLI_ARG_BYTES) {
-    finalPrompt = sanitizePromptForCli(promptText, MAX_CLI_ARG_BYTES);
+  if (promptBytesLen > maxArgBytes) {
+    finalPrompt = sanitizePromptForCli(promptText, maxArgBytes);
   }
 
   return { argv: finalArgs, stdinInput: finalPrompt };
@@ -125,7 +132,7 @@ export function killProcessTree(child, force = false) {
 
   if (isWindows) {
     try {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"]);
+      spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
     } catch {
       // Ignore
     }
@@ -426,6 +433,119 @@ export async function readLatestAgyRunError(sandboxDir, conversationId, { tailBy
   }
 }
 
+// Mutex for keyring access when keyring serialization is active (macOS / Windows keyring mode)
+let keyringChain = Promise.resolve();
+export async function withKeyring(fn) {
+  if (!keyringSerialized()) return fn();
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const prev = keyringChain;
+  keyringChain = prev.then(() => gate);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+export const BASE_ALLOWED_ENV_KEYS = [
+  "PATH",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "DBUS_SESSION_BUS_ADDRESS",
+  "SSH_AUTH_SOCK",
+  "ANTIGRAVITY_PROFILE",
+  "ANTIGRAVITY_PROFILES",
+  "ANTIGRAVITY_HOME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "NO_PROXY",
+  "no_proxy",
+];
+
+export const WIN_EXTRA_ENV_KEYS = [
+  "APPDATA",
+  "LOCALAPPDATA",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "USERNAME",
+  "COMSPEC",
+  "PATHEXT",
+  "PROGRAMDATA",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "windir",
+  "NUMBER_OF_PROCESSORS",
+  "PROCESSOR_ARCHITECTURE",
+];
+
+export function buildChildEnvironment({
+  platform = process.platform,
+  baseEnv = process.env,
+  sandboxDir = null,
+  profile = null,
+  tokenMode = agyTokenMode(),
+  proxyUrl = null,
+} = {}) {
+  // Windows variable names are case-insensitive and spelled Path, SystemRoot, ComSpec, ProgramData...:
+  // compare them upper-cased there, or agy starts without PATH and SYSTEMROOT (Go's net/crypto need it).
+  const norm = platform === "win32" ? (k) => k.toUpperCase() : (k) => k;
+  const allowed = new Set(
+    [...BASE_ALLOWED_ENV_KEYS, ...(platform === "win32" ? WIN_EXTRA_ENV_KEYS : [])].map(norm)
+  );
+
+  const env = {};
+  for (const [k, v] of Object.entries(baseEnv)) {
+    if (allowed.has(norm(k))) {
+      env[k] = v;
+    } else if (norm(k).startsWith("ANTIGRAVITY_") && !/_KEYS?$/i.test(k)) {
+      // Exclude secrets such as ANTIGRAVITY_API_KEYS, ANTIGRAVITY_API_KEY from child processes
+      env[k] = v;
+    }
+  }
+
+  if (sandboxDir) {
+    env.HOME = sandboxDir;
+    env.USERPROFILE = sandboxDir;
+    env.XDG_CONFIG_HOME = path.join(sandboxDir, ".config");
+    env.XDG_DATA_HOME = path.join(sandboxDir, ".local", "share");
+    env.XDG_CACHE_HOME = path.join(sandboxDir, ".cache");
+  }
+
+  if (profile) {
+    env.ANTIGRAVITY_PROFILE = profile;
+  }
+
+  if (tokenMode === "file") {
+    Object.assign(env, AGY_FILE_MODE_ENV);
+  }
+
+  if (proxyUrl) {
+    env.ALL_PROXY = proxyUrl;
+    env.all_proxy = proxyUrl;
+    env.HTTPS_PROXY = proxyUrl;
+    env.https_proxy = proxyUrl;
+    env.HTTP_PROXY = proxyUrl;
+    env.http_proxy = proxyUrl;
+    env.NO_PROXY = "127.0.0.1,localhost,::1";
+    env.no_proxy = "127.0.0.1,localhost,::1";
+  }
+
+  return env;
+}
+
 export const TRANSCRIPT_READ_HINT =
   "This step was agy reading its own conversation log for this run (it does that when the prompt is too large for one turn); " +
   "ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1 allows only that read, nothing else.";
@@ -444,88 +564,55 @@ export async function executeCliCommand(
     clientToolNames = null,
   } = {}
 ) {
-  const earlyToolCall = earlyToolCallExitEnabled();
-  const fastFailQuota = quotaFastFailEnabled();
-  const { argv, stdinInput } = parseCmdTemplate(cmdTemplate, promptText, modelName);
-  const effectiveStall =
-    stallTimeout !== null
-      ? stallTimeout
-      : calculateDynamicStallTimeout(promptText.length, modelName);
-  const allowTools = allowCliTools === null ? cliToolsAllowed() : Boolean(allowCliTools);
-  if (signal?.aborted) {
-    throw new Error(`Client disconnected: CLI execution cancelled before start (profile=${profile || "default"})`);
-  }
-  const execStart = Date.now();
-  console.log(
-    `[EXEC] profile=${profile || "default"} model=${modelName || "default"} timeout=${Number(timeout).toFixed(0)}s stall=${Number(effectiveStall).toFixed(0)}s prompt_len=${promptText.length} tools_allowed=${allowTools}`
-  );
+  const tokenMode = agyTokenMode();
+  return await withKeyring(async () => {
+    const earlyToolCall = earlyToolCallExitEnabled();
+    const fastFailQuota = quotaFastFailEnabled();
+    const { argv, stdinInput } = parseCmdTemplate(cmdTemplate, promptText, modelName);
+    const effectiveStall =
+      stallTimeout !== null
+        ? stallTimeout
+        : calculateDynamicStallTimeout(promptText.length, modelName);
+    const allowTools = allowCliTools === null ? cliToolsAllowed() : Boolean(allowCliTools);
+    if (signal?.aborted) {
+      throw new Error(`Client disconnected: CLI execution cancelled before start (profile=${profile || "default"})`);
+    }
+    if (isShuttingDown()) {
+      throw new Error(`Bridge is shutting down: CLI execution not started (profile=${profile || "default"})`);
+    }
+    const execStart = Date.now();
+    console.log(
+      `[EXEC] profile=${profile || "default"} model=${modelName || "default"} timeout=${Number(timeout).toFixed(0)}s stall=${Number(effectiveStall).toFixed(0)}s prompt_len=${promptText.length} tools_allowed=${allowTools}`
+    );
 
-  const releaseLock = acquireSandboxLock(profile);
-  let tempPromptFile = null;
+    const releaseLock = acquireSandboxLock(profile);
+    let tempPromptFile = null;
+    let sandboxDir = null;
+    let plantedAccessToken = null;
 
-  try {
-    const sandboxDir = getProfileSandboxDir(profile);
-    const readPolicy = allowTools ? null : new OwnConversationReadPolicy(sandboxDir);
+    try {
+      sandboxDir = getProfileSandboxDir(profile);
+      plantedAccessToken = readSandboxAccessToken(sandboxDir);
+      const readPolicy = allowTools ? null : new OwnConversationReadPolicy(sandboxDir);
+      const proxyUrl = await detectLocalProxy();
 
-    const allowedEnvKeys = new Set([
-      "PATH",
-      "USER",
-      "LOGNAME",
-      "SHELL",
-      "TERM",
-      "LANG",
-      "LC_ALL",
-      "SYSTEMROOT",
-      "TEMP",
-      "TMP",
-      "DBUS_SESSION_BUS_ADDRESS",
-      "SSH_AUTH_SOCK",
-      "ANTIGRAVITY_PROFILE",
-      "ANTIGRAVITY_PROFILES",
-      "ANTIGRAVITY_HOME",
-      "HTTP_PROXY",
-      "HTTPS_PROXY",
-      "ALL_PROXY",
-      "http_proxy",
-      "https_proxy",
-      "all_proxy",
-      "NO_PROXY",
-      "no_proxy",
-    ]);
+      const env = buildChildEnvironment({
+        platform: process.platform,
+        baseEnv: process.env,
+        sandboxDir,
+        profile,
+        tokenMode,
+        proxyUrl,
+      });
 
-    const env = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (allowedEnvKeys.has(k) || k.startsWith("ANTIGRAVITY_")) {
-        env[k] = v;
+      if (tokenMode !== "file" && profile) {
+        syncProfileToSystem(profile);
       }
-    }
 
-    env.HOME = sandboxDir;
-    env.USERPROFILE = sandboxDir;
-    env.XDG_CONFIG_HOME = path.join(sandboxDir, ".config");
-    env.XDG_DATA_HOME = path.join(sandboxDir, ".local", "share");
-    env.XDG_CACHE_HOME = path.join(sandboxDir, ".cache");
-    if (profile) {
-      env.ANTIGRAVITY_PROFILE = profile;
-      syncProfileToSystem(profile);
-    }
-
-    const proxyUrl = await detectLocalProxy();
-    if (proxyUrl) {
-      env.ALL_PROXY = proxyUrl;
-      env.all_proxy = proxyUrl;
-      env.HTTPS_PROXY = proxyUrl;
-      env.https_proxy = proxyUrl;
-      env.HTTP_PROXY = proxyUrl;
-      env.http_proxy = proxyUrl;
-      env.NO_PROXY = "127.0.0.1,localhost,::1";
-      env.no_proxy = "127.0.0.1,localhost,::1";
-    }
-
-    let stdinStream = "ignore";
-    if (stdinInput) {
-      stdinStream = "pipe";
-    }
+      let stdinStream = "ignore";
+      if (stdinInput) {
+        stdinStream = "pipe";
+      }
 
     return await new Promise((resolve, reject) => {
       let stdoutData = "";
@@ -662,7 +749,9 @@ export async function executeCliCommand(
         env,
         detached: process.platform !== "win32",
         stdio: [stdinStream, "pipe", "pipe"],
+        windowsHide: true,
       });
+      registerChild(child);
 
       if (stdinInput && child.stdin) {
         child.stdin.write(stdinInput);
@@ -686,6 +775,7 @@ export async function executeCliCommand(
       const totalTimer = setTimeout(() => {
         if (isSettled) return;
         isSettled = true;
+        unregisterChild(child);
         killProcessTree(child, true);
         reject(
           new Error(
@@ -705,6 +795,7 @@ export async function executeCliCommand(
           isSettled = true;
           clearInterval(stallInterval);
           clearTimeout(totalTimer);
+          unregisterChild(child);
           killProcessTree(child, true);
           reject(
             new Error(
@@ -719,6 +810,7 @@ export async function executeCliCommand(
         isSettled = true;
         clearTimeout(totalTimer);
         clearInterval(stallInterval);
+        unregisterChild(child);
         reject(err);
       });
 
@@ -731,6 +823,7 @@ export async function executeCliCommand(
             isSettled = true;
             clearTimeout(totalTimer);
             clearInterval(stallInterval);
+            unregisterChild(child);
             killProcessTree(child, true);
             console.warn(
               `[CLIENT DISCONNECTED] profile=${profile || "default"}: cancelled CLI execution after ${((Date.now() - execStart) / 1000).toFixed(1)}s`
@@ -746,6 +839,7 @@ export async function executeCliCommand(
         isSettled = true;
         clearTimeout(totalTimer);
         clearInterval(stallInterval);
+        unregisterChild(child);
 
         emit(parser.finish());
         console.log(
@@ -780,6 +874,16 @@ export async function executeCliCommand(
       });
     });
   } finally {
+    // Before the lock is released, and without getProfileSandboxDir(): that re-plants the sandbox from
+    // the profile and would overwrite the token agy just refreshed with the stale one.
+    if (profile && sandboxDir && tokenMode === "file") {
+      try {
+        const expiry = copyRefreshedTokenBack(sandboxDir, profile, { plantedAccessToken });
+        if (expiry) console.log(`[TOKEN] profile=${profile}: kept the access token agy refreshed during the run (expires ${expiry})`);
+      } catch (err) {
+        console.warn(`[TOKEN] profile=${profile}: could not keep agy's refreshed token: ${err.message}`);
+      }
+    }
     releaseLock();
     if (tempPromptFile && fs.existsSync(tempPromptFile)) {
       try {
@@ -789,6 +893,7 @@ export async function executeCliCommand(
       }
     }
   }
+  });
 }
 
 export async function executeCliWithFallback(

@@ -12,6 +12,7 @@ import { handleProfileCli } from "./cli/profile-cli.mjs";
 import { handleKeyCli } from "./cli/key-cli.mjs";
 import { startTokenRefreshDaemon } from "./core/token-daemon.mjs";
 import { buildAllowedHosts } from "./core/security.mjs";
+import { registerServer, beginShutdown } from "./core/host.mjs";
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -24,6 +25,9 @@ async function main() {
       process.exit(code);
     } else if (first === "key" || first === "keys") {
       const code = handleKeyCli(argv.slice(1));
+      process.exit(code);
+    } else if (first === "login") {
+      const code = await handleProfileCli(["login", ...argv.slice(1)]);
       process.exit(code);
     }
   }
@@ -75,7 +79,8 @@ Usage:
   node src/index.mjs [--port 8008] [--host 127.0.0.1] [--api-key KEY]
 
 Subcommands:
-  node src/index.mjs profile [list | sync <name> | probe [name] | reset [name]]
+  node src/index.mjs profile [list | login <name> | remove <name> | sync <name> | probe [name] | reset [name]]
+  node src/index.mjs login <name>
   node src/index.mjs key [list | generate <label> | revoke <label>]
 
 Options:
@@ -121,6 +126,7 @@ Options:
   });
 
   let daemonTimer = null;
+  registerServer(server);
   server.listen(port, host, () => {
     const cliInfo = detectCliCommand();
     if (autoRefreshMin > 0) {
@@ -146,6 +152,8 @@ Press Ctrl+C to stop.
   function shutdown() {
     console.log("\n[INFO] Gracefully shutting down Antigravity Bridge Server...");
     if (daemonTimer) clearInterval(daemonTimer);
+    // agy runs detached: end the runs in flight (and refuse fallback attempts) so none outlives the bridge.
+    beginShutdown();
     // Drop keep-alive / streaming connections so a restart is not held open by long-lived
     // clients (e.g. Hermes); force-exit if anything is still hanging after 10s.
     try { server.closeIdleConnections?.(); } catch { /* older Node */ }

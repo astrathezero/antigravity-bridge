@@ -521,8 +521,18 @@ export function createBridgeServer(options = {}) {
           reqJson.prompt ||
           "Explain in 2 clear bullet points why Fibonacci series with memoization is O(N) time complexity.";
 
+        // {"profile": "<name>"} probes that profile only (one agy run instead of one per profile).
+        const onlyProfile = reqJson.profile || null;
+        if (onlyProfile) {
+          if (!isSafeProfileName(onlyProfile) || !profileManager._profiles.includes(onlyProfile)) {
+            sendJson(res, { error: `Unknown profile: ${JSON.stringify(String(onlyProfile)).slice(0, 80)}` }, 404);
+            return;
+          }
+        }
+        const targets = onlyProfile ? [onlyProfile] : profileManager._profiles;
+
         const results = {};
-        for (const p of profileManager._profiles) {
+        for (const p of targets) {
           const pk = p || "default";
           const startT = Date.now();
           try {

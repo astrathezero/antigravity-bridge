@@ -8,7 +8,9 @@ import {
 } from "../core/profile-manager.mjs";
 import { syncProfileToSystem } from "../core/keyring-sync.mjs";
 import { executeCliCommand } from "../core/executor.mjs";
-import { detectCliCommand, getBridgeConfigPath, DEFAULT_PORT } from "../config.mjs";
+import { detectCliCommand, getBridgeConfigPath, getCanonicalAntigravityDir, DEFAULT_PORT } from "../config.mjs";
+import { isSafeProfileName } from "../core/security.mjs";
+import { getProfileSandboxBasePath } from "../core/sandbox.mjs";
 import { getConfiguredApiKeys } from "../auth.mjs";
 
 async function makeAuthedRequest(endpoint, method = "GET", bodyData = null) {
@@ -244,6 +246,88 @@ export async function handleProfileCli(argv) {
     }
   }
 
-  console.log("Usage: antigravity-bridge profile [list | order <p1,p2> | sync <name> | probe [name] | refresh [name] | reset [name] | disable <name> | enable <name>]");
+  if (subcmd === "login" || subcmd === "add" || subcmd === "new") {
+    const target = argv[1];
+    if (!target || !isSafeProfileName(target)) {
+      console.error("[Error] Please specify a profile name (A-Z a-z 0-9 . _ -): antigravity-bridge profile login <profile_name>");
+      return 1;
+    }
+    const { prepareLogin, runInteractiveLogin, collectLogin, cleanupLogin } = await import("../core/profile-login.mjs");
+    console.log(`\n[INFO] Starting interactive login for profile '${target}'...`);
+    let ctx = null;
+    try {
+      ctx = await prepareLogin(target);
+      if (ctx.targetExisted) {
+        console.log(`[INFO] Profile '${target}' already exists; it is only replaced once the new login succeeds.`);
+      }
+      console.log("=".repeat(80));
+      if (ctx.mode === "file") {
+        // SSH/file mode: agy prints a sign-in URL and waits for a code instead of opening a browser.
+        console.log("Login steps (agy runs in SSH mode here, so it does not open the browser by itself):");
+        console.log("   1. Choose '1. Google OAuth' and press Enter.");
+        console.log(`   2. Open the URL agy prints and sign in with the Google account for '${target}'.`);
+        console.log("   3. Copy the code Google shows after sign-in, paste it into this terminal, press Enter.");
+        console.log("   4. At the agy prompt type 'hi' + Enter once, then '/exit' (or Ctrl+D) to save the profile.");
+      } else {
+        console.log("Login steps (keyring mode):");
+        console.log(`   1. Sign in in the browser window agy opens, with the Google account for '${target}'.`);
+        console.log("   2. Back in this terminal type 'hi' + Enter once, then '/exit' (or Ctrl+D) to save the profile.");
+      }
+      console.log("=".repeat(80) + "\n");
+
+      await runInteractiveLogin(target, { prepareCtx: ctx });
+      const result = await collectLogin(target, { prepareCtx: ctx });
+      const note = result.verified ? "" : " (not confirmed with Google: userinfo was unreachable)";
+      console.log(`\n[SUCCESS] Profile '${target}' login completed. Account: ${result.email}${note}\n`);
+      return 0;
+    } catch (err) {
+      if (ctx) await cleanupLogin(ctx, { keepTarget: false });
+      console.error(`\n[ERROR] Login failed for profile '${target}': ${err.message}\n`);
+      return 1;
+    }
+  }
+
+  if (subcmd === "remove" || subcmd === "delete" || subcmd === "rm") {
+    const target = argv[1];
+    // The name becomes a path under profiles/: never accept separators or dot segments.
+    if (!target || !isSafeProfileName(target)) {
+      console.error("[Error] Please specify a profile name (A-Z a-z 0-9 . _ -): antigravity-bridge profile remove <profile_name>");
+      return 1;
+    }
+    const targetDir = path.join(getCanonicalAntigravityDir(), "profiles", target);
+    if (fs.existsSync(targetDir)) {
+      try {
+        fs.rmSync(targetDir, { recursive: true, force: true });
+        console.log(`[OK] Profile '${target}' removed (${targetDir})`);
+      } catch (err) {
+        console.error(`[ERROR] Failed to remove '${target}': ${err.message}`);
+        return 1;
+      }
+    } else {
+      console.log(`[Warning] Profile '${target}' directory not found (${targetDir})`);
+    }
+    // The sandboxes hold copies of the profile's tokens and its agy history.
+    const sandbox = getProfileSandboxBasePath(target);
+    fs.rmSync(sandbox, { recursive: true, force: true });
+    fs.rmSync(path.join(path.dirname(sandbox), ".token-refresh", target), { recursive: true, force: true });
+
+    // Also drop it from bridge_config.json, and from a running bridge's rotation.
+    const cfgFile = getBridgeConfigPath();
+    if (fs.existsSync(cfgFile)) {
+      try {
+        const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf-8"));
+        if (Array.isArray(cfg.profiles)) {
+          cfg.profiles = cfg.profiles.filter((p) => p !== target);
+          fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2), "utf-8");
+          await makeAuthedRequest("/v1/profiles/config", "POST", { profiles: cfg.profiles });
+        }
+      } catch (err) {
+        console.warn(`[Warning] Could not update ${cfgFile}: ${err.message}`);
+      }
+    }
+    return 0;
+  }
+
+  console.log("Usage: antigravity-bridge profile [list | login <name> | remove <name> | order <p1,p2> | sync <name> | probe [name] | refresh [name] | reset [name] | disable <name> | enable <name>]");
   return 0;
 }

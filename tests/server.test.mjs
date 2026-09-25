@@ -117,6 +117,24 @@ test("server: /v1/profiles and /v1/profiles/config endpoints", async () => {
     assert.equal(checkJson.status, "ok");
     assert.ok(checkJson.results);
     assert.ok(checkJson.profiles);
+    assert.deepEqual(Object.keys(checkJson.results).sort(), ["p1", "p2"]);
+
+    // 4. {"profile": "p2"} probes that profile only; an unknown one is refused.
+    const oneResp = await fetch(`http://127.0.0.1:${testPort}/v1/profiles/check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "Health test", profile: "p2" }),
+    });
+    assert.equal(oneResp.status, 200);
+    assert.deepEqual(Object.keys((await oneResp.json()).results), ["p2"]);
+    for (const profile of ["nope", "../p1"]) {
+      const badResp = await fetch(`http://127.0.0.1:${testPort}/v1/profiles/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile }),
+      });
+      assert.equal(badResp.status, 404, profile);
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -207,5 +225,42 @@ test("server: a tool-call reply carries neither the profile banner nor the raw t
     assert.ok(text.choices[0].message.content.includes("Antigravity Profile"), "a text reply still carries the banner");
   } finally {
     if (prevHide === undefined) delete process.env.ANTIGRAVITY_HIDE_PROFILE_STATUS; else process.env.ANTIGRAVITY_HIDE_PROFILE_STATUS = prevHide;
+  }
+});
+
+test("server: a key revoked through /v1/keys/revoke is refused at once, not only after a restart", async () => {
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { getConfiguredApiKeys } = await import("../src/auth.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agv-revoke-"));
+  const savedCwd = process.cwd();
+  const savedKeys = process.env.ANTIGRAVITY_API_KEYS;
+  const keys = "a:sk-agv-aaaaaaaaaa,b:sk-agv-bbbbbbbbbb";
+  fs.writeFileSync(path.join(dir, ".env"), `ANTIGRAVITY_API_KEYS="${keys}"\n`); // the file key revoke edits
+  process.chdir(dir);
+  process.env.ANTIGRAVITY_API_KEYS = keys; // as loadDotenv() leaves it at start-up
+  const pm = new ProfileManager(["p1"]);
+  const { server } = createBridgeServer({ host: "127.0.0.1", profileManager: pm, apiKeys: getConfiguredApiKeys() });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const models = (key) => fetch(`${base}/v1/models`, { headers: { Authorization: `Bearer ${key}` } }).then((r) => r.status);
+  try {
+    assert.equal(await models("sk-agv-bbbbbbbbbb"), 200);
+    const rv = await fetch(`${base}/v1/keys/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer sk-agv-aaaaaaaaaa" },
+      body: JSON.stringify({ target: "b" }),
+    });
+    assert.equal(rv.status, 200);
+    assert.equal(await models("sk-agv-bbbbbbbbbb"), 401, "the revoked key no longer works");
+    assert.equal(await models("sk-agv-aaaaaaaaaa"), 200, "the other key still does");
+    assert.ok(!fs.readFileSync(path.join(dir, ".env"), "utf-8").includes("bbbbbbbbbb"));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    process.chdir(savedCwd);
+    if (savedKeys === undefined) delete process.env.ANTIGRAVITY_API_KEYS;
+    else process.env.ANTIGRAVITY_API_KEYS = savedKeys;
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

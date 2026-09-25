@@ -127,7 +127,7 @@ export function macKeychainStore(service, account, value) {
     throw new Error("Keychain value contains characters unsafe for security -i");
   }
   const cmd = `add-generic-password -U -s ${JSON.stringify(service)} -a ${JSON.stringify(account)} -w ${value}\n`;
-  const res = spawnSync("security", ["-i"], { input: cmd, encoding: "utf-8", timeout: 10000 });
+  const res = spawnSync("security", ["-i"], { input: cmd, encoding: "utf-8", timeout: 10000, windowsHide: true });
   return res.status === 0;
 }
 

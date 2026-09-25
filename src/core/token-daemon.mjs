@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { getCanonicalAntigravityDir, detectCliCommand } from "../config.mjs";
+import { getCanonicalAntigravityDir, detectCliCommand, agyTokenMode, AGY_FILE_MODE_ENV } from "../config.mjs";
 import { getOsType } from "./keyring-sync.mjs";
 import { getAvailableProfiles } from "./profile-manager.mjs";
 import { getProfileSandboxBasePath } from "./sandbox.mjs";
@@ -29,8 +29,11 @@ function sleep(ms) {
 function killTree(child) {
   if (!child || !child.pid) return;
   try {
-    if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"]);
-    else process.kill(-child.pid, "SIGKILL");
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
   } catch {
     try {
       child.kill("SIGKILL");
@@ -124,11 +127,18 @@ function storeRefreshedToken(profileDir, data, accessToken, expiry) {
  * or null. The process never blocks the event loop and is always killed before this resolves.
  */
 async function runAgyUntilToken(execBinary, env, cwd, onPoll, timeoutMs) {
-  const child = spawn(execBinary, ["--dangerously-skip-permissions", "-p", "hi"], {
+  let file = execBinary;
+  let args = ["--dangerously-skip-permissions", "-p", "hi"];
+  if (Array.isArray(execBinary)) {
+    file = execBinary[0];
+    args = [...execBinary.slice(1), ...args];
+  }
+  const child = spawn(file, args, {
     cwd,
     env,
     detached: process.platform !== "win32",
     stdio: "ignore",
+    windowsHide: true,
   });
 
   let exited = false;
@@ -160,9 +170,14 @@ async function runAgyUntilToken(execBinary, env, cwd, onPoll, timeoutMs) {
  * out of quota, which read as "the bridge hangs, restart it").
  */
 export async function refreshProfileToken(profile, options = {}) {
-  // osType is injectable so the tests can exercise the path production runs (Linux) on any host,
+  // osType and tokenMode are injectable so the tests can exercise any path on any host,
   // and so no test ever writes to a developer's real login keychain.
-  const { agyExec = null, timeoutMs = DEFAULT_TOKEN_REFRESH_TIMEOUT_MS, osType = getOsType() } = options;
+  const {
+    agyExec = null,
+    timeoutMs = DEFAULT_TOKEN_REFRESH_TIMEOUT_MS,
+    osType = getOsType(),
+    tokenMode = agyTokenMode(),
+  } = options;
   assertSafeProfileName(profile);
   const profileDir = getProfileDir(profile);
   const oauthFile = path.join(profileDir, "oauth_creds.json");
@@ -185,13 +200,12 @@ export async function refreshProfileToken(profile, options = {}) {
     auth_method: "consumer",
   };
 
-  if (osType === "darwin") {
-    // macOS keeps the token in the login keychain, which is one shared entry per machine; there is no
-    // per-profile isolation to be had, so only the blocking is fixed here.
+  if (tokenMode === "keyring" && osType === "darwin") {
+    // macOS keyring mode keeps the token in the login keychain (one shared entry per machine).
     macKeychainStore("gemini", "antigravity", "go-keyring-base64:" + Buffer.from(JSON.stringify(forcePayload), "utf-8").toString("base64"));
     const readKeychain = () => {
       try {
-        const res = spawnSync("security", ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"], { encoding: "utf-8" });
+        const res = spawnSync("security", ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"], { encoding: "utf-8", windowsHide: true });
         if (res.status !== 0 || !res.stdout) return null;
         const raw = res.stdout.trim().replace("go-keyring-base64:", "");
         const d = JSON.parse(Buffer.from(raw, "base64").toString("utf-8"));
@@ -209,8 +223,8 @@ export async function refreshProfileToken(profile, options = {}) {
     return [true, `New Access Token generated (expires ${found.expiry})`];
   }
 
-  // Linux / Windows: agy reads and writes the token under HOME, so an isolated HOME per profile
-  // keeps concurrent refreshes (including the Python edition's) from mixing accounts up.
+  // File mode (default for all platforms): agy reads and writes the token under HOME, so an isolated HOME per profile
+  // keeps concurrent refreshes from mixing accounts up.
   const home = getTokenRefreshHome(profile);
   const dirs = refreshAuthDirs(home);
   for (const d of dirs) mkdirPrivate(d);
@@ -244,6 +258,9 @@ export async function refreshProfileToken(profile, options = {}) {
   env.XDG_DATA_HOME = path.join(home, ".local", "share");
   env.XDG_CACHE_HOME = path.join(home, ".cache");
   if (profile) env.ANTIGRAVITY_PROFILE = profile;
+  if (tokenMode === "file") {
+    Object.assign(env, AGY_FILE_MODE_ENV);
+  }
 
   const found = await runAgyUntilToken(execBinary, env, home, () => findRefreshedToken(home, refreshTok), timeoutMs);
   if (!found) {

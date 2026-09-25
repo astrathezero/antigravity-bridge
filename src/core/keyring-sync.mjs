@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -8,8 +7,8 @@ import {
   writePrivateFile,
   copyPrivateFile,
   mkdirPrivate,
-  macKeychainStore,
 } from "./security.mjs";
+import { readToken, writeToken } from "./keyring.mjs";
 
 export function getOsType() {
   const p = process.platform;
@@ -41,70 +40,16 @@ export function getAuthSyncDirectories() {
 }
 
 export function injectOsKeyringToken(rawOauthStr) {
-  const osType = getOsType();
-  const b64Val = "go-keyring-base64:" + Buffer.from(rawOauthStr, "utf-8").toString("base64");
-
-  if (osType === "darwin") {
-    try {
-      // Secret is piped over stdin (security -i); never placed in argv where
-      // any local user could read it via `ps`.
-      return macKeychainStore("gemini", "antigravity", b64Val);
-    } catch {
-      return false;
-    }
-  } else if (osType === "linux") {
-    try {
-      const res = spawnSync(
-        "secret-tool",
-        ["store", "--label=Antigravity", "service", "gemini", "account", "antigravity"],
-        { input: b64Val, timeout: 2000 }
-      );
-      return res.status === 0;
-    } catch {
-      return false;
-    }
+  try {
+    const parsed = typeof rawOauthStr === "string" ? JSON.parse(rawOauthStr) : rawOauthStr;
+    return writeToken(parsed);
+  } catch {
+    return writeToken(rawOauthStr);
   }
-  return false;
 }
 
 export function extractOsKeyringToken() {
-  const osType = getOsType();
-  if (osType === "darwin") {
-    try {
-      const res = spawnSync(
-        "security",
-        ["find-generic-password", "-s", "gemini", "-a", "antigravity", "-w"],
-        { encoding: "utf-8" }
-      );
-      if (res.status === 0 && res.stdout) {
-        const out = res.stdout.trim();
-        if (out.startsWith("go-keyring-base64:")) {
-          const rawB64 = out.slice("go-keyring-base64:".length);
-          return JSON.parse(Buffer.from(rawB64, "base64").toString("utf-8"));
-        }
-      }
-    } catch {
-      // Ignore
-    }
-  } else if (osType === "linux") {
-    try {
-      const res = spawnSync(
-        "secret-tool",
-        ["lookup", "service", "gemini", "account", "antigravity"],
-        { encoding: "utf-8", timeout: 2000 }
-      );
-      if (res.status === 0 && res.stdout) {
-        const out = res.stdout.trim();
-        if (out.startsWith("go-keyring-base64:")) {
-          const rawB64 = out.slice("go-keyring-base64:".length);
-          return JSON.parse(Buffer.from(rawB64, "base64").toString("utf-8"));
-        }
-      }
-    } catch {
-      // Ignore
-    }
-  }
-  return null;
+  return readToken();
 }
 
 export function extractOsFileToken() {
