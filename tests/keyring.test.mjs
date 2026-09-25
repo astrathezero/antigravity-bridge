@@ -15,13 +15,14 @@ import {
 import { injectOsKeyringToken, extractOsKeyringToken } from "../src/core/keyring-sync.mjs";
 
 test("keyring: backend resolution by platform and override", () => {
-  assert.equal(keyringBackend("darwin").kind, "darwin");
-  assert.equal(keyringBackend("win32").kind, "win32");
-  assert.equal(keyringBackend("linux").kind, "linux");
-  assert.equal(keyringBackend("sunos").kind, "none");
-
   const orig = process.env.ANTIGRAVITY_KEYRING_BACKEND;
+  delete process.env.ANTIGRAVITY_KEYRING_BACKEND;
   try {
+    assert.equal(keyringBackend("darwin").kind, "darwin");
+    assert.equal(keyringBackend("win32").kind, "win32");
+    assert.equal(keyringBackend("linux").kind, "linux");
+    assert.equal(keyringBackend("sunos").kind, "none");
+
     process.env.ANTIGRAVITY_KEYRING_BACKEND = "file:/tmp/test-keyring.json";
     const b = keyringBackend("darwin");
     assert.equal(b.kind, "file");

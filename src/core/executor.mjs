@@ -517,11 +517,12 @@ export function buildChildEnvironment({
   }
 
   if (sandboxDir) {
+    const p = platform === "win32" ? path.win32 : path.posix;
     env.HOME = sandboxDir;
     env.USERPROFILE = sandboxDir;
-    env.XDG_CONFIG_HOME = path.join(sandboxDir, ".config");
-    env.XDG_DATA_HOME = path.join(sandboxDir, ".local", "share");
-    env.XDG_CACHE_HOME = path.join(sandboxDir, ".cache");
+    env.XDG_CONFIG_HOME = p.join(sandboxDir, ".config");
+    env.XDG_DATA_HOME = p.join(sandboxDir, ".local", "share");
+    env.XDG_CACHE_HOME = p.join(sandboxDir, ".cache");
   }
 
   if (profile) {
