@@ -53,7 +53,7 @@
 
 ติ๊กเมื่อเสร็จ รูปแบบ: `- [x] T1 ... (2026-10-01; npm test: ℹ pass 118 ℹ fail 0; CI run <url>)`
 
-- [ ] T1 CI 3 OS: agy
+- [x] T1 CI 3 OS: agy (2026-09-25; npm test: ℹ pass 113 ℹ fail 0; CI run https://github.com/astrathezero/antigravity-bridge/actions/runs/36097796513)
 - [ ] T2 อัปเกรด Electron 44: agy (+ เจ้าของตัดสินเรื่อง macOS 12)
 - [ ] T3 build แบบ package + smoke ตัวที่ build + เปิดจาก Finder: agy (+ เจ้าของดับเบิลคลิก)
 - [ ] T4 Windows: spike + แก้ + smoke: ต้องมีเครื่อง Windows
