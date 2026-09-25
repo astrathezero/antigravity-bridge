@@ -1,0 +1,38 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [18, 22]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          find src desktop -name '*.mjs' -not -path '*/node_modules/*' -print0 | xargs -0 -n1 node --check
+
+      - name: Run unit tests
+        shell: bash
+        env:
+          ANTIGRAVITY_KEYRING_BACKEND: file:${{ runner.temp }}/keyring.json
+        run: |
+          node --test --test-reporter=spec tests/*.test.mjs

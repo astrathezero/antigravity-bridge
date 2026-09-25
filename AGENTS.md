@@ -29,7 +29,7 @@ So: never restart a bridge before the change is verified, and never leave a brid
 1. **Edit** under `src/` (and `tests/`). Keep the module layout: `src/server.mjs` (HTTP), `src/core/executor.mjs` (agy runs, profile fallback, API-mode tool guard), `src/translators/*.mjs` (OpenAI/Anthropic ⇄ agy prompt, tool-call parsing), `src/config.mjs` (env switches).
 2. **Verify** before anything touches a running server:
    ```bash
-   node --check src/server.mjs src/core/executor.mjs src/translators/tools.mjs src/config.mjs
+   for f in src/server.mjs src/core/executor.mjs src/translators/tools.mjs src/config.mjs; do node --check "$f" || echo "SYNTAX ERROR: $f"; done
    npm test
    ```
    Add a test in `tests/*.test.mjs` for every behaviour change; the executor tests drive a fake `agy` written as a small Node script, see `tests/security.test.mjs` for the pattern.
