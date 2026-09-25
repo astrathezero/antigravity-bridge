@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; script-src 'self'">
+  <title>Antigravity Bridge</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="theme-dark">
+  <div class="app-container">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div class="brand-info">
+          <h2>Antigravity</h2>
+          <span class="brand-tag">Bridge Desktop</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="dashboard">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="7" height="9" x="3" y="3" rx="1"/>
+            <rect width="7" height="5" x="14" y="3" rx="1"/>
+            <rect width="7" height="9" x="14" y="12" rx="1"/>
+            <rect width="7" height="5" x="3" y="16" rx="1"/>
+          </svg>
+          <span data-i18n="nav.dashboard">Dashboard</span>
+        </button>
+
+        <button class="nav-item" data-tab="profiles">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          <span data-i18n="nav.profiles">Profiles</span>
+          <span class="badge" id="profile-count-badge">0</span>
+        </button>
+
+        <button class="nav-item" data-tab="hermes">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+          </svg>
+          <span data-i18n="nav.hermes">Hermes Setup</span>
+        </button>
+
+        <button class="nav-item" data-tab="doctor">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 0 0-2 2v5a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6V4a2 2 0 0 0-2-2h-1a.2.2 0 1 0 .3.3"/>
+            <path d="M8 15v1a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6v-4"/>
+            <circle cx="20" cy="10" r="2"/>
+          </svg>
+          <span data-i18n="nav.doctor">Doctor</span>
+        </button>
+
+        <button class="nav-item" data-tab="settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          <span data-i18n="nav.settings">Settings</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button class="wizard-launcher-btn" id="open-wizard-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+          </svg>
+          <span data-i18n="nav.wizard">Getting started</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Topbar -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <div class="status-indicator-pill" id="status-pill">
+            <span class="status-dot"></span>
+            <span class="status-text" id="status-text">Starting...</span>
+          </div>
+          <div class="port-pill">
+            <span>PORT</span>
+            <strong id="port-display">8008</strong>
+          </div>
+        </div>
+
+        <div class="topbar-right">
+          <button class="btn btn-secondary btn-sm" id="toggle-service-btn" title="Stop / Start Bridge">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <rect width="6" height="6" x="9" y="9"/>
+            </svg>
+            <span id="toggle-service-text">Stop</span>
+          </button>
+
+          <button class="btn btn-secondary btn-sm" id="restart-server-btn" title="Restart Bridge Process">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+              <path d="M21 3v5h-5"/>
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+              <path d="M8 16H3v5"/>
+            </svg>
+            <span data-i18n="actions.restart">Restart</span>
+          </button>
+
+          <div class="lang-switch">
+            <button class="lang-btn active" data-lang="th">TH</button>
+            <button class="lang-btn" data-lang="en">EN</button>
+          </div>
+        </div>
+      </header>
+
+      <!-- Content Views -->
+      <div class="view-container">
+        <!-- 1. DASHBOARD VIEW -->
+        <section class="view active" id="view-dashboard">
+          <div class="view-header">
+            <div>
+              <h1 data-i18n="dash.title">System Dashboard</h1>
+              <p class="subtitle" data-i18n="dash.subtitle">Live status, fallback health, and real-time execution telemetry.</p>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <div class="metric-header">
+                <span data-i18n="dash.in_flight">Active Requests</span>
+                <span class="metric-icon blue">⚡</span>
+              </div>
+              <div class="metric-val" id="metric-inflight">0</div>
+              <div class="metric-sub" id="metric-inflight-sub">Idle</div>
+            </div>
+
+            <div class="metric-card">
+              <div class="metric-header">
+                <span data-i18n="dash.profiles_ready">Ready Profiles</span>
+                <span class="metric-icon green">🟢</span>
+              </div>
+              <div class="metric-val" id="metric-ready-count">0</div>
+              <div class="metric-sub" id="metric-total-profiles">Total: 0 configured</div>
+            </div>
+
+            <div class="metric-card">
+              <div class="metric-header">
+                <span data-i18n="dash.model_mode">Primary Engine</span>
+                <span class="metric-icon purple">✨</span>
+              </div>
+              <div class="metric-val" id="metric-engine">-</div>
+              <div class="metric-sub" id="metric-engine-sub">Last model used</div>
+            </div>
+
+            <div class="metric-card">
+              <div class="metric-header">
+                <span data-i18n="dash.daemon_status">Daemon Mode</span>
+                <span class="metric-icon yellow">🛡️</span>
+              </div>
+              <div class="metric-val" id="metric-mode">File Mode</div>
+              <div class="metric-sub">One token file per profile</div>
+            </div>
+          </div>
+
+          <!-- Live Log Console -->
+          <div class="card log-console-card">
+            <div class="card-header">
+              <div class="card-title-group">
+                <h3 data-i18n="dash.logs_title">Live Gateway Logs</h3>
+                <span class="pill-mini" id="log-count-pill">0 lines</span>
+              </div>
+              <div class="log-actions">
+                <label class="autoscroll-toggle">
+                  <input type="checkbox" id="autoscroll-toggle" checked>
+                  <span data-i18n="dash.autoscroll">Auto-scroll</span>
+                </label>
+                <button class="btn btn-ghost btn-sm" id="clear-logs-btn" data-i18n="actions.clear">Clear</button>
+              </div>
+            </div>
+            <div class="console-body" id="console-stream"></div>
+          </div>
+        </section>
+
+        <!-- 2. PROFILES VIEW -->
+        <section class="view" id="view-profiles">
+          <div class="view-header">
+            <div>
+              <h1 data-i18n="profiles.title">Google Profiles Pool</h1>
+              <p class="subtitle" data-i18n="profiles.subtitle">Manage authenticated Gemini accounts for automatic rotation and quota failover.</p>
+            </div>
+            <button class="btn btn-primary" id="btn-add-profile-modal">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 12h14M12 5v14"/>
+              </svg>
+              <span data-i18n="profiles.add_btn">Add Profile</span>
+            </button>
+          </div>
+
+          <div class="card">
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Profile Name</th>
+                    <th>Google Account</th>
+                    <th>Status</th>
+                    <th>Concurrency</th>
+                    <th>Cooldown / Quota</th>
+                    <th class="text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="profiles-table-body">
+                  <tr>
+                    <td colspan="6" class="empty-state">Loading profiles...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. HERMES INTEGRATION VIEW -->
+        <section class="view" id="view-hermes">
+          <div class="view-header">
+            <div>
+              <h1 data-i18n="hermes.title">Hermes Desktop Integration</h1>
+              <p class="subtitle" data-i18n="hermes.subtitle">Zero-config OpenAI compatible endpoint setup for Hermes Agent.</p>
+            </div>
+          </div>
+
+          <div class="grid-2col">
+            <div class="card">
+              <div class="card-header">
+                <h3>Hermes 0.21.1+ Configuration</h3>
+                <button class="btn btn-secondary btn-sm" id="open-hermes-dir-btn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/>
+                  </svg>
+                  <span>Open ~/.hermes</span>
+                </button>
+              </div>
+              <p class="info-text">Paste the snippet below into your <code>~/.hermes/config.yaml</code> file:</p>
+              <div class="code-box-wrapper">
+                <pre><code id="hermes-yaml-snippet">Loading configuration...</code></pre>
+                <button class="btn-copy" id="btn-copy-yaml" title="Copy to clipboard">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                  </svg>
+                  <span>Copy</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h3>Connection Details</h3>
+              </div>
+              <div class="form-group">
+                <label>Base URL</label>
+                <div class="input-with-copy">
+                  <input type="text" id="endpoint-url-input" readonly value="http://127.0.0.1:8008/v1">
+                  <button class="btn btn-secondary btn-sm" id="btn-copy-url">Copy</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>API Key</label>
+                <div class="input-with-copy">
+                  <input type="password" id="endpoint-key-input" readonly value="sk-agv-loading...">
+                  <button class="btn btn-secondary btn-sm" id="btn-toggle-key">Reveal</button>
+                  <button class="btn btn-secondary btn-sm" id="btn-copy-key">Copy</button>
+                </div>
+              </div>
+              <div class="callout callout-info">
+                <h4>🚀 Available Models</h4>
+                <ul>
+                  <li><code>antigravity</code> - Intelligent auto-rotator across all healthy profiles</li>
+                  <li><code>gemini-3.8-flash</code> - High-speed Google Gemini</li>
+                  <li><code>gemini-3.8-pro</code> - High-reasoning Google Gemini</li>
+                  <li><code>claude-sonnet-4.6</code> - Anthropic Sonnet fallback</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. DOCTOR & DIAGNOSTICS VIEW -->
+        <section class="view" id="view-doctor">
+          <div class="view-header">
+            <div>
+              <h1 data-i18n="doctor.title">System Diagnostics</h1>
+              <p class="subtitle" data-i18n="doctor.subtitle">Automated verification of runtime requirements, network bindings, and credentials.</p>
+            </div>
+            <button class="btn btn-secondary" id="btn-run-doctor">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                <path d="M3 3v5h5"/>
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                <path d="M16 16h5v-5"/>
+              </svg>
+              <span>Re-run Doctor</span>
+            </button>
+          </div>
+
+          <div class="card">
+            <div class="doctor-list" id="doctor-results-list">
+              <div class="empty-state">Running diagnostics...</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5. SETTINGS VIEW -->
+        <section class="view" id="view-settings">
+          <div class="view-header">
+            <div>
+              <h1 data-i18n="settings.title">Application Settings</h1>
+              <p class="subtitle" data-i18n="settings.subtitle">Configure port, system launch behavior, and CLI paths.</p>
+            </div>
+            <button class="btn btn-primary" id="btn-save-settings">Save Changes</button>
+          </div>
+
+          <div class="card form-card">
+            <div class="form-group">
+              <label for="setting-port">Server Port</label>
+              <input type="number" id="setting-port" min="1024" max="65535" value="8008">
+              <span class="form-hint">Port to bind local OpenAI & Anthropic API bridge (default: 8008).</span>
+            </div>
+
+            <div class="form-group-toggle">
+              <div>
+                <label>Autostart on Login</label>
+                <span class="form-hint">Start Antigravity Bridge minimized to system tray when logging in.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-autostart" checked>
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-group-toggle">
+              <div>
+                <label>Keep running in the tray when the window is closed</label>
+                <span class="form-hint">On by default, so Hermes keeps its bridge. Turn off to quit (and stop the bridge) when the window closes.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-closetotray">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-group-toggle">
+              <div>
+                <label>Bypass Local Proxy (ANTIGRAVITY_NO_PROXY)</label>
+                <span class="form-hint">Direct socket connections, bypassing WARP or Clash localhost proxies.</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="setting-noproxy">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="form-group">
+              <label for="setting-agypath">Custom agy Binary Path (Optional)</label>
+              <input type="text" id="setting-agypath" placeholder="Auto-detect system agy binary">
+              <span class="form-hint">Leave blank to use default location (%LOCALAPPDATA%\agy or ~/.local/bin/agy).</span>
+            </div>
+          </div>
+
+          <div class="card form-card">
+            <div class="form-group">
+              <label>API keys</label>
+              <span class="form-hint">Hermes (or any client) sends one of these as <code>Authorization: Bearer ...</code>. Revoking takes effect at once.</span>
+              <div class="doctor-list" id="keys-list"><div class="empty-state">Loading...</div></div>
+            </div>
+            <div class="form-group">
+              <label for="new-key-label">New key label</label>
+              <input type="text" id="new-key-label" placeholder="hermes-laptop" pattern="^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$">
+              <button class="btn btn-secondary btn-sm" id="btn-create-key">Create key</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Modal: Getting started -->
+    <div class="modal-backdrop" id="start-modal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Getting started</h3>
+          <button class="btn-close" id="btn-close-start">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="doctor-item">
+            <div class="doctor-info"><h4>1. Antigravity CLI (agy)</h4><p id="start-agy">Checking...</p></div>
+            <div>
+              <button class="btn btn-secondary btn-sm" id="btn-start-install">Install agy</button>
+              <button class="btn btn-ghost btn-sm" id="btn-start-recheck">Check again</button>
+            </div>
+          </div>
+          <div class="doctor-item">
+            <div class="doctor-info"><h4>2. A Google account</h4><p id="start-profiles">Checking...</p></div>
+            <button class="btn btn-secondary btn-sm" id="btn-start-add">Add profile</button>
+          </div>
+          <div class="doctor-item">
+            <div class="doctor-info"><h4>3. Connect Hermes</h4><p>Copy the provider block into Hermes' config.yaml (or its Custom Endpoints screen).</p></div>
+            <button class="btn btn-secondary btn-sm" id="btn-start-hermes">Show Hermes setup</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Add Profile Login -->
+    <div class="modal-backdrop" id="add-profile-modal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Add Google Login Profile</h3>
+          <button class="btn-close" id="btn-close-modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-instruction">Enter a distinct name for this profile (e.g. <code>profile_work</code>, <code>profile_personal</code>):</p>
+          <div class="form-group">
+            <label for="new-profile-name">Profile Identifier</label>
+            <input type="text" id="new-profile-name" placeholder="profile_2" pattern="^[A-Za-z0-9._-]+$">
+          </div>
+          <div class="callout callout-info">
+            <p><strong>What happens next:</strong> a terminal window opens and runs <code>agy</code> in an empty sign-in folder (the account you are signed in to elsewhere is not used). agy does not open the browser by itself here:</p>
+            <p>1. Choose <strong>1. Google OAuth</strong> and press Enter. 2. Open the URL it prints and sign in with the account for this profile. 3. Copy the code Google shows and paste it into the terminal. This window notices the sign-in by itself; then type <code>/exit</code> in the terminal.</p>
+            <p>Using an existing profile name signs that profile in again; it is only replaced once the new sign-in succeeds.</p>
+          </div>
+          <p class="modal-instruction" id="add-profile-status"></p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="btn-cancel-add-profile">Cancel</button>
+          <button class="btn btn-primary" id="btn-confirm-add-profile">Launch Login Terminal</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

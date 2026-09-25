@@ -1,0 +1,58 @@
+appId: com.astrathezero.antigravity-bridge
+productName: Antigravity Bridge
+directories:
+  buildResources: build
+  output: dist
+files:
+  - "main.mjs"
+  - "bridge-*.mjs"          # bridge-bootstrap, bridge-supervisor, bridge-paths
+  - "agy-installer.mjs"
+  - "profile-login.mjs"
+  - "settings.mjs"
+  - "terminal.mjs"
+  - "keys.mjs"
+  - "hermes.mjs"
+  - "preload.cjs"
+  - "ui/**"
+  - "bridge/src/**"         # copy of ../src made by sync-src.mjs (run by `npm run pack` / `dist`)
+  - "package.json"
+# Real files on disk for the utility process and for agy: bridge-paths.mjs resolves
+# <Resources>/app.asar.unpacked/bridge/src and bridge-bootstrap.mjs there.
+asarUnpack:
+  - "bridge/src/**"
+  - "bridge-bootstrap.mjs"
+extraResources: []
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  # No App Sandbox on purpose: the app spawns agy, writes ~/.config/antigravity and opens Terminal.
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+        - arm64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  runAfterFinish: true
+  artifactName: "${productName}-${version}-win-${arch}.${ext}"
+publish:
+  provider: github
+  owner: astrathezero
+  repo: antigravity-bridge
+  releaseType: release

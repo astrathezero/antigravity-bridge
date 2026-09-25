@@ -34,3 +34,8 @@ tests/.tmp-sandbox/
 
 # local branch backups (OneDrive-synced, not for git)
 backups/
+
+# Desktop edition build artifacts & local dependencies
+desktop/bridge/
+desktop/dist/
+desktop/node_modules/

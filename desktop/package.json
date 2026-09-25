@@ -1,0 +1,22 @@
+{
+  "name": "antigravity-bridge-desktop",
+  "productName": "Antigravity Bridge",
+  "version": "1.0.0",
+  "description": "Antigravity Bridge Desktop Edition - Native GUI, auto-fallback pool, and multi-profile manager for Google Gemini and Claude",
+  "main": "main.mjs",
+  "type": "module",
+  "author": "Antigravity Bridge Team",
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "node setup-electron.js",
+    "start": "node setup-electron.js && electron .",
+    "pack": "node sync-src.mjs && electron-builder --dir",
+    "dist": "node sync-src.mjs && electron-builder",
+    "test": "node --test ../tests/desktop-*.test.mjs"
+  },
+  "devDependencies": {
+    "electron": "^32.1.2",
+    "electron-builder": "^25.1.8",
+    "electron-updater": "^6.3.9"
+  }
+}
