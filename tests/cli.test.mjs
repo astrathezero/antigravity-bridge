@@ -125,7 +125,9 @@ function runCli(args, { home, env = {} }) {
   return new Promise((resolve) => {
     const childEnv = { ...process.env, HOME: home, USERPROFILE: home, ...env };
     // Unset, not empty: a variable that is already set (even to "") wins over the .env file.
-    for (const k of ["ANTIGRAVITY_API_KEYS", "ANTIGRAVITY_API_KEY", "ANTIGRAVITY_PORT", "PORT"]) delete childEnv[k];
+    for (const k of ["ANTIGRAVITY_API_KEYS", "ANTIGRAVITY_API_KEY", "PORT"]) delete childEnv[k];
+    // Never the default 8008: on a host running the bridge the CLI would read (or change) the live one.
+    childEnv.ANTIGRAVITY_PORT = "1";
     const child = spawn(process.execPath, [INDEX, ...args], { cwd: home, env: childEnv });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
