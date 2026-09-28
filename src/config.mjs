@@ -475,6 +475,18 @@ export function quotaFastFailEnabled() {
 }
 
 /**
+ * How long the bridge waits for agy's output to close once agy is done with a run (it printed its
+ * result event, or its own process exited) before it settles the run from what agy wrote and ends
+ * whatever is left of it. Normally the output closes within milliseconds; a process agy leaves running
+ * that still holds it used to keep a finished answer waiting for the 600 s stall watchdog.
+ * ANTIGRAVITY_RUN_END_GRACE_MS, default 3000.
+ */
+export function runEndGraceMs() {
+  const v = parseInt((process.env.ANTIGRAVITY_RUN_END_GRACE_MS || "").trim(), 10);
+  return Number.isFinite(v) && v > 0 ? v : 3000;
+}
+
+/**
  * Which idle profile takes the next request. `lru` (default): the one that has waited longest, so
  * the load spreads over every account and none burns through its quota while the others sit unused
  * (before 2026-09-20 the first profiles in configuration order absorbed all traffic and hit their

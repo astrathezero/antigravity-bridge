@@ -454,6 +454,7 @@ Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดั�
 | **`ANTIGRAVITY_PROFILE_TIMEOUT`** / **`ANTIGRAVITY_TOTAL_TIMEOUT`** | `600` / `1800` | วินาทีต่อการลองหนึ่งโปรไฟล์ / งบเวลารวมของ fallback |
 | **`ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT`** / **`ANTIGRAVITY_MAX_TOTAL_TIMEOUT`** | `900` / `3600` | เพดานของ timeout ที่ขยายอัตโนมัติและที่ client ขอ |
 | **`ANTIGRAVITY_STALL_TIMEOUT`** | `600` | วินาทีที่ CLI เงียบก่อนยกเลิกการรัน โมเดลที่คิดนานจะไม่พิมพ์อะไรระหว่างคิด จึงควรตั้งสูง |
+| **`ANTIGRAVITY_RUN_END_GRACE_MS`** | `3000` | **Node.js เท่านั้น** เมื่อ agy พิมพ์ result แล้วหรือ process ของ agy จบแล้ว bridge จะรอให้ output ของ agy ปิดนานเท่านี้ (ms) ก่อนส่งคำตอบที่ agy เขียนไว้และปิดสิ่งที่ agy ทิ้งไว้ ถ้าไม่มีค่านี้ process ที่ agy ทิ้งไว้และยังถือ output อยู่จะทำให้คำตอบที่เสร็จแล้วต้องรอจนถึง stall timeout |
 | **`ANTIGRAVITY_FALLBACK_CHAIN`** / **`ANTIGRAVITY_MODEL_FALLBACK_ENABLED`** | — / `true` | ลำดับ fallback ระดับโมเดลเมื่อ family หนึ่งติด cooldown |
 | **`ANTIGRAVITY_QUOTA_CACHE_FILE`** | `~/.config/antigravity/quota_cache.json` | ที่เก็บสถานะโควตา ควรแยกไฟล์ต่อรุ่นเมื่อรันทั้งสองรุ่น |
 | **`ANTIGRAVITY_SANDBOX_BASE`** | `~/.config/antigravity/sandboxes` | Root ของ sandbox ต่อโปรไฟล์ ควรแยกต่อรุ่นเมื่อรันทั้งสองรุ่น |

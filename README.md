@@ -454,6 +454,7 @@ Shared by both editions unless a column says otherwise.
 | **`ANTIGRAVITY_PROFILE_TIMEOUT`** / **`ANTIGRAVITY_TOTAL_TIMEOUT`** | `600` / `1800` | Seconds per profile attempt / total fallback budget. |
 | **`ANTIGRAVITY_MAX_AUTOSCALE_TIMEOUT`** / **`ANTIGRAVITY_MAX_TOTAL_TIMEOUT`** | `900` / `3600` | Ceiling for auto-scaled and client-requested timeouts. |
 | **`ANTIGRAVITY_STALL_TIMEOUT`** | `600` | Seconds of CLI silence before a run is abandoned. Reasoning models print nothing while thinking, so keep it high. |
+| **`ANTIGRAVITY_RUN_END_GRACE_MS`** | `3000` | **Node.js only.** Once agy has printed its result or its own process has exited, how long the bridge waits for agy's output to close before it returns what agy wrote and ends whatever agy left running. Without it, a process agy left holding its output kept a finished answer waiting for the stall timeout. |
 | **`ANTIGRAVITY_FALLBACK_CHAIN`** / **`ANTIGRAVITY_MODEL_FALLBACK_ENABLED`** | — / `true` | Model-level fallback order when a family is in cooldown. |
 | **`ANTIGRAVITY_QUOTA_CACHE_FILE`** | `~/.config/antigravity/quota_cache.json` | Where quota state is persisted. Give each edition its own file when running both. |
 | **`ANTIGRAVITY_SANDBOX_BASE`** | `~/.config/antigravity/sandboxes` | Root of per-profile sandboxes. Give each edition its own root when running both. |

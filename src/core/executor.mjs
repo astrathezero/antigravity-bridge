@@ -19,6 +19,7 @@ import {
   blockedToolTranslationEnabled,
   earlyToolCallExitEnabled,
   quotaFastFailEnabled,
+  runEndGraceMs,
 } from "../config.mjs";
 import { sanitizePromptForCli } from "../translators/context-compactor.mjs";
 import { parseToolCallsFromResponse, translateBlockedToolCall } from "../translators/tools.mjs";
@@ -154,6 +155,8 @@ export class AgyStreamParser {
     this.finalResponse = null;
     this.status = null;
     this.error = null;
+    // agy printed its result event: the run is over from agy's side, whether or not the process exits.
+    this.sawResult = false;
     this.rawLines = [];
     this.toolSteps = [];
     // The run's conversation id (from the init event); names its transcript directory in the sandbox.
@@ -252,6 +255,7 @@ export class AgyStreamParser {
           }
         } else if (ev.event === "result" && ev.result) {
           const r = ev.result;
+          this.sawResult = true;
           this.status = r.status || null;
           if (typeof r.response === "string") this.finalResponse = r.response;
           this.error = r.error || r.error_message || r.message || null;
@@ -675,6 +679,7 @@ export async function executeCliCommand(
         const text = chunk.toString("utf-8");
         stdoutData += text;
         emit(parser.feed(text));
+        if (parser.sawResult) armRunEnd();
       });
 
       child.stderr.on("data", (chunk) => {
@@ -741,15 +746,46 @@ export async function executeCliCommand(
         );
       }
 
-      child.on("close", (code) => {
+      // agy is done with the run once it has printed its result event or its own process has exited.
+      // 'close' only comes when every process holding agy's stdout/stderr has let go of them, so a
+      // helper agy left running kept a finished answer waiting until the stall watchdog failed the run
+      // (600 s, then the same again on the next profile). Once agy is done, 'close' gets a short grace
+      // period; after it the run is settled from what agy wrote, and whatever is left of it is ended.
+      let exited = null;
+      let runEndTimer = null;
+      const armRunEnd = () => {
+        if (runEndTimer || isSettled) return;
+        const graceMs = runEndGraceMs();
+        runEndTimer = setTimeout(() => {
+          if (isSettled) return;
+          const why = exited
+            ? "agy exited but its output is still held open by a process it left running"
+            : `agy printed its result but had not exited ${(graceMs / 1000).toFixed(1)}s later`;
+          console.warn(`[EXEC] profile=${profile || "default"}: ${why}; using what agy wrote and ending the rest of the run`);
+          killProcessTree(child, true);
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          finishRun(exited ? exited.code : null, exited ? exited.signal : null);
+        }, graceMs);
+      };
+
+      child.on("exit", (code, signal) => {
+        exited = { code, signal };
+        armRunEnd();
+      });
+
+      child.on("close", (code, signal) => finishRun(code, signal));
+
+      function finishRun(code, signal) {
         if (isSettled) return;
         isSettled = true;
         clearTimeout(totalTimer);
         clearInterval(stallInterval);
+        clearTimeout(runEndTimer);
 
         emit(parser.finish());
         console.log(
-          `[EXEC] profile=${profile || "default"} finished in ${((Date.now() - execStart) / 1000).toFixed(1)}s exit=${code} status=${parser.status || (parser.seenEvents ? "?" : "text")} deltas=${parser.deltas.length} tool_steps=${parser.toolSteps.length}`
+          `[EXEC] profile=${profile || "default"} finished in ${((Date.now() - execStart) / 1000).toFixed(1)}s exit=${code ?? signal ?? "-"} status=${parser.status || (parser.seenEvents ? "?" : "text")} deltas=${parser.deltas.length} tool_steps=${parser.toolSteps.length}`
         );
         if (parser.isFailure()) {
           const salvaged = salvageClientToolCall(parser, clientToolNames);
@@ -767,17 +803,18 @@ export async function executeCliCommand(
           );
           return;
         }
-        if (code === 0) {
+        // code and signal are both null only when the run was ended after agy's own result event.
+        if (code === 0 || (code === null && signal === null && parser.sawResult)) {
           resolve(parser.finalText().trim());
         } else {
-          const combinedErr = (stderrData || (parser.seenEvents ? parser.errorText() : stdoutData)).trim() || `Exit code ${code}`;
+          const combinedErr = (stderrData || (parser.seenEvents ? parser.errorText() : stdoutData)).trim() || `Exit code ${code ?? signal}`;
           reject(
             new Error(
-              `CLI Execution Error (profile=${profile || "default"}, exit=${code}): ${combinedErr}`
+              `CLI Execution Error (profile=${profile || "default"}, exit=${code ?? signal}): ${combinedErr}`
             )
           );
         }
-      });
+      }
     });
   } finally {
     releaseLock();
