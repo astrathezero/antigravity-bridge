@@ -569,3 +569,62 @@ test("profiles: the last-resort bucket rotates least-recently-used as well", asy
     assert.deepEqual(pm.get_ordered_profiles("gemini-3.8-flash"), ["zz_x3", "zz_x2", "zz_x1"]);
   });
 });
+
+// agy stand-in for an account-wide failure: what every profile's agy did on n8n.mrserm.com from
+// 2026-09-28 08:20:55 to about 12:07 — a result with status ERROR within half a second, exit 1,
+// without ever reading the prompt the bridge writes to its stdin.
+const ELIGIBILITY_FAIL_SRC = [
+  'const error = "Eligibility check failed: Post \\"https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist\\": Not Found";',
+  'process.stdout.write(JSON.stringify({ event: "result", result: { status: "ERROR", response: "", error } }) + "\\n");',
+  "process.exitCode = 1;",
+  "",
+].join("\n");
+
+test("executor: when every profile fails at once, client retries during the back-off do not lengthen it", async () => {
+  fs.mkdirSync(SANDBOX_BASE, { recursive: true });
+  const helper = path.join(SANDBOX_BASE, "fake-agy-eligibility.cjs");
+  fs.writeFileSync(helper, ELIGIBILITY_FAIL_SRC);
+  // A prompt above the argv limit goes over stdin, as the production prompts (180-360 KB) did.
+  const tpl = `node ${helper} --output-format stream-json -p "{prompt}"`;
+  const big = "x".repeat(300000);
+  freshProfiles("zz_o1", "zz_o2");
+  await withEnv(FAKE_ENV_OFF, async () => {
+    const pm = new ProfileManager(["zz_o1", "zz_o2"]);
+    pm.reset_all();
+    const uncaught = [];
+    const onUncaught = (err) => uncaught.push(err);
+    process.on("uncaughtException", onUncaught);
+    let lines;
+    try {
+      lines = await captureWarnings(async () => {
+        // The first request puts both in back-off; the client's retries then find nothing runnable.
+        for (let i = 0; i < 5; i++) {
+          await assert.rejects(
+            executeCliWithFallback(tpl, big, { profileManager: pm, timeout: 20, totalTimeout: 40 }),
+            /Eligibility check failed/
+          );
+        }
+      });
+      await new Promise((r) => setTimeout(r, 200)); // a late EPIPE from the last run
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
+    assert.deepEqual(uncaught.map((e) => e.code || e.message), [], "agy leaving its stdin unread is not an uncaught error");
+
+    const now = Math.floor(Date.now() / 1000);
+    for (const p of ["zz_o1", "zz_o2"]) {
+      assert.equal(pm.state[p].consecutive_errors, 1, `${p}: only the first failure counts`);
+      assert.ok(pm.state[p].exhausted_until - now <= 30, `${p}: still the first 30 s back-off`);
+    }
+    assert.ok(
+      lines.some((l) => l.startsWith("[FALLBACK] Profile 'zz_o1'") && l.includes("(not lengthened)")),
+      `no last-resort [FALLBACK] line in ${JSON.stringify(lines)}`
+    );
+
+    // Once its back-off has run out, a profile that fails again is counted as usual.
+    pm.state.zz_o1.exhausted_until = now - 1;
+    await assert.rejects(executeCliWithFallback(tpl, big, { profileManager: pm, timeout: 20, totalTimeout: 40 }), /Eligibility/);
+    assert.equal(pm.state.zz_o1.consecutive_errors, 2);
+    assert.equal(pm.state.zz_o2.consecutive_errors, 1);
+  });
+});

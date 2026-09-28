@@ -11,8 +11,25 @@ import { executeCliCommand } from "../core/executor.mjs";
 import { detectCliCommand, getBridgeConfigPath, DEFAULT_PORT } from "../config.mjs";
 import { getConfiguredApiKeys } from "../auth.mjs";
 
+function bridgePort() {
+  return parseInt(process.env.ANTIGRAVITY_PORT || String(DEFAULT_PORT), 10);
+}
+
+// A command that changes profile state only reaches the running bridge through its HTTP API; the
+// local cache write alone is overwritten by the server's own state. Say so instead of a bare [OK]
+// (seen on n8n.mrserm.com: a leftover ANTIGRAVITY_PORT=8000 in .env sent `profile reset` to the
+// dead Python port while the Node bridge on 8008 kept its 1-day cooldowns).
+function warnIfServerMissed(res) {
+  if (res) return;
+  console.warn(
+    `[Warning] The running bridge did not answer on 127.0.0.1:${bridgePort()}, so only the local cache changed.\n` +
+      "          If the bridge runs on another port (check ANTIGRAVITY_PORT in .env and in the systemd unit),\n" +
+      "          rerun with ANTIGRAVITY_PORT=<port> in front of this command."
+  );
+}
+
 async function makeAuthedRequest(endpoint, method = "GET", bodyData = null) {
-  const port = parseInt(process.env.ANTIGRAVITY_PORT || String(DEFAULT_PORT), 10);
+  const port = bridgePort();
   const activeKeys = getConfiguredApiKeys();
   const headers = {};
   const keyList = Object.keys(activeKeys);
@@ -161,7 +178,7 @@ export async function handleProfileCli(argv) {
       console.error("Usage: antigravity-bridge profile disable <profile_name>");
       return 1;
     }
-    await makeAuthedRequest("/v1/profiles/disable", "POST", { profile: target });
+    warnIfServerMissed(await makeAuthedRequest("/v1/profiles/disable", "POST", { profile: target }));
     GLOBAL_PROFILE_MANAGER.mark_disabled(target);
     console.log(`[OK] Profile '${target}' has been DISABLED`);
     return 0;
@@ -173,7 +190,7 @@ export async function handleProfileCli(argv) {
       console.error("Usage: antigravity-bridge profile enable <profile_name>");
       return 1;
     }
-    await makeAuthedRequest("/v1/profiles/enable", "POST", { profile: target });
+    warnIfServerMissed(await makeAuthedRequest("/v1/profiles/enable", "POST", { profile: target }));
     GLOBAL_PROFILE_MANAGER.enable(target);
     console.log(`[OK] Profile '${target}' has been ENABLED`);
     return 0;
@@ -181,7 +198,7 @@ export async function handleProfileCli(argv) {
 
   if (subcmd === "reset" || subcmd === "clear") {
     const target = argv[1] || null;
-    await makeAuthedRequest("/v1/profiles/reset", "POST", { profile: target });
+    warnIfServerMissed(await makeAuthedRequest("/v1/profiles/reset", "POST", { profile: target }));
     GLOBAL_PROFILE_MANAGER.reset_all(target);
     console.log(`[OK] Reset quota cooldowns for profile(s): ${target || "all"}`);
     return 0;

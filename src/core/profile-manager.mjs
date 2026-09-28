@@ -585,7 +585,15 @@ export class ProfileManager {
     this.save_cache();
   }
 
-  mark_error(profile, reason) {
+  /**
+   * Puts a profile in the error back-off: 30 s, doubling with each consecutive error, up to max_cooldown.
+   * escalate=false re-arms the back-off at its current length without counting another error. The
+   * executor uses it for a last-resort run on a profile that was already backing off: when every
+   * account fails at once (agy's "Eligibility check failed ... loadCodeAssist: Not Found" on all 17
+   * profiles, n8n.mrserm.com 2026-09-28 08:20-12:07), each client retry sweeps every profile, and
+   * counting those sweeps pushed 16 profiles to a 1-day lock-out after a ~3 h outage.
+   */
+  mark_error(profile, reason, { escalate = true } = {}) {
     const k = profile || "default";
     const now = Math.floor(Date.now() / 1000);
     if (!this.state[k]) {
@@ -602,7 +610,7 @@ export class ProfileManager {
         window_start: 0,
       };
     }
-    const errCount = (this.state[k].consecutive_errors || 0) + 1;
+    const errCount = Math.max(1, (this.state[k].consecutive_errors || 0) + (escalate ? 1 : 0));
     this.state[k].consecutive_errors = errCount;
     this.state[k].last_checked = now;
     this.state[k].last_reason = reason;

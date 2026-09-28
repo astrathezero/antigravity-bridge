@@ -665,6 +665,10 @@ export async function executeCliCommand(
       });
 
       if (stdinInput && child.stdin) {
+        // agy can exit before it has read the whole prompt (an eligibility or auth failure ends it in
+        // under a second); the write then fails with EPIPE. The exit handling below reports the real
+        // error, so the pipe error is expected here and must not reach the process-wide guard.
+        child.stdin.on("error", () => {});
         child.stdin.write(stdinInput);
         child.stdin.end();
       }
@@ -856,6 +860,7 @@ export async function executeCliWithFallback(
     if (available.length === 0) break;
 
     let profile = mgr.acquire_profile(available, 0, modelName);
+    let lastResortRetry = false;
     if (!profile && available.length > 0) {
       // Last resort: nothing is both free and runnable. Prefer a free profile that is merely in a
       // short error back-off over one whose sandbox is locked (that attempt fails before it starts).
@@ -863,6 +868,7 @@ export async function executeCliWithFallback(
       const pool = [...(free.length > 0 ? free : available)].sort((a, b) => mgr.get_in_flight(a) - mgr.get_in_flight(b));
       profile = pool[0];
       mgr.acquire_specific_profile(profile);
+      lastResortRetry = mgr.is_in_error_cooldown(profile);
     }
 
     triedProfiles.add(profile);
@@ -962,6 +968,10 @@ export async function executeCliWithFallback(
         // A quiet CLI is usually a model still thinking, not a broken profile:
         // route onward but do NOT put the profile into error cooldown.
         verdict = "no output for the stall window, no cooldown";
+      } else if (lastResortRetry) {
+        // It was already backing off and only ran because nothing else could: keep its back-off level.
+        mgr.mark_error(profile, errMsg, { escalate: false });
+        verdict = `error again during back-off, cooldown ${cooldownLeft()} (not lengthened)`;
       } else {
         mgr.mark_error(profile, errMsg);
         verdict = `error, cooldown ${cooldownLeft()}`;
