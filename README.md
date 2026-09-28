@@ -441,7 +441,7 @@ Shared by both editions unless a column says otherwise.
 | **`ANTIGRAVITY_API_KEYS`** / **`ANTIGRAVITY_API_KEY`** | — | **Node.js only.** Labeled key list / single key (`BRIDGE_API_KEYS`, `API_KEYS` also read). |
 | **`ANTIGRAVITY_ALLOWED_HOSTS`** | — | Extra `Host` header values to accept besides loopback and the bind host. |
 | **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | `0` | `1` hides the status footer tag from AI responses. |
-| **`ANTIGRAVITY_NO_PROXY`** | `0` | `1` disables proxy auto-detection. |
+| **`ANTIGRAVITY_NO_PROXY`** | `0` | `1` disables proxy auto-detection. Without it, an `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` in the bridge's environment is passed to agy; otherwise the bridge probes local ports 8118, 8888, 8080 (HTTP) and 40000, 1080, 7890 (SOCKS5) and uses a port only if it really is a proxy (an HTTP port must answer a `CONNECT` to agy's endpoint with 200, a SOCKS port must accept a SOCKS5 greeting). The choice, and every port skipped with the reason, is logged as `[PROXY]` whenever it changes. |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `0` | `1` disables the 55-minute OAuth refresh daemon. |
 | **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `0` | `1` lets agy execute its own tools (terminal/files/browser) during API requests. |
 | **`ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS`** | `1` | Answer a blocked agy tool step with the equivalent client-side tool call when the request defines one (terminal-style tool for `run_command`, `list_dir`, `grep_search`, `find_by_name`; file-reading tool for `view_file`). `0` disables. |

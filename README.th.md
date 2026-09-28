@@ -441,7 +441,7 @@ Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดั�
 | **`ANTIGRAVITY_API_KEYS`** / **`ANTIGRAVITY_API_KEY`** | — | **Node.js เท่านั้น** รายการ key พร้อม label / key เดี่ยว (อ่าน `BRIDGE_API_KEYS`, `API_KEYS` ด้วย) |
 | **`ANTIGRAVITY_ALLOWED_HOSTS`** | — | ค่า `Host` header เพิ่มเติมที่ยอมรับ นอกเหนือจาก loopback และ bind host |
 | **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | `0` | `1` ซ่อน footer สถานะโปรไฟล์ในคำตอบของ AI |
-| **`ANTIGRAVITY_NO_PROXY`** | `0` | `1` ปิดการตรวจจับ proxy อัตโนมัติ |
+| **`ANTIGRAVITY_NO_PROXY`** | `0` | `1` ปิดการตรวจหา proxy อัตโนมัติ ถ้าไม่ปิด ตัวแปร `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` ใน environment ของ bridge จะถูกส่งต่อให้ agy ถ้าไม่มี bridge จะตรวจพอร์ต 8118, 8888, 8080 (HTTP) และ 40000, 1080, 7890 (SOCKS5) บนเครื่อง และใช้พอร์ตนั้นเฉพาะเมื่อเป็น proxy จริง (พอร์ต HTTP ต้องตอบ `CONNECT` ไปยัง endpoint ของ agy ด้วย 200 พอร์ต SOCKS ต้องรับ SOCKS5 greeting) ตัวที่เลือกและพอร์ตที่ข้ามพร้อมเหตุผลจะถูก log เป็น `[PROXY]` ทุกครั้งที่เปลี่ยน |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `0` | `1` ปิด daemon รีเฟรช OAuth ทุก 55 นาที |
 | **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `0` | `1` อนุญาตให้ agy รัน tool ของตัวเอง (terminal/ไฟล์/เบราว์เซอร์) ระหว่างคำขอ API |
 | **`ANTIGRAVITY_TRANSLATE_BLOCKED_TOOLS`** | `1` | ตอบ tool step ของ agy ที่ถูกบล็อกด้วย client-side tool call ที่เทียบเท่า เมื่อ request กำหนด tool นั้นไว้ (tool แบบ terminal สำหรับ `run_command`, `list_dir`, `grep_search`, `find_by_name`; tool อ่านไฟล์สำหรับ `view_file`) `0` ปิด |

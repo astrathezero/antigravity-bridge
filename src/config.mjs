@@ -571,90 +571,166 @@ export function shouldShowProfileStatus() {
 
 let cachedProxy = undefined;
 let cachedProxyTime = 0;
+let pendingProxyDetection = null;
+let loggedProxyDecision = undefined;
 
-export async function detectLocalProxy(forceFresh = false) {
+// agy's first call of every run goes to this host (the eligibility check, loadCodeAssist).
+const PROXY_CHECK_HOST = "daily-cloudcode-pa.googleapis.com";
+const PROXY_CHECK_PORT = 443;
+const SOCKS5_NO_AUTH_GREETING = Buffer.from([0x05, 0x01, 0x00]);
+
+function logProxyDecision(key, text) {
+  if (key === loggedProxyDecision) return;
+  loggedProxyDecision = key;
+  console.log(`[PROXY] ${text}`);
+}
+
+function redactProxyUrl(value) {
+  try {
+    const u = new URL(value);
+    if (u.username || u.password) {
+      u.username = "***";
+      u.password = "";
+    }
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return "(unparsable value)";
+  }
+}
+
+/**
+ * Connect to host:port, send `payload` and hand what comes back to `decide` until it returns a verdict
+ * ({ ok, why }). Resolves { listening, verdict }: listening is false when nothing accepted the
+ * connection, verdict is null when the peer gave no decisive answer in time.
+ */
+function probeLocalPort(host, port, payload, decide, { connectTimeoutMs = 250, answerTimeoutMs = 3000 } = {}) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let listening = false;
+    let done = false;
+    let received = Buffer.alloc(0);
+    const finish = (verdict) => {
+      if (done) return;
+      done = true;
+      socket.destroy();
+      resolve({ listening, verdict });
+    };
+    socket.setTimeout(connectTimeoutMs);
+    socket.on("connect", () => {
+      listening = true;
+      socket.setTimeout(answerTimeoutMs);
+      socket.write(payload);
+    });
+    socket.on("data", (chunk) => {
+      received = Buffer.concat([received, chunk]);
+      const verdict = decide(received);
+      if (verdict) finish(verdict);
+    });
+    socket.on("timeout", () => finish(null));
+    socket.on("error", () => finish(null));
+    socket.on("close", () => finish(null));
+    try {
+      socket.connect(port, host);
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+function httpConnectVerdict(received) {
+  const text = received.toString("latin1");
+  if (!"HTTP/".startsWith(text.slice(0, 5))) return { ok: false, why: "does not speak HTTP" };
+  const eol = text.indexOf("\r\n");
+  if (eol === -1) return received.length > 1024 ? { ok: false, why: "does not speak HTTP" } : null;
+  const statusLine = text.slice(0, eol);
+  const m = statusLine.match(/^HTTP\/\d(?:\.\d)? (\d{3})/);
+  if (m && m[1] === "200") return { ok: true };
+  return { ok: false, why: `answered CONNECT with "${statusLine.slice(0, 80)}"` };
+}
+
+function socks5Verdict(received) {
+  if (received.length < 2) return null;
+  if (received[0] === 0x05 && received[1] === 0x00) return { ok: true };
+  return { ok: false, why: "did not accept a SOCKS5 greeting" };
+}
+
+/**
+ * The proxy agy's traffic should go through, or null. An explicit ALL_PROXY / HTTPS_PROXY / HTTP_PROXY
+ * in the bridge's own environment wins. Otherwise the usual local proxy ports are probed, and a port
+ * is only used when it really is a proxy: an HTTP port has to answer a CONNECT to agy's endpoint with
+ * 200, a SOCKS port has to accept a no-auth SOCKS5 greeting. Before 2026-09-28 anything listening on
+ * one of these ports was taken for a proxy; a web app on such a port answered agy's CONNECT with 404
+ * and every run of every profile failed within 0.3 s ("Eligibility check failed: Post
+ * \"https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist\": Not Found"). Each change of
+ * the decision is logged once as [PROXY]. `options` (port lists, timeouts) exist for the tests.
+ */
+export async function detectLocalProxy(forceFresh = false, options = {}) {
   const now = Date.now();
   if (!forceFresh && cachedProxy !== undefined && now - cachedProxyTime < 30000) {
     return cachedProxy;
   }
+  if (!forceFresh && pendingProxyDetection) return pendingProxyDetection;
+  const detection = findProxyForAgy(options).then((found) => {
+    cachedProxy = found;
+    cachedProxyTime = Date.now();
+    return found;
+  });
+  if (forceFresh) return detection;
+  pendingProxyDetection = detection.finally(() => {
+    pendingProxyDetection = null;
+  });
+  return pendingProxyDetection;
+}
 
+async function findProxyForAgy({
+  httpPorts = [8118, 8888, 8080], // Privoxy, tinyproxy, generic
+  socksPorts = [40000, 1080, 7890], // WARP, Shadowsocks, Clash
+  checkHost = PROXY_CHECK_HOST,
+  checkPort = PROXY_CHECK_PORT,
+  connectTimeoutMs = 250,
+  answerTimeoutMs = 3000,
+} = {}) {
   if (
     ["1", "true", "yes"].includes((process.env.ANTIGRAVITY_NO_PROXY || "").toLowerCase()) ||
     ["1", "true", "yes"].includes((process.env.DISABLE_PROXY || "").toLowerCase()) ||
     process.env.NO_PROXY === "*"
   ) {
-    cachedProxy = null;
-    cachedProxyTime = now;
+    logProxyDecision("off", "proxy auto-detection is off (ANTIGRAVITY_NO_PROXY=1)");
     return null;
   }
 
-  for (const envVar of [
-    "ALL_PROXY",
-    "all_proxy",
-    "HTTPS_PROXY",
-    "https_proxy",
-    "HTTP_PROXY",
-    "http_proxy",
-  ]) {
+  for (const envVar of ["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]) {
     const val = (process.env[envVar] || "").trim();
     if (val) {
-      cachedProxy = val;
-      cachedProxyTime = now;
+      logProxyDecision(`env:${envVar}=${val}`, `agy traffic goes through ${redactProxyUrl(val)} (${envVar} in the bridge's environment)`);
       return val;
     }
   }
 
-  function checkPort(host, port, timeoutMs = 250) {
-    return new Promise((resolve) => {
-      const socket = new net.Socket();
-      let done = false;
-      socket.setTimeout(timeoutMs);
-
-      const cleanup = (result) => {
-        if (!done) {
-          done = true;
-          socket.destroy();
-          resolve(result);
-        }
-      };
-
-      socket.on("connect", () => cleanup(true));
-      socket.on("timeout", () => cleanup(false));
-      socket.on("error", () => cleanup(false));
-
-      try {
-        socket.connect(port, host);
-      } catch {
-        cleanup(false);
-      }
-    });
-  }
-
-  // 1. Check local HTTP CONNECT proxies (Privoxy on 8118, tinyproxy on 8888, 8080)
-  for (const port of [8118, 8888, 8080]) {
+  const connectRequest = Buffer.from(`CONNECT ${checkHost}:${checkPort} HTTP/1.1\r\nHost: ${checkHost}:${checkPort}\r\n\r\n`, "latin1");
+  const candidates = [
+    ...httpPorts.map((port) => ({ scheme: "http", port, payload: connectRequest, decide: httpConnectVerdict })),
+    ...socksPorts.map((port) => ({ scheme: "socks5", port, payload: SOCKS5_NO_AUTH_GREETING, decide: socks5Verdict })),
+  ];
+  const skipped = [];
+  for (const c of candidates) {
     for (const host of ["127.0.0.1", "::1"]) {
-      if (await checkPort(host, port)) {
-        const found = `http://127.0.0.1:${port}`;
-        cachedProxy = found;
-        cachedProxyTime = now;
+      const { listening, verdict } = await probeLocalPort(host, c.port, c.payload, c.decide, { connectTimeoutMs, answerTimeoutMs });
+      if (!listening) continue;
+      const shown = host === "::1" ? `[::1]:${c.port}` : `${host}:${c.port}`;
+      if (verdict && verdict.ok) {
+        const found = `${c.scheme}://${shown}`;
+        const note = skipped.length ? ` (skipped ${skipped.join("; ")})` : "";
+        logProxyDecision(`found:${found}|${skipped.join(";")}`, `agy traffic goes through ${found}, found listening locally${note}; ANTIGRAVITY_NO_PROXY=1 turns auto-detection off`);
         return found;
       }
+      skipped.push(`${shown} ${verdict ? verdict.why : "accepted the connection but did not answer"}, so it is not used as ${c.scheme === "http" ? "an HTTP" : "a SOCKS5"} proxy`);
+      break; // the same port on the other loopback address is the same service
     }
   }
-
-  // 2. Check local SOCKS5 proxies (WARP on 40000, Shadowsocks on 1080, Clash on 7890)
-  for (const port of [40000, 1080, 7890]) {
-    for (const host of ["127.0.0.1", "::1"]) {
-      if (await checkPort(host, port)) {
-        const found = `socks5://127.0.0.1:${port}`;
-        cachedProxy = found;
-        cachedProxyTime = now;
-        return found;
-      }
-    }
-  }
-
-  cachedProxy = null;
-  cachedProxyTime = now;
+  logProxyDecision(
+    `none|${skipped.join(";")}`,
+    skipped.length ? `no local proxy found, agy connects directly (skipped ${skipped.join("; ")})` : "no local proxy found, agy connects directly"
+  );
   return null;
 }
