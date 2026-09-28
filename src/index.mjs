@@ -13,18 +13,26 @@ import { handleKeyCli } from "./cli/key-cli.mjs";
 import { startTokenRefreshDaemon } from "./core/token-daemon.mjs";
 import { buildAllowedHosts } from "./core/security.mjs";
 
+const KEY_COMMANDS = new Set(["key", "keys", "apikey", "apikeys", "manage-keys", "manage_keys", "key-manager"]);
+const PROFILE_SHORTCUTS = new Set([
+  "login", "auth", "doctor", "diag", "debug", "info", "test", "check", "probe", "reset", "unblock",
+  "refresh", "reauth", "sync", "copy", "list", "ls", "disable", "enable", "remove", "delete", "rm",
+]);
+
 async function main() {
   const argv = process.argv.slice(2);
 
-  // Subcommand dispatch
+  // Subcommand dispatch. The shortcuts are the ones the Python CLI accepted without "profile"/"key".
   if (argv.length > 0) {
     const first = argv[0].toLowerCase();
-    if (first === "profile") {
-      const code = await handleProfileCli(argv.slice(1));
-      process.exit(code);
-    } else if (first === "key" || first === "keys") {
-      const code = handleKeyCli(argv.slice(1));
-      process.exit(code);
+    let code = null;
+    if (first === "profile" || first === "profiles") code = await handleProfileCli(argv.slice(1));
+    else if (KEY_COMMANDS.has(first)) code = await handleKeyCli(argv.slice(1));
+    else if (PROFILE_SHORTCUTS.has(first)) code = await handleProfileCli(argv);
+    if (code !== null) {
+      // Let stdout drain first: exit() right after a write to a pipe can drop the output (Windows).
+      process.stderr.write("", () => process.stdout.write("", () => process.exit(code)));
+      return;
     }
   }
 
@@ -74,9 +82,12 @@ Antigravity Bridge Server (Node.js Version) 🌉
 Usage:
   node src/index.mjs [--port 8008] [--host 127.0.0.1] [--api-key KEY]
 
-Subcommands:
-  node src/index.mjs profile [list | sync <name> | probe [name] | reset [name]]
-  node src/index.mjs key [list | generate <label> | revoke <label>]
+Subcommands (run "profile help" / "key help" for details):
+  node src/index.mjs profile [list | login <name> | remove <name> | test [name] | order <p1,p2>
+                              | disable <name> | enable <name> | reset [name] | refresh [name]
+                              | doctor | sync <name> | copy [<name>] <user@host>]
+  node src/index.mjs key [list | create [label] | add <label> <key> | revoke <label|key> | test <key>]
+  Shortcuts: profiles, login <name>, doctor, keys
 
 Options:
   -p, --port <port>       Port to listen on (Default: 8008)

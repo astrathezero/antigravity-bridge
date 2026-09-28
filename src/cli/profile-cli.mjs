@@ -10,8 +10,41 @@ import { syncProfileToSystem } from "../core/keyring-sync.mjs";
 import { executeCliCommand } from "../core/executor.mjs";
 import { detectCliCommand, getBridgeConfigPath, DEFAULT_PORT } from "../config.mjs";
 import { getConfiguredApiKeys } from "../auth.mjs";
+import { isSafeProfileName } from "../core/security.mjs";
+import {
+  loginProfile,
+  removeProfileDir,
+  runDoctor,
+  copyAllProfilesToRemote,
+  copyProfileToRemote,
+} from "./profile-tools.mjs";
 
-function bridgePort() {
+export const PROFILE_HELP = `
+Antigravity Bridge - Profile Manager CLI 👤
+
+Usage:
+  node src/index.mjs profile list                    List profiles, logged-in emails, cooldowns and quota
+  node src/index.mjs profile login <name>            Log in or add a profile interactively with agy
+  node src/index.mjs profile remove <name>           Delete a profile directory
+  node src/index.mjs profile test [name] [--model M] [--prompt P]
+                                                     Run a prompt on one profile (or every profile)
+  node src/index.mjs profile disable <name>          Stop sending requests to a profile
+  node src/index.mjs profile enable <name>           Re-enable a disabled profile
+  node src/index.mjs profile order <p1,p2,...>       Set the rotation pool and order (alias: set)
+  node src/index.mjs profile reset [name]            Clear cooldowns for one profile or all of them
+  node src/index.mjs profile refresh [name]          Refresh OAuth tokens now
+  node src/index.mjs profile doctor                  Check outbound IP, proxy and every profile's token
+  node src/index.mjs profile sync <name>             Install a profile's token as this machine's agy login
+  node src/index.mjs profile copy <user@host>        Copy every profile's auth files to another host over ssh
+  node src/index.mjs profile copy <name> <user@host> Copy one profile directory to another host with scp
+
+Shortcuts (no "profile" needed):
+  node src/index.mjs profiles | login <name> | doctor | reset [name] | refresh [name] | test [name]
+
+Commands that change cooldowns reach the running bridge on 127.0.0.1:$ANTIGRAVITY_PORT (default 8008).
+`;
+
+export function bridgePort() {
   return parseInt(process.env.ANTIGRAVITY_PORT || String(DEFAULT_PORT), 10);
 }
 
@@ -61,6 +94,11 @@ async function makeAuthedRequest(endpoint, method = "GET", bodyData = null) {
 
 export async function handleProfileCli(argv) {
   const subcmd = (argv[0] || "list").toLowerCase();
+
+  if (subcmd === "help" || subcmd === "-h" || subcmd === "--help") {
+    console.log(PROFILE_HELP);
+    return 0;
+  }
 
   if (subcmd === "list" || subcmd === "ls" || subcmd === "status") {
     let summary = null;
@@ -132,7 +170,7 @@ export async function handleProfileCli(argv) {
 
   if (subcmd === "set" || subcmd === "use" || subcmd === "config" || subcmd === "order" || subcmd === "rotate") {
     if (argv.length < 2) {
-      console.error("[Error] Please specify profiles: antigravity-bridge profile order profile_1,profile_2,profile_3");
+      console.error("[Error] Please specify profiles: node src/index.mjs profile order profile_1,profile_2,profile_3");
       return 1;
     }
     const raw = argv[1].trim();
@@ -172,10 +210,10 @@ export async function handleProfileCli(argv) {
     return 0;
   }
 
-  if (subcmd === "disable" || subcmd === "block" || subcmd === "off") {
+  if (subcmd === "disable" || subcmd === "block" || subcmd === "off" || subcmd === "pause") {
     const target = argv[1];
     if (!target) {
-      console.error("Usage: antigravity-bridge profile disable <profile_name>");
+      console.error("Usage: node src/index.mjs profile disable <profile_name>");
       return 1;
     }
     warnIfServerMissed(await makeAuthedRequest("/v1/profiles/disable", "POST", { profile: target }));
@@ -184,10 +222,10 @@ export async function handleProfileCli(argv) {
     return 0;
   }
 
-  if (subcmd === "enable" || subcmd === "unblock" || subcmd === "on") {
+  if (subcmd === "enable" || (subcmd === "unblock" && argv[1]) || subcmd === "on" || subcmd === "unpause" || subcmd === "resume") {
     const target = argv[1];
     if (!target) {
-      console.error("Usage: antigravity-bridge profile enable <profile_name>");
+      console.error("Usage: node src/index.mjs profile enable <profile_name>");
       return 1;
     }
     warnIfServerMissed(await makeAuthedRequest("/v1/profiles/enable", "POST", { profile: target }));
@@ -196,7 +234,7 @@ export async function handleProfileCli(argv) {
     return 0;
   }
 
-  if (subcmd === "reset" || subcmd === "clear") {
+  if (subcmd === "reset" || subcmd === "clear" || subcmd === "unblock") {
     const target = argv[1] || null;
     warnIfServerMissed(await makeAuthedRequest("/v1/profiles/reset", "POST", { profile: target }));
     GLOBAL_PROFILE_MANAGER.reset_all(target);
@@ -204,10 +242,23 @@ export async function handleProfileCli(argv) {
     return 0;
   }
 
+  if (subcmd === "copy" || subcmd === "scp" || (subcmd === "sync" && (argv.length > 2 || /@/.test(argv[1] || "")))) {
+    // `sync user@host` / `sync <name> <host>` is the Python CLI's remote copy; `sync <name>` below is local.
+    try {
+      if (argv.length === 2) return await copyAllProfilesToRemote(argv[1].trim());
+      if (argv.length === 3) return await copyProfileToRemote(argv[1].trim(), argv[2].trim());
+    } catch (err) {
+      console.error(`[ERROR] ${err.message}`);
+      return 1;
+    }
+    console.error("Usage: node src/index.mjs profile copy <user@host> | profile copy <name> <user@host>");
+    return 1;
+  }
+
   if (subcmd === "sync") {
     const target = argv[1];
     if (!target) {
-      console.error("Usage: antigravity-bridge profile sync <profile_name>");
+      console.error("Usage: node src/index.mjs profile sync <profile_name>");
       return 1;
     }
     const [email, token] = syncProfileToSystem(target);
@@ -217,24 +268,82 @@ export async function handleProfileCli(argv) {
     return 0;
   }
 
-  if (subcmd === "probe") {
-    const target = argv[1] || null;
+  if (subcmd === "probe" || subcmd === "test" || subcmd === "check") {
+    const rest = argv.slice(1);
+    const option = (flag) => {
+      const i = rest.indexOf(flag);
+      if (i < 0 || i + 1 >= rest.length) return null;
+      return rest.splice(i, 2)[1];
+    };
+    const model = option("--model");
+    const prompt = option("--prompt") || "Hello! Reply with 1 word: OK";
+    const targets = rest[0] ? [rest[0].trim()] : getAvailableProfiles();
     const { template } = detectCliCommand();
-    console.log(`[INFO] Probing profile '${target || "default"}' via agy CLI...`);
+    let failed = 0;
+    console.log(`[INFO] Probing ${targets.length} profile(s)${model ? ` with ${model}` : ""} via agy CLI...`);
+    for (const target of targets) {
+      const name = target || "default";
+      const t0 = Date.now();
+      try {
+        const output = await executeCliCommand(template, prompt, { timeout: 60, profile: target, modelName: model });
+        const preview = output.trim().replace(/\s+/g, " ").slice(0, 180);
+        console.log(`[OK] '${name}' (${getProfileAccountEmail(target)}) answered in ${((Date.now() - t0) / 1000).toFixed(1)}s: ${preview}`);
+      } catch (err) {
+        failed++;
+        console.error(`[ERROR] '${name}' (${getProfileAccountEmail(target)}) failed: ${err.message}`);
+      }
+    }
+    return failed ? 1 : 0;
+  }
+
+  if (subcmd === "login" || subcmd === "add" || subcmd === "new" || subcmd === "auth") {
+    const name = (argv[1] || "").trim();
+    if (!name || !isSafeProfileName(name)) {
+      console.error("Usage: node src/index.mjs profile login <profile_name>  (letters, digits, '.', '_' or '-')");
+      return 1;
+    }
     try {
-      const output = await executeCliCommand(template, "Hello! Reply with 1 word: OK", {
-        timeout: 30,
-        profile: target,
-      });
-      console.log(`[OK] Probe succeeded! Output: ${output.slice(0, 100)}`);
-      return 0;
+      const { ok } = await loginProfile(name);
+      if (ok) {
+        const pool = getAvailableProfiles();
+        if (!pool.includes(name)) {
+          console.log(`[NOTE] '${name}' is not in the rotation pool yet: add it with  node src/index.mjs profile order ${[...pool.filter(Boolean), name].join(",")}`);
+        }
+      }
+      return ok ? 0 : 1;
     } catch (err) {
-      console.error(`[ERROR] Probe failed: ${err.message}`);
+      console.error(`[ERROR] ${err.message}`);
       return 1;
     }
   }
 
-  if (subcmd === "refresh") {
+  if (subcmd === "remove" || subcmd === "delete" || subcmd === "rm") {
+    const name = (argv[1] || "").trim();
+    if (!name || !isSafeProfileName(name)) {
+      console.error("Usage: node src/index.mjs profile remove <profile_name>");
+      return 1;
+    }
+    if (!removeProfileDir(name)) {
+      console.warn(`[Warning] Profile '${name}' has no directory; nothing to delete.`);
+      return 0;
+    }
+    if (GLOBAL_PROFILE_MANAGER.state[name]) {
+      delete GLOBAL_PROFILE_MANAGER.state[name];
+      GLOBAL_PROFILE_MANAGER.save_cache();
+    }
+    console.log(`[OK] Profile '${name}' deleted.`);
+    if (getAvailableProfiles().includes(name)) {
+      console.log(`[NOTE] '${name}' is still listed in the rotation pool; update it with  node src/index.mjs profile order ...`);
+    }
+    return 0;
+  }
+
+  if (subcmd === "doctor" || subcmd === "diag" || subcmd === "debug" || subcmd === "info") {
+    const problems = await runDoctor();
+    return problems ? 1 : 0;
+  }
+
+  if (subcmd === "refresh" || subcmd === "reauth") {
     const target = argv[1] || null;
     const { refreshProfileToken } = await import("../core/token-daemon.mjs");
     if (target) {
@@ -261,6 +370,7 @@ export async function handleProfileCli(argv) {
     }
   }
 
-  console.log("Usage: antigravity-bridge profile [list | order <p1,p2> | sync <name> | probe [name] | refresh [name] | reset [name] | disable <name> | enable <name>]");
-  return 0;
+  console.error(`[ERROR] Unknown profile command '${subcmd}'.`);
+  console.log(PROFILE_HELP);
+  return 1;
 }

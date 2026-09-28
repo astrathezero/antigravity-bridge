@@ -52,7 +52,8 @@ So: never restart a bridge before the change is verified, and never leave a brid
 | Syntax check | `node --check src/server.mjs` |
 | Start locally | `npm start` (port 8008) |
 | Health | `curl -s http://127.0.0.1:8008/health` |
-| API keys | `node src/index.mjs key list` (see README) |
+| API keys | `node src/index.mjs key list` / `key create <label>` / `key test <key>` (see README) |
+| Profiles | `node src/index.mjs profile help`: `login <name>`, `doctor`, `test [name]`, `reset [name]`, `copy <user@host>` |
 
 ---
 
@@ -72,4 +73,4 @@ So: never restart a bridge before the change is verified, and never leave a brid
 | Emergency rollback | `./safe_deploy.sh rollback` |
 | Bridge status | `./safe_deploy.sh status` |
 | Run unit tests directly | `python3 -m unittest test_antigravity_bridge` |
-| Profile manager CLI (still the way to log profiles in for both editions) | `python3 antigravity_bridge.py profile list` |
+| Profile manager CLI (Python edition only; the Node.js CLI now does login and doctor too) | `python3 antigravity_bridge.py profile list` |

@@ -84,7 +84,7 @@ Both editions expose the same HTTP API, read the same `.env` and rotate the same
 | Start | `python3 antigravity_bridge.py` | `node src/index.mjs` or `npm start` |
 | API key variables | `ANTIGRAVITY_BRIDGE_API_KEYS` / `ANTIGRAVITY_BRIDGE_API_KEY` | `ANTIGRAVITY_API_KEYS` / `ANTIGRAVITY_API_KEY` |
 | Per-profile concurrency | `ANTIGRAVITY_PROFILE_CONCURRENCY` or `--profile-concurrency` | `ANTIGRAVITY_CONCURRENCY_PER_PROFILE` |
-| Profile login / doctor CLI | `profile login`, `doctor` | not built in, use the Python CLI (or `agy` directly) once |
+| Profile login / doctor CLI | `profile login`, `doctor` | `profile login`, `doctor` (no Python needed) |
 | Service installers | `setup_systemd.sh` | `setup_systemd_node.sh`, `setup_launchd_mac.sh`, `setup_service_windows.ps1`, `run_windows.bat` |
 | Staging-first deploy helper | `safe_deploy.sh` (see `AGENTS.md`) | edit, run `npm test`, restart |
 
@@ -167,7 +167,7 @@ Antigravity Bridge is an HTTP gateway between your applications and local `antig
 ### 1. Prerequisites
 - **Antigravity CLI** (`antigravity` or `agy`) installed and in `PATH`.
 - **Git**.
-- **Python 3.8+** for the Python edition, **Node.js 18+** for the Node.js edition. Python is also handy for Node users because profile login and `doctor` live in the Python CLI.
+- **Node.js 18+** for the Node.js edition (its CLI covers profile login, `doctor` and key management, so it needs no Python). **Python 3.8+** only for the frozen Python edition.
 
 ### 2. Clone
 ```bash
@@ -199,14 +199,15 @@ python3 antigravity_bridge.py key create agent-hermes
 python3 manage_keys.py list
 
 # Node.js edition → writes ANTIGRAVITY_API_KEYS
-node src/index.mjs key generate agent-hermes
+node src/index.mjs key create agent-hermes
 node src/index.mjs key list
 ```
 
 ### 5. Add Google profiles
 ```bash
-python3 antigravity_bridge.py login profile_1
-python3 antigravity_bridge.py login profile_2
+node src/index.mjs profile login profile_1         # Node.js (shortcut: node src/index.mjs login profile_1)
+node src/index.mjs profile login profile_2
+python3 antigravity_bridge.py login profile_1      # Python edition, same result
 ```
 > **Login steps:**
 > 1. A browser opens Google OAuth. Select the account and authorize.
@@ -285,16 +286,18 @@ Both CLIs operate on the same profile store, so you can mix them.
 | Task | Python | Node.js |
 | :--- | :--- | :--- |
 | List profiles, emails, leases, cooldowns, quota | `python3 antigravity_bridge.py profile list` (alias `profiles`) | `node src/index.mjs profile list` |
-| Log in / register a new Google profile | `python3 antigravity_bridge.py login <name>` | — (use the Python command) |
-| Probe quota & model responsiveness | `python3 antigravity_bridge.py profile test [name]` | `node src/index.mjs profile probe [name]` |
+| Log in / register a new Google profile | `python3 antigravity_bridge.py login <name>` | `node src/index.mjs profile login <name>` (shortcut `login <name>`) |
+| Probe quota & model responsiveness | `python3 antigravity_bridge.py profile test [name]` | `node src/index.mjs profile test [name] [--model M] [--prompt P]` (alias `probe`; no name = every profile) |
 | Set rotation pool & priority | `python3 antigravity_bridge.py profile set p1,p2` (alias `order`) | `node src/index.mjs profile set p1,p2` (alias `order`) |
 | Disable / enable persistently | `profile disable <name>` / `profile enable <name>` | `profile disable <name>` / `profile enable <name>` |
 | Reset cooldowns & exhausted flags | `profile reset [name]` | `profile reset [name]` |
 | Force OAuth token refresh | `profile refresh [name]` | `profile refresh [name]` |
-| Sync profiles to a remote host over SSH | `profile sync <user@vps>` | — |
-| Copy one profile via SCP / remove a profile | `profile copy <name> <vps>` / `profile remove <name>` | — |
+| Sync profiles to a remote host over SSH | `profile sync <user@vps>` | `profile copy <user@vps>` (`profile sync <user@vps>` also works) |
+| Copy one profile via SCP / remove a profile | `profile copy <name> <vps>` / `profile remove <name>` | `profile copy <name> <vps>` / `profile remove <name>` |
 | Sync a profile's token into the system credential store | — | `profile sync <name>` |
-| Diagnostics (IP, proxy, token validity, lock cleanup) | `python3 antigravity_bridge.py doctor` (alias `diag`) | — |
+| Diagnostics (IP, proxy, token validity, lock cleanup) | `python3 antigravity_bridge.py doctor` (alias `diag`) | `node src/index.mjs doctor` (alias `diag`) |
+
+In the Node.js CLI, `profile help` lists every command. The shortcuts `profiles`, `login`, `doctor`, `reset`, `refresh` and `test` work without the `profile` prefix, as they do in Python. `npm run profile -- <command>` runs the same commands.
 
 ---
 
@@ -305,10 +308,12 @@ Keys are stored in `.env`. The Python edition reads and writes `ANTIGRAVITY_BRID
 | Task | Python | Node.js |
 | :--- | :--- | :--- |
 | List keys and labels | `python3 antigravity_bridge.py key list` or `python3 manage_keys.py list` | `node src/index.mjs key list` |
-| Generate a new random key | `key create <label>` (alias `generate`) | `key generate <label>` (alias `create`) |
-| Register an existing key | `key add <label> <key>` / `manage_keys.py add` | — |
-| Revoke | `key revoke <label\|key>` | `key revoke <label>` |
-| Live-test a key against a running server | `key test <key>` / `manage_keys.py test <key>` | `curl -H "Authorization: Bearer <key>" http://127.0.0.1:8008/health` |
+| Generate a new random key | `key create <label>` (alias `generate`) | `key create <label>` (alias `generate`) |
+| Register an existing key | `key add <label> <key>` / `manage_keys.py add` | `key add <label> <key>` |
+| Revoke | `key revoke <label\|key>` | `key revoke <label\|key>` |
+| Live-test a key against a running server | `key test <key>` / `manage_keys.py test <key>` | `key test <key> [--host H] [--port P]` |
+
+The Node.js CLI replaces `manage_keys.py` with `node src/index.mjs keys` (also `manage-keys`) or `npm run key -- <command>`. Labels and keys are checked before they are written, so a comma or colon can no longer corrupt the `.env` line.
 
 ```ini
 # Python edition
@@ -782,13 +787,14 @@ Add `bridge.yourdomain.com` to `ANTIGRAVITY_ALLOWED_HOSTS` so the Host allow-lis
 
 ### Q2: How do I verify OAuth token validity for all accounts?
 ```bash
-python3 antigravity_bridge.py doctor
+node src/index.mjs doctor                   # or: python3 antigravity_bridge.py doctor
 ```
 
 ### Q3: How do I reset profiles stuck in cooldown?
 ```bash
-python3 antigravity_bridge.py profile reset   # or: node src/index.mjs profile reset
+node src/index.mjs profile reset             # or: python3 antigravity_bridge.py profile reset
 ```
+If the Node.js CLI warns that the running bridge did not answer, it called the wrong port: a leftover `ANTIGRAVITY_PORT=8000` in `.env` is the usual cause. Rerun with `ANTIGRAVITY_PORT=8008` in front.
 
 ### Q4: I set API keys but the other edition still says `auth_required: false`
 Each edition reads its own variable: Python `ANTIGRAVITY_BRIDGE_API_KEYS`, Node.js `ANTIGRAVITY_API_KEYS`. Generate keys with the matching CLI (`key create` / `key generate`) or add the second variable to `.env`.

@@ -84,7 +84,7 @@ Repository นี้มี **เซิร์ฟเวอร์ตัวเดี
 | คำสั่งเริ่มรัน | `python3 antigravity_bridge.py` | `node src/index.mjs` หรือ `npm start` |
 | ตัวแปร API key | `ANTIGRAVITY_BRIDGE_API_KEYS` / `ANTIGRAVITY_BRIDGE_API_KEY` | `ANTIGRAVITY_API_KEYS` / `ANTIGRAVITY_API_KEY` |
 | จำนวน request พร้อมกันต่อโปรไฟล์ | `ANTIGRAVITY_PROFILE_CONCURRENCY` หรือ `--profile-concurrency` | `ANTIGRAVITY_CONCURRENCY_PER_PROFILE` |
-| CLI สำหรับ login โปรไฟล์ / doctor | `profile login`, `doctor` | ไม่มีในตัว ให้ใช้ CLI ของ Python (หรือ `agy` โดยตรง) ครั้งเดียว |
+| CLI สำหรับ login โปรไฟล์ / doctor | `profile login`, `doctor` | `profile login`, `doctor` (ไม่ต้องมี Python) |
 | สคริปต์ติดตั้งเป็น service | `setup_systemd.sh` | `setup_systemd_node.sh`, `setup_launchd_mac.sh`, `setup_service_windows.ps1`, `run_windows.bat` |
 | ตัวช่วย deploy แบบ staging-first | `safe_deploy.sh` (ดู `AGENTS.md`) | แก้โค้ด, รัน `npm test`, restart |
 
@@ -167,7 +167,7 @@ Antigravity Bridge เป็น HTTP gateway ระหว่างแอปพ�
 ### 1. สิ่งที่ต้องมีก่อน (Prerequisites)
 - **Antigravity CLI** (`antigravity` หรือ `agy`) ติดตั้งแล้วและอยู่ใน `PATH`
 - **Git**
-- **Python 3.8+** สำหรับรุ่น Python, **Node.js 18+** สำหรับรุ่น Node.js ผู้ใช้รุ่น Node ควรมี Python ด้วย เพราะคำสั่ง login โปรไฟล์และ `doctor` อยู่ใน CLI ของ Python
+- **Node.js 18+** สำหรับรุ่น Node.js (CLI ของรุ่นนี้ทำ login โปรไฟล์, `doctor` และจัดการ key ได้เอง ไม่ต้องมี Python) ส่วน **Python 3.8+** ใช้เฉพาะรุ่น Python ที่หยุดพัฒนาแล้ว
 
 ### 2. โคลนโปรเจกต์
 ```bash
@@ -199,14 +199,15 @@ python3 antigravity_bridge.py key create agent-hermes
 python3 manage_keys.py list
 
 # รุ่น Node.js → เขียนลง ANTIGRAVITY_API_KEYS
-node src/index.mjs key generate agent-hermes
+node src/index.mjs key create agent-hermes
 node src/index.mjs key list
 ```
 
 ### 5. เพิ่มโปรไฟล์บัญชี Google
 ```bash
-python3 antigravity_bridge.py login profile_1
-python3 antigravity_bridge.py login profile_2
+node src/index.mjs profile login profile_1         # Node.js (ย่อ: node src/index.mjs login profile_1)
+node src/index.mjs profile login profile_2
+python3 antigravity_bridge.py login profile_1      # รุ่น Python ได้ผลเหมือนกัน
 ```
 > **ขั้นตอน login:**
 > 1. เบราว์เซอร์จะเปิดหน้า Google OAuth เลือกบัญชีและกดอนุญาต
@@ -285,16 +286,18 @@ CLI ของทั้งสองรุ่นทำงานกับที่�
 | งาน | Python | Node.js |
 | :--- | :--- | :--- |
 | แสดงโปรไฟล์, อีเมล, lease, cooldown, โควตา | `python3 antigravity_bridge.py profile list` (ย่อ `profiles`) | `node src/index.mjs profile list` |
-| Login / ลงทะเบียนโปรไฟล์ Google ใหม่ | `python3 antigravity_bridge.py login <name>` | — (ใช้คำสั่งของ Python) |
-| ทดสอบโควตาและการตอบสนองของโมเดล | `python3 antigravity_bridge.py profile test [name]` | `node src/index.mjs profile probe [name]` |
+| Login / ลงทะเบียนโปรไฟล์ Google ใหม่ | `python3 antigravity_bridge.py login <name>` | `node src/index.mjs profile login <name>` (ย่อ `login <name>`) |
+| ทดสอบโควตาและการตอบสนองของโมเดล | `python3 antigravity_bridge.py profile test [name]` | `node src/index.mjs profile test [name] [--model M] [--prompt P]` (ย่อ `probe` ไม่ระบุชื่อ = ทุกโปรไฟล์) |
 | กำหนด pool และลำดับการหมุนเวียน | `python3 antigravity_bridge.py profile set p1,p2` (ย่อ `order`) | `node src/index.mjs profile set p1,p2` (ย่อ `order`) |
 | ปิด / เปิดโปรไฟล์แบบถาวร | `profile disable <name>` / `profile enable <name>` | `profile disable <name>` / `profile enable <name>` |
 | รีเซ็ต cooldown และสถานะ exhausted | `profile reset [name]` | `profile reset [name]` |
 | บังคับรีเฟรช OAuth token | `profile refresh [name]` | `profile refresh [name]` |
-| Sync โปรไฟล์ไปเครื่องอื่นผ่าน SSH | `profile sync <user@vps>` | — |
-| คัดลอกโปรไฟล์เดียวผ่าน SCP / ลบโปรไฟล์ | `profile copy <name> <vps>` / `profile remove <name>` | — |
+| Sync โปรไฟล์ไปเครื่องอื่นผ่าน SSH | `profile sync <user@vps>` | `profile copy <user@vps>` (ใช้ `profile sync <user@vps>` ได้เช่นกัน) |
+| คัดลอกโปรไฟล์เดียวผ่าน SCP / ลบโปรไฟล์ | `profile copy <name> <vps>` / `profile remove <name>` | `profile copy <name> <vps>` / `profile remove <name>` |
 | Sync token ของโปรไฟล์เข้า credential store ของระบบ | — | `profile sync <name>` |
-| วินิจฉัย (IP, proxy, token, ล้าง lock) | `python3 antigravity_bridge.py doctor` (ย่อ `diag`) | — |
+| วินิจฉัย (IP, proxy, token, ล้าง lock) | `python3 antigravity_bridge.py doctor` (ย่อ `diag`) | `node src/index.mjs doctor` (ย่อ `diag`) |
+
+ใน CLI ของ Node.js ใช้ `profile help` ดูคำสั่งทั้งหมด คำสั่งย่อ `profiles`, `login`, `doctor`, `reset`, `refresh` และ `test` ใช้ได้โดยไม่ต้องมี `profile` นำหน้า เหมือนรุ่น Python และสั่งผ่าน `npm run profile -- <command>` ได้ด้วย
 
 ---
 
@@ -305,10 +308,12 @@ Key ถูกเก็บใน `.env` รุ่น Python อ่านและ
 | งาน | Python | Node.js |
 | :--- | :--- | :--- |
 | แสดง key และ label | `python3 antigravity_bridge.py key list` หรือ `python3 manage_keys.py list` | `node src/index.mjs key list` |
-| สร้าง key สุ่มใหม่ | `key create <label>` (ย่อ `generate`) | `key generate <label>` (ย่อ `create`) |
-| ลงทะเบียน key ที่มีอยู่แล้ว | `key add <label> <key>` / `manage_keys.py add` | — |
-| ยกเลิก key | `key revoke <label\|key>` | `key revoke <label>` |
-| ทดสอบ key กับเซิร์ฟเวอร์ที่รันอยู่ | `key test <key>` / `manage_keys.py test <key>` | `curl -H "Authorization: Bearer <key>" http://127.0.0.1:8008/health` |
+| สร้าง key สุ่มใหม่ | `key create <label>` (ย่อ `generate`) | `key create <label>` (ย่อ `generate`) |
+| ลงทะเบียน key ที่มีอยู่แล้ว | `key add <label> <key>` / `manage_keys.py add` | `key add <label> <key>` |
+| ยกเลิก key | `key revoke <label\|key>` | `key revoke <label\|key>` |
+| ทดสอบ key กับเซิร์ฟเวอร์ที่รันอยู่ | `key test <key>` / `manage_keys.py test <key>` | `key test <key> [--host H] [--port P]` |
+
+รุ่น Node.js ใช้ `node src/index.mjs keys` (หรือ `manage-keys`) หรือ `npm run key -- <command>` แทน `manage_keys.py` และตรวจ label กับ key ก่อนเขียน จึงไม่มีเครื่องหมายจุลภาคหรือโคลอนมาทำให้บรรทัดใน `.env` เสีย
 
 ```ini
 # รุ่น Python
@@ -782,13 +787,14 @@ server {
 
 ### Q2: ต้องการตรวจว่า OAuth token ของทุกบัญชียังใช้ได้หรือไม่
 ```bash
-python3 antigravity_bridge.py doctor
+node src/index.mjs doctor                   # หรือ: python3 antigravity_bridge.py doctor
 ```
 
 ### Q3: โปรไฟล์ติด cooldown ค้าง จะรีเซ็ตอย่างไร
 ```bash
-python3 antigravity_bridge.py profile reset   # หรือ: node src/index.mjs profile reset
+node src/index.mjs profile reset             # หรือ: python3 antigravity_bridge.py profile reset
 ```
+ถ้า CLI ของ Node.js เตือนว่าบริดจ์ที่รันอยู่ไม่ตอบ แปลว่าเรียกผิดพอร์ต สาเหตุที่พบบ่อยคือ `ANTIGRAVITY_PORT=8000` ที่ค้างอยู่ใน `.env` ให้สั่งใหม่โดยใส่ `ANTIGRAVITY_PORT=8008` ไว้ข้างหน้า
 
 ### Q4: ตั้ง API key แล้ว แต่อีกรุ่นยังตอบ `auth_required: false`
 แต่ละรุ่นอ่านตัวแปรของตัวเอง: Python ใช้ `ANTIGRAVITY_BRIDGE_API_KEYS`, Node.js ใช้ `ANTIGRAVITY_API_KEYS` ให้สร้าง key ด้วย CLI ของรุ่นนั้น (`key create` / `key generate`) หรือเพิ่มตัวแปรตัวที่สองลง `.env`

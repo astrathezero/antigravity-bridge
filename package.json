@@ -9,6 +9,8 @@
   },
   "scripts": {
     "start": "node src/index.mjs --port 8008",
+    "profile": "node src/index.mjs profile",
+    "key": "node src/index.mjs key",
     "test": "node --test tests/*.test.mjs"
   },
   "keywords": [
