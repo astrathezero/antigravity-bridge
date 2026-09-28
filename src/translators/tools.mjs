@@ -153,10 +153,13 @@ function normalizeToolCallItem(item, allowedTools = null) {
 // escaped and a backslash that does not start a JSON escape becomes a literal backslash.
 // Find the index of the "}" that closes the object opened at `start`, scanning with string/escape
 // awareness so braces inside string values do not miscount. Returns -1 if it never balances.
-export function balancedObjectEnd(text, start) {
+// `ends` (a Map), when given, also receives the answer for every other "{" the scan passes outside a
+// string: a scan started there would read the rest of the text exactly the same way.
+export function balancedObjectEnd(text, start, ends = null) {
   let depth = 0;
   let inStr = false;
   let esc = false;
+  const open = [];
   for (let i = start; i < text.length; i++) {
     const ch = text[i];
     if (inStr) {
@@ -166,12 +169,16 @@ export function balancedObjectEnd(text, start) {
       continue;
     }
     if (ch === '"') inStr = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
+    else if (ch === "{") {
+      depth++;
+      if (ends) open.push(i);
+    } else if (ch === "}") {
       depth--;
+      if (ends) ends.set(open.pop(), i);
       if (depth === 0) return i;
     }
   }
+  if (ends) for (const p of open) ends.set(p, -1);
   return -1;
 }
 
@@ -273,6 +280,47 @@ export function toolCallRemainder(...parts) {
   return /\p{L}|\p{N}/u.test(joined) ? joined : null;
 }
 
+// The ```...``` and <tool_call>...</tool_call> candidates are found with indexOf, not with the regexes
+// /```(?:json)?\s*([\s\S]*?)\s*```/ and /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/ used before: on an
+// opening fence or tag followed by a long run of whitespace and no closing one (a model reply that
+// floods newlines until its token limit) those backtrack cubically. 2,000 newlines after an unclosed
+// ``` took 3 s and 5,000 after <tool_call> took 47 s, with the event loop, and so every request and
+// /health, frozen for the whole time. Both scanners below are linear and return the same spans.
+
+/** Every ```...``` block, left to right: the body skips an optional "json" after the opening fence. */
+function fencedBlocks(text) {
+  const blocks = [];
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("```", from);
+    if (open === -1) break;
+    let bodyStart = open + 3;
+    if (text.slice(bodyStart, bodyStart + 4).toLowerCase() === "json") bodyStart += 4;
+    const close = text.indexOf("```", bodyStart);
+    if (close === -1) break;
+    blocks.push({ start: open, end: close + 3, body: text.slice(bodyStart, close) });
+    from = close + 3;
+  }
+  return blocks;
+}
+
+/** Every <tool_call>/<function_call> ... </tool_call>/</function_call> block, left to right. */
+function taggedBlocks(text) {
+  const openRe = /<(?:tool_call|function_call)>/gi;
+  const closeRe = /<\/(?:tool_call|function_call)>/gi;
+  const blocks = [];
+  for (;;) {
+    const open = openRe.exec(text);
+    if (!open) break;
+    closeRe.lastIndex = open.index + open[0].length;
+    const close = closeRe.exec(text);
+    if (!close) break;
+    blocks.push({ start: open.index, end: close.index + close[0].length, body: text.slice(open.index + open[0].length, close.index) });
+    openRe.lastIndex = close.index + close[0].length;
+  }
+  return blocks;
+}
+
 export function parseToolCallsFromResponse(outputText, allowedTools = null) {
   if (!outputText || !outputText.trim()) {
     return [outputText, null];
@@ -280,33 +328,35 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
 
   const text = outputText.trim();
 
-  // 1. Regex search for ```json ... ``` or ``` ... ```
-  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
-  let match;
-  while ((match = codeBlockRegex.exec(text)) !== null) {
-    const candidate = match[1].trim();
-    const parsed = tryParseToolCallJson(candidate, allowedTools);
+  // 1. ```json ... ``` or ``` ... ``` blocks
+  for (const block of fencedBlocks(text)) {
+    const parsed = tryParseToolCallJson(block.body.trim(), allowedTools);
     if (parsed) {
-      const prefix = text.slice(0, match.index).trim();
-      const suffix = text.slice(match.index + match[0].length).trim();
+      const prefix = text.slice(0, block.start).trim();
+      const suffix = text.slice(block.end).trim();
       const remainingText = toolCallRemainder(prefix, suffix);
       return [remainingText, parsed];
     }
   }
 
-  // 2. Search for XML style <tool_call>...</tool_call> or <function_call>...</function_call>
-  const xmlRegex = /<(?:tool_call|function_call)>\s*([\s\S]*?)\s*<\/(?:tool_call|function_call)>/gi;
+  // 2. XML style <tool_call>...</tool_call> or <function_call>...</function_call>
+  const tagged = taggedBlocks(text);
   const allParsed = [];
-  while ((match = xmlRegex.exec(text)) !== null) {
-    const candidate = match[1].trim();
-    const parsed = tryParseToolCallJson(candidate, allowedTools);
+  for (const block of tagged) {
+    const parsed = tryParseToolCallJson(block.body.trim(), allowedTools);
     if (parsed) {
       allParsed.push(...parsed);
     }
   }
   if (allParsed.length > 0) {
-    const cleanText = text.replace(/<(?:tool_call|function_call)>[\s\S]*?<\/(?:tool_call|function_call)>/gi, "").trim();
-    return [toolCallRemainder(cleanText), allParsed];
+    let cleanText = "";
+    let last = 0;
+    for (const block of tagged) {
+      cleanText += text.slice(last, block.start);
+      last = block.end;
+    }
+    cleanText += text.slice(last);
+    return [toolCallRemainder(cleanText.trim()), allParsed];
   }
 
   // 3. Direct JSON parse on whole text
@@ -318,9 +368,13 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
   // 4. Scan for the FIRST brace-balanced {...} object that parses as a tool call. This survives a
   //    trailing extra "}" or prose after the JSON (gemini-3.8-flash does both), which the greedy
   //    match below cannot: it would grab through the stray brace and fail to parse.
+  //    A "{" that never balances costs a scan to the end of the text, so each scan's answers for the
+  //    braces it passed are kept (a reply cut off inside a large JSON value took 39 s without that).
+  const knownEnds = new Map();
   for (let i = 0; i < text.length; i++) {
     if (text[i] !== "{") continue;
-    const end = balancedObjectEnd(text, i);
+    let end = knownEnds.get(i);
+    if (end === undefined) end = balancedObjectEnd(text, i, knownEnds);
     if (end === -1) continue; // this "{" never balances (e.g. an unclosed string); try the next one
     const candidate = text.slice(i, end + 1);
     const parsed = tryParseToolCallJson(candidate, allowedTools);
@@ -333,14 +387,16 @@ export function parseToolCallsFromResponse(outputText, allowedTools = null) {
     i = end; // this object did not parse as a tool call; continue after it
   }
 
-  // 5. Search for { ... } object containing tool_calls
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    const candidate = jsonMatch[0].trim();
+  // 5. The widest { ... } span (first "{" to last "}", what /\{[\s\S]*\}/ matched, without its
+  //    per-"{" rescans when no "}" follows)
+  const first = text.indexOf("{");
+  const last = text.lastIndexOf("}");
+  if (first !== -1 && last > first) {
+    const candidate = text.slice(first, last + 1);
     const parsedObj = tryParseToolCallJson(candidate, allowedTools);
     if (parsedObj) {
-      const prefix = text.slice(0, jsonMatch.index).trim();
-      const suffix = text.slice(jsonMatch.index + jsonMatch[0].length).trim();
+      const prefix = text.slice(0, first).trim();
+      const suffix = text.slice(last + 1).trim();
       const remainingText = toolCallRemainder(prefix, suffix);
       return [remainingText, parsedObj];
     }

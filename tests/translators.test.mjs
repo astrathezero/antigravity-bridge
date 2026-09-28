@@ -203,3 +203,31 @@ test("translators: a tool-call reply whose leftover is only a stray brace or fen
   assert.equal(toolCallRemainder("เสร็จแล้ว"), "เสร็จแล้ว", "Thai text is not punctuation");
   assert.equal(toolCallRemainder("2"), "2");
 });
+
+test("translators: a reply flooding whitespace after an unclosed fence or tag is parsed in linear time", async () => {
+  const { parseToolCallsFromResponse } = await import("../src/translators/tools.mjs");
+  const tools = ["shell"];
+  const call = '{"tool_calls":[{"name":"shell","arguments":{"command":"ls"}}]}';
+  // Each of these froze the event loop (every request and /health) with the old regexes: 2,000 newlines
+  // after an unclosed ``` took 3 s, 5,000 after <tool_call> 47 s, and the time grew with the cube.
+  const floods = [
+    "```\n" + "\n".repeat(50000) + "x",
+    "```json\n" + " ".repeat(50000) + "x",
+    "<tool_call>\n" + "\n".repeat(50000) + "x",
+    "```json\n{" + " ".repeat(200000) + "x",
+    "{" + "a{".repeat(100000), // cut off inside a large JSON value: thousands of "{" that never close
+  ];
+  const t0 = Date.now();
+  for (const reply of floods) {
+    const [text, calls] = parseToolCallsFromResponse(reply, tools);
+    assert.equal(calls, null);
+    assert.equal(text, reply);
+  }
+  // A complete call surrounded by the same floods is still found.
+  let [, calls] = parseToolCallsFromResponse("<tool_call>\n" + "\n".repeat(50000) + call + "\n".repeat(50000) + "</tool_call>", tools);
+  assert.equal(calls?.[0]?.name, "shell");
+  [, calls] = parseToolCallsFromResponse("```json\n" + call + "\n```\n```" + " ".repeat(50000), tools);
+  assert.equal(calls?.[0]?.name, "shell");
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 2000, `parsing the floods took ${elapsed} ms`);
+});
