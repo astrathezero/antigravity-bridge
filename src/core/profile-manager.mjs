@@ -907,11 +907,11 @@ export class ProfileManager {
     ) {
       let modelLabel;
       if (lastModel && lastModel.toLowerCase().includes("opus")) {
-        modelLabel = "Claude Opus 4.6 (Thinking)";
+        modelLabel = "Claude Opus 5.5";
       } else if (lastModel && lastModel.toLowerCase().includes("gpt-oss")) {
         modelLabel = "GPT-OSS 120B (Medium)";
       } else if (lastModel && lastModel.toLowerCase().includes("sonnet")) {
-        modelLabel = "Claude Sonnet 4.6";
+        modelLabel = "Claude Sonnet 5.5";
       } else {
         const fb = this.get_available_fallback_model(usedProfile, lastModel);
         modelLabel = fb || "Model Fallback";

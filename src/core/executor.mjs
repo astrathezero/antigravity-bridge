@@ -59,17 +59,7 @@ export function buildStdinPromptArgv(parts, placeholder, cmdTemplate) {
 }
 
 export function parseCmdTemplate(cmdTemplate, promptText, modelName = null) {
-  const rawFlags = resolveModelFlags(modelName);
-  const normalizedFlags = [];
-  for (const f of rawFlags) {
-    if (f === "claude-sonnet-4.6") {
-      normalizedFlags.push("claude-sonnet-4-6");
-    } else if (f === "claude-opus-4.6") {
-      normalizedFlags.push("claude-opus-4-6-thinking");
-    } else {
-      normalizedFlags.push(f);
-    }
-  }
+  const normalizedFlags = resolveModelFlags(modelName);
 
   const promptBytesLen = Buffer.byteLength(promptText, "utf-8");
 

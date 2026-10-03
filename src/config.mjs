@@ -79,7 +79,7 @@ export const DEFAULT_SHORT_PROMPT_TIMEOUT = parseFloat(process.env.ANTIGRAVITY_S
 export const DEFAULT_IMAGE_ROUTER_URL = process.env.ANTIGRAVITY_IMAGE_ROUTER_URL || "";
 export const DEFAULT_IMAGE_ROUTER_KEY = process.env.ANTIGRAVITY_IMAGE_ROUTER_KEY || "";
 
-export const DEFAULT_FALLBACK_CHAIN = ["claude-opus-4-6-thinking", "gpt-oss-120b-medium"];
+export const DEFAULT_FALLBACK_CHAIN = ["claude-opus-5-5-high", "gpt-oss-120b-medium"];
 export const ANTIGRAVITY_MODEL_FALLBACK_ENABLED = ["1", "true", "yes"].includes(
   (process.env.ANTIGRAVITY_MODEL_FALLBACK_ENABLED || "true").toLowerCase()
 );
@@ -99,10 +99,7 @@ export const SUPPORTED_MODELS = {
   "gemini-3.6-flash-high": ["gemini-3.6-flash", "high"],
   "gemini-3.6-flash-medium": ["gemini-3.6-flash", "medium"],
   "gemini-3.6-flash-low": ["gemini-3.6-flash", "low"],
-  "gemini-3.6-flash": ["gemini-3.6-flash", null],
-  "gemini-3.5-flash-medium": ["gemini-3.5-flash", "medium"],
-  "gemini-3.5-flash-low": ["gemini-3.5-flash", "low"],
-  "gemini-3.5-flash": ["gemini-3.5-flash", null],
+  "gemini-3.6-flash": ["gemini-3.6-flash", "high"],
   "gemini-3.1-pro-high": ["gemini-3.1-pro", "high"],
   "gemini-3.1-pro-low": ["gemini-3.1-pro", "low"],
   "gemini-3.1-pro": ["gemini-3.1-pro", "high"],
@@ -110,14 +107,14 @@ export const SUPPORTED_MODELS = {
   "gemini-image": ["ag/gemini-3.1-flash-image", null],
   "imagen-3": ["ag/gemini-3.1-flash-image", null],
   "nano-banana": ["ag/gemini-3.1-flash-image", null],
-  "claude-sonnet-4-6": ["claude-sonnet-4-6", null],
-  "claude-sonnet-4-6-thinking": ["claude-sonnet-4-6", null],
-  "claude-sonnet-4.6-thinking": ["claude-sonnet-4.6", null],
-  "claude-sonnet-4.6": ["claude-sonnet-4.6", null],
-  "claude-opus-4-6": ["claude-opus-4-6-thinking", null],
-  "claude-opus-4-6-thinking": ["claude-opus-4-6-thinking", null],
-  "claude-opus-4.6-thinking": ["claude-opus-4.6", null],
-  "claude-opus-4.6": ["claude-opus-4.6", null],
+  "claude-opus-5-5": ["claude-opus-5-5", "high"],
+  "claude-opus-5-5-high": ["claude-opus-5-5", "high"],
+  "claude-opus-5-5-medium": ["claude-opus-5-5", "medium"],
+  "claude-opus-5-5-low": ["claude-opus-5-5", "low"],
+  "claude-sonnet-5-5": ["claude-sonnet-5-5", "high"],
+  "claude-sonnet-5-5-high": ["claude-sonnet-5-5", "high"],
+  "claude-sonnet-5-5-medium": ["claude-sonnet-5-5", "medium"],
+  "claude-sonnet-5-5-low": ["claude-sonnet-5-5", "low"],
   "gpt-oss-120b-medium": ["gpt-oss-120b", "medium"],
   "gpt-oss-120b": ["gpt-oss-120b", null],
   "gpt-oss-128b-medium": ["gpt-oss-120b", "medium"],
@@ -139,20 +136,17 @@ export const MODEL_CONTEXT_LIMITS = {
   "gemini-3.6-flash-medium": 1000000,
   "gemini-3.6-flash-low": 1000000,
   "gemini-3.6-flash": 1000000,
-  "gemini-3.5-flash-medium": 1000000,
-  "gemini-3.5-flash-low": 1000000,
-  "gemini-3.5-flash": 1000000,
   "gemini-3.1-pro-high": 2000000,
   "gemini-3.1-pro-low": 2000000,
   "gemini-3.1-pro": 2000000,
-  "claude-sonnet-4-6": 200000,
-  "claude-sonnet-4-6-thinking": 200000,
-  "claude-sonnet-4.6-thinking": 200000,
-  "claude-sonnet-4.6": 200000,
-  "claude-opus-4-6": 200000,
-  "claude-opus-4-6-thinking": 200000,
-  "claude-opus-4.6-thinking": 200000,
-  "claude-opus-4.6": 200000,
+  "claude-opus-5-5": 200000,
+  "claude-opus-5-5-high": 200000,
+  "claude-opus-5-5-medium": 200000,
+  "claude-opus-5-5-low": 200000,
+  "claude-sonnet-5-5": 200000,
+  "claude-sonnet-5-5-high": 200000,
+  "claude-sonnet-5-5-medium": 200000,
+  "claude-sonnet-5-5-low": 200000,
   "gpt-oss-120b": 128000,
   "gpt-oss-120b-medium": 128000,
   "gpt-oss-128b": 128000,
@@ -337,17 +331,20 @@ export function resolveModelFlags(modelName) {
   } else if (modelLower.includes("gemini-3.7-flash")) {
     flags.push("--model", "gemini-3.7-flash");
     if (!effort) effort = "medium";
-  } else if (modelLower.includes("gemini-3.6-flash")) {
+  } else if (modelLower.includes("gemini-3.6-flash") || modelLower.includes("gemini-3.5-flash")) {
+    // agy 1.2.10+ no longer offers gemini-3.5-flash; 3.6 is its successor.
     flags.push("--model", "gemini-3.6-flash");
-  } else if (modelLower.includes("gemini-3.5-flash")) {
-    flags.push("--model", "gemini-3.5-flash");
+    if (!effort) effort = "high";
   } else if (modelLower.includes("gemini-3.1-pro")) {
     flags.push("--model", "gemini-3.1-pro");
     if (!effort) effort = "high";
-  } else if (modelLower.includes("claude-sonnet-4.6") || modelLower.includes("claude-3-7-sonnet")) {
-    flags.push("--model", "Claude Sonnet 4.6 (Thinking)");
-  } else if (modelLower.includes("claude-opus-4.6")) {
-    flags.push("--model", "Claude Opus 4.6 (Thinking)");
+  } else if (/claude-sonnet-(5[.-]5|4[.-]6)/.test(modelLower) || modelLower.includes("claude-3-7-sonnet")) {
+    // agy 1.2.10+ rejects the retired 4.6 ids, so clients still configured with them get 5.5.
+    flags.push("--model", "claude-sonnet-5-5");
+    if (!effort) effort = "high";
+  } else if (/claude-opus-(5[.-]5|4[.-]6)/.test(modelLower)) {
+    flags.push("--model", "claude-opus-5-5");
+    if (!effort) effort = "high";
   } else if (modelLower.includes("gpt-oss-120b") || modelLower.includes("gpt-oss-128b")) {
     flags.push("--model", "gpt-oss-120b");
     if (!effort) effort = "medium";

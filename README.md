@@ -270,12 +270,18 @@ curl -H "Authorization: Bearer sk-agv-..." http://127.0.0.1:8000/health   # full
 | **`claude-sonnet-4.6`** | `--model claude-sonnet-4.6` | - | Claude Sonnet 4.6 | 200,000 |
 | **`claude-opus-4.6-thinking`** | `--model claude-opus-4.6` | `thinking` | Claude Opus 4.6 (Extended Thinking) | 200,000 |
 | **`claude-opus-4.6`** | `--model claude-opus-4.6` | - | Claude Opus 4.6 | 200,000 |
+| **`claude-opus-5-5-high`** / **`claude-opus-5-5`** (Node.js) | `--model claude-opus-5-5` | `high` | Claude Opus 5.5 (High) | 200,000 |
+| **`claude-opus-5-5-medium`** / **`-low`** (Node.js) | `--model claude-opus-5-5` | `medium` / `low` | Claude Opus 5.5 (Medium / Low) | 200,000 |
+| **`claude-sonnet-5-5-high`** / **`claude-sonnet-5-5`** (Node.js) | `--model claude-sonnet-5-5` | `high` | Claude Sonnet 5.5 (High) | 200,000 |
+| **`claude-sonnet-5-5-medium`** / **`-low`** (Node.js) | `--model claude-sonnet-5-5` | `medium` / `low` | Claude Sonnet 5.5 (Medium / Low) | 200,000 |
 | **`gpt-oss-120b-medium`** / **`gpt-oss-128b`** | `--model gpt-oss-120b` | `medium` | GPT-OSS 120B / 128B (Medium Reasoning) | 128,000 |
 | **`gpt-oss-120b`** | `--model gpt-oss-120b` | - | GPT-OSS 120B | 128,000 |
 | **`imagen-3.0-generate-002`** | Google Imagen 3 API | - | High-quality image generation (`/v1/images/generations`) | - |
 | **`imagen-3.0-fast-generate-001`**| Google Imagen 3 Fast API | - | Fast image generation (`/v1/images/generations`) | - |
 | **`gemini-3.1-flash-image`** | Gemini Image Router | - | Fast Gemini image generation | - |
 | **`antigravity`** / **`agy`** | Default CLI backend | - | Default fallback model routing | 1,000,000 |
+
+agy 1.2.10 and later offer Claude Opus/Sonnet **5.5** (each needs `--effort low|medium|high`) and no longer offer Claude 4.6 or Gemini 3.5 Flash; `agy models` prints the current list. The Node.js edition sends the 4.6 ids above as their 5.5 successors (effort `high`), `gemini-3.5-flash*` as `gemini-3.6-flash`, and falls back from Gemini to `claude-opus-5-5-high`. The frozen Python edition still sends the old ids, which agy now rejects.
 
 ---
 

@@ -7,6 +7,8 @@ import {
   extractModelAndTimeout,
   extractTimeoutFromPromptText,
   resolveModelFlags,
+  SUPPORTED_MODELS,
+  DEFAULT_FALLBACK_CHAIN,
   isImageModel,
   getModelFamily,
   isBenignSocketError,
@@ -60,11 +62,68 @@ test("config: resolveModelFlags", () => {
   const flags2 = resolveModelFlags("gemini-3.8-flash-low");
   assert.deepEqual(flags2, ["--model", "gemini-3.8-flash", "--effort", "low"]);
 
-  const flags3 = resolveModelFlags("claude-sonnet-4-6");
-  assert.deepEqual(flags3, ["--model", "claude-sonnet-4-6"]);
+  const flags3 = resolveModelFlags("claude-sonnet-5-5-medium");
+  assert.deepEqual(flags3, ["--model", "claude-sonnet-5-5", "--effort", "medium"]);
 
   const flags4 = resolveModelFlags("gpt-oss-120b-medium");
   assert.deepEqual(flags4, ["--model", "gpt-oss-120b", "--effort", "medium"]);
+});
+
+// `agy models` on agy 1.2.16 (2026-10-03). agy rejects any other --model/--effort pair before it
+// calls the API ("not recognized", "requires --effort"); gpt-oss-120b alone was seen to answer too.
+const AGY_MODELS = new Set([
+  "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+  "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+  "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
+  "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+  "claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high",
+  "claude-sonnet-5-5-low", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-high",
+  "gpt-oss-120b-medium", "gpt-oss-120b",
+]);
+
+function agySelection(flags) {
+  const model = flags[flags.indexOf("--model") + 1];
+  const i = flags.indexOf("--effort");
+  return i === -1 ? model : `${model}-${flags[i + 1]}`;
+}
+
+test("config: every listed model id and the default fallback chain reach agy as a model it offers", () => {
+  const ids = [...Object.keys(SUPPORTED_MODELS).filter((m) => !SUPPORTED_MODELS[m][0].startsWith("ag/")), ...DEFAULT_FALLBACK_CHAIN];
+  for (const id of ids) {
+    assert.ok(AGY_MODELS.has(agySelection(resolveModelFlags(id))), `${id} -> ${resolveModelFlags(id).join(" ")}`);
+  }
+  assert.ok(Object.keys(SUPPORTED_MODELS).includes("claude-opus-5-5-high"));
+  assert.ok(Object.keys(SUPPORTED_MODELS).includes("claude-sonnet-5-5-low"));
+});
+
+test("config: Claude 5.5 spellings and the retired 4.6 / gemini-3.5 ids resolve to what agy offers now", () => {
+  const cases = {
+    "claude-opus-5-5": "claude-opus-5-5-high",
+    "claude-opus-5.5": "claude-opus-5-5-high",
+    "claude-opus-5.5-low": "claude-opus-5-5-low",
+    "claude-sonnet-5.5-thinking": "claude-sonnet-5-5-high",
+    "claude-sonnet-5-5-medium:5m": "claude-sonnet-5-5-medium",
+    "claude-opus-4-6-thinking": "claude-opus-5-5-high",
+    "claude-opus-4.6": "claude-opus-5-5-high",
+    "claude-sonnet-4-6": "claude-sonnet-5-5-high",
+    "claude-sonnet-4.6-thinking": "claude-sonnet-5-5-high",
+    "gemini-3.6-flash": "gemini-3.6-flash-high",
+    "gemini-3.5-flash": "gemini-3.6-flash-high",
+    "gemini-3.5-flash-low": "gemini-3.6-flash-low",
+  };
+  for (const [id, want] of Object.entries(cases)) {
+    assert.equal(agySelection(resolveModelFlags(id)), want, id);
+  }
+  for (const retired of ["claude-opus-4-6-thinking", "claude-sonnet-4.6", "gemini-3.5-flash"]) {
+    assert.equal(Object.keys(SUPPORTED_MODELS).includes(retired), false, `${retired} is not advertised in /v1/models`);
+  }
+});
+
+test("config: a retired Claude id is spawned as Claude 5.5, not passed to agy verbatim", async () => {
+  const { parseCmdTemplate } = await import("../src/core/executor.mjs");
+  const { argv } = parseCmdTemplate('agy --output-format stream-json -p "{prompt}"', "hi", "claude-opus-4-6-thinking");
+  assert.deepEqual(argv.slice(0, 5), ["agy", "--model", "claude-opus-5-5", "--effort", "high"]);
+  assert.ok(!argv.some((a) => a.includes("4-6") || a.includes("4.6")));
 });
 
 test("config: isImageModel", () => {

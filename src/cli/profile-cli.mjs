@@ -147,7 +147,7 @@ export async function handleProfileCli(argv) {
         gemDisplay = `Resets in ${formatCooldownDuration(gemRem)}`;
         if (isFallback) {
           sonnetFallbackCt++;
-          modeDisplay = "🟣 Sonnet 4.6 (Fallback)";
+          modeDisplay = "🟣 Model Fallback";
         } else {
           modeDisplay = "🔴 Exhausted";
         }

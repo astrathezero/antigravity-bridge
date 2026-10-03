@@ -33,7 +33,9 @@ test("server: /health and /v1/models endpoints", async () => {
     assert.equal(modelsJson.object, "list");
     assert.ok(Array.isArray(modelsJson.data));
     assert.ok(modelsJson.data.some((m) => m.id === "gemini-3.8-flash"));
-    assert.ok(modelsJson.data.some((m) => m.id === "claude-sonnet-4-6"));
+    assert.ok(modelsJson.data.some((m) => m.id === "claude-sonnet-5-5"));
+    assert.ok(modelsJson.data.some((m) => m.id === "claude-opus-5-5-high"));
+    assert.ok(!modelsJson.data.some((m) => m.id === "claude-sonnet-4-6"));
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
