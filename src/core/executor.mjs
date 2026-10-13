@@ -367,6 +367,46 @@ export class OwnConversationReadPolicy {
   }
 }
 
+/**
+ * The other read let through in API mode: agy's view_file on a file the client attached to this
+ * request (translators/attachments.mjs writes them to a private temp directory). view_file is how an
+ * image or a PDF reaches the model as an inline media part; agy accepts no image input otherwise.
+ * Every path of the step must be one of the request's attachment files; view_content_chunk (paging
+ * through a document already opened) is allowed once such a read happened.
+ */
+export class AttachmentReadPolicy {
+  constructor(filePaths) {
+    this.paths = new Set();
+    for (const p of filePaths || []) {
+      this.paths.add(path.resolve(p));
+      try {
+        this.paths.add(fs.realpathSync(p));
+      } catch {
+        // file gone: only its plain path can match
+      }
+    }
+    this.viewed = 0;
+  }
+
+  isAttachment(p) {
+    if (this.paths.has(path.resolve(p))) return true;
+    try {
+      return this.paths.has(fs.realpathSync(p));
+    } catch {
+      return false;
+    }
+  }
+
+  allows(name, params) {
+    if (this.paths.size === 0) return false;
+    const paths = collectPathStrings(params);
+    if (name === "view_content_chunk") return this.viewed > 0 && paths.length === 0;
+    if (name !== "view_file" || paths.length === 0 || !paths.every((p) => this.isAttachment(p))) return false;
+    this.viewed++;
+    return true;
+  }
+}
+
 const SAFE_CONVERSATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /** Where agy writes a run's steps: the model's replies, and every API error it retried on. */
@@ -432,6 +472,7 @@ export async function executeCliCommand(
     allowCliTools = null,
     signal = null,
     clientToolNames = null,
+    attachmentPaths = null,
   } = {}
 ) {
   const earlyToolCall = earlyToolCallExitEnabled();
@@ -456,6 +497,7 @@ export async function executeCliCommand(
   try {
     const sandboxDir = getProfileSandboxDir(profile);
     const readPolicy = allowTools ? null : new OwnConversationReadPolicy(sandboxDir);
+    const attachmentPolicy = allowTools || !attachmentPaths?.length ? null : new AttachmentReadPolicy(attachmentPaths);
 
     const allowedEnvKeys = new Set([
       "PATH",
@@ -582,7 +624,9 @@ export async function executeCliCommand(
           }
           if (it.kind === "tool") {
             if (!allowTools) {
-              if (readPolicy && readPolicy.allows(it.name, it.params)) {
+              if (attachmentPolicy && attachmentPolicy.allows(it.name, it.params)) {
+                console.log(`[ATTACHMENT VIEW] profile=${profile || "default"}: agy opens an attached file: ${it.text}`);
+              } else if (readPolicy && readPolicy.allows(it.name, it.params)) {
                 console.log(
                   `[TOOL ALLOWED] profile=${profile || "default"}: agy reads its own conversation log (ANTIGRAVITY_ALLOW_TRANSCRIPT_READS=1): ${it.text}`
                 );
@@ -801,6 +845,7 @@ export async function executeCliWithFallback(
     signal = null,
     clientToolNames = null,
     clientTools = null,
+    attachmentPaths = null,
   } = {}
 ) {
   const mgr = profileManager || GLOBAL_PROFILE_MANAGER;
@@ -902,6 +947,7 @@ export async function executeCliWithFallback(
             allowCliTools,
             signal,
             clientToolNames,
+            attachmentPaths,
           });
           break;
         } catch (err) {
@@ -923,6 +969,9 @@ export async function executeCliWithFallback(
             `[TOOL BLOCKED] profile=${profileKey}: retrying on the same profile with a reinforced no-tools notice (${toolBlockRetriesLeft} retry left)`
           );
           attemptPrompt = `${promptText}\n\n${toolBlockRetryNotice(err.toolViolation, clientToolNames)}`;
+          if (attachmentPaths?.length) {
+            attemptPrompt += "\nThe only exception: opening the files listed under [Attachments] with view_file is still allowed.";
+          }
           attemptBudget = Math.max(1.0, Math.min(timeout, totalTimeout - (Date.now() - startTime) / 1000));
         }
       }

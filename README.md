@@ -391,6 +391,36 @@ curl -X POST http://127.0.0.1:8000/v1/messages \
   }'
 ```
 
+### 4.1 Images & PDFs, no footer (`POST /v1/vision/chat/completions`, `POST /v1/vision/messages`) — Node.js edition
+Send images or PDFs inline as base64 and get the bare answer. These are the same chat endpoints as above
+(OpenAI and Anthropic shapes, streaming included) except that the `⚡ Antigravity Profile` footer is **off** by default.
+
+- Accepted parts: OpenAI `image_url` / `input_image` with a `data:<mime>;base64,...` URL, OpenAI `file` / `input_file`
+  with `file_data`; Anthropic `image` / `document` blocks with a `base64` source (also inside a `tool_result`).
+  Types: PNG, JPEG, GIF, WebP, HEIC/HEIF, PDF (scanned PDFs too). Remote `http(s)` URLs are not downloaded.
+- How it reaches the model: agy takes text only, so the bridge writes each file to a private temp directory
+  (removed when the request ends), and agy opens it with its own `view_file` tool, which sends it to Gemini/Claude as an
+  inline media part. That one read is let through in API mode for those exact files; every other tool stays blocked
+  (journal line `[ATTACHMENT VIEW]`). The plain `/v1/chat/completions` and `/v1/messages` endpoints accept attachments the same way.
+- Footer on any endpoint: header `X-Antigravity-Footer: off|on` or body field `"antigravity_footer": false|true`
+  (header first). `ANTIGRAVITY_HIDE_PROFILE_STATUS=1` still turns it off everywhere.
+- Size: request bodies up to 32 MB (a 20 MB file is ~27 MB as base64); `ANTIGRAVITY_MAX_BODY_MB` raises it. A reverse
+  proxy has its own cap (nginx `client_max_body_size`).
+
+```bash
+IMG=$(base64 < photo.jpg | tr -d '\n')
+curl -X POST http://127.0.0.1:8008/v1/vision/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{
+    "model": "gemini-3.8-flash",
+    "messages": [{"role": "user", "content": [
+      {"type": "text", "text": "What is in this picture?"},
+      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,'"$IMG"'"}}
+    ]}]
+  }'
+```
+
 ### 5. Image Generation (`POST /v1/images/generations`)
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/images/generations \
@@ -452,6 +482,8 @@ Shared by both editions unless a column says otherwise.
 | **`ANTIGRAVITY_API_KEYS`** / **`ANTIGRAVITY_API_KEY`** | — | **Node.js only.** Labeled key list / single key (`BRIDGE_API_KEYS`, `API_KEYS` also read). |
 | **`ANTIGRAVITY_ALLOWED_HOSTS`** | — | Extra `Host` header values to accept besides loopback and the bind host. |
 | **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | `0` | `1` hides the status footer tag from AI responses. |
+| **`ANTIGRAVITY_MAX_BODY_MB`** | `32` | **Node.js only.** Largest request body in MB (inline images/PDFs). |
+| **`ANTIGRAVITY_MAX_ATTACHMENTS`** | `10` | **Node.js only.** Most recent inline images/PDFs forwarded per request; older ones become a text notice. |
 | **`ANTIGRAVITY_NO_PROXY`** | `0` | `1` disables proxy auto-detection. |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `0` | `1` disables the 55-minute OAuth refresh daemon. |
 | **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `0` | `1` lets agy execute its own tools (terminal/files/browser) during API requests. |

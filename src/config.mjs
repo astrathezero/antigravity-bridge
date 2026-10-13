@@ -57,7 +57,10 @@ export const DEFAULT_PORT = parseInt(
 );
 export const DEFAULT_HOST = process.env.HOST || process.env.ANTIGRAVITY_HOST || "127.0.0.1";
 
-export const MAX_BODY_SIZE = 32 * 1024 * 1024; // 32 MB
+// Largest request body accepted. 32 MB leaves room for a 20 MB image or PDF sent as base64 (+33%) plus
+// the conversation; ANTIGRAVITY_MAX_BODY_MB raises it (a reverse proxy in front has its own limit,
+// e.g. nginx client_max_body_size).
+export const MAX_BODY_SIZE = Math.round((parseFloat(process.env.ANTIGRAVITY_MAX_BODY_MB || "") > 0 ? parseFloat(process.env.ANTIGRAVITY_MAX_BODY_MB) : 32) * 1024 * 1024);
 // Linux limits a SINGLE argv string to MAX_ARG_STRLEN = 131072 bytes (spawn E2BIG above that), so the
 // prompt passed as `-p "<prompt>"` must stay below it; 120000 leaves headroom. Thai text is 3 bytes/char.
 export const MAX_CLI_ARG_BYTES = parseInt(process.env.ANTIGRAVITY_MAX_CLI_ARG_BYTES || "120000", 10) || 120000;
@@ -552,6 +555,23 @@ export function shouldShowProfileStatus() {
   if (["1", "true", "yes"].includes(envHide)) return false;
   if (["0", "false", "no"].includes(envShow)) return false;
   return true;
+}
+
+/**
+ * Whether one reply carries the "⚡ Antigravity Profile" footer. The operator's switch
+ * (ANTIGRAVITY_HIDE_PROFILE_STATUS / ANTIGRAVITY_SHOW_PROFILE_STATUS) turns it off for everyone; within
+ * that, a request picks with the `X-Antigravity-Footer` header (on/off) or the body field
+ * `antigravity_footer` (true/false), header first. Otherwise the endpoint's default applies (the
+ * /v1/vision/* endpoints default to off, the others to on).
+ */
+export function resolveFooter({ header = null, bodyValue = undefined, endpointDefault = true } = {}) {
+  if (!shouldShowProfileStatus()) return false;
+  const h = String(header ?? "").trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(h)) return false;
+  if (["1", "true", "yes", "on"].includes(h)) return true;
+  if (bodyValue === false || bodyValue === "false" || bodyValue === 0) return false;
+  if (bodyValue === true || bodyValue === "true" || bodyValue === 1) return true;
+  return Boolean(endpointDefault);
 }
 
 let cachedProxy = undefined;

@@ -19,7 +19,7 @@ import {
   calculateDynamicStallTimeout,
   isImageModel,
   detectCliCommand,
-  shouldShowProfileStatus,
+  resolveFooter,
   getBridgeConfigPath,
   isBenignSocketError,
 } from "./config.mjs";
@@ -59,6 +59,7 @@ import {
 } from "./translators/anthropic.mjs";
 import { parseToolCallsFromResponse } from "./translators/tools.mjs";
 import { generateImageViaRouter } from "./image/imagen-router.mjs";
+import { materializeAttachments, attachmentInstructions, AttachmentError } from "./translators/attachments.mjs";
 
 export function extractRequestTimeouts(reqJson, headers, pathStr, promptLen, rawPromptText, modelTimeout, serverProfTimeout = DEFAULT_PROFILE_TIMEOUT, serverTotalTimeout = DEFAULT_TOTAL_TIMEOUT) {
   let reqProfTimeout = null;
@@ -366,8 +367,11 @@ export function createBridgeServer(options = {}) {
 
     // --- POST Handlers ---
     if (req.method === "POST") {
-      const isAnthropic = ["/v1/messages", "/messages"].includes(pathname);
-      const isOpenAI = ["/v1/chat/completions", "/chat/completions"].includes(pathname);
+      // /v1/vision/*: the same chat endpoints for clients that send images or PDFs and want the bare
+      // answer, so the "⚡ Antigravity Profile" footer is off unless the request turns it on.
+      const isVision = ["/v1/vision/chat/completions", "/vision/chat/completions", "/v1/vision/messages", "/vision/messages"].includes(pathname);
+      const isAnthropic = ["/v1/messages", "/messages", "/v1/vision/messages", "/vision/messages"].includes(pathname);
+      const isOpenAI = ["/v1/chat/completions", "/chat/completions", "/v1/vision/chat/completions", "/vision/chat/completions"].includes(pathname);
       const isImageGen = ["/v1/images/generations", "/images/generations"].includes(pathname);
       const isProfilesReset = ["/v1/profiles/reset", "/profiles/reset"].includes(pathname);
       const isProfilesCheck = ["/v1/profiles/check", "/profiles/check"].includes(pathname);
@@ -695,6 +699,12 @@ export function createBridgeServer(options = {}) {
         }
       }
 
+      const footerOn = resolveFooter({
+        header: req.headers["x-antigravity-footer"],
+        bodyValue: reqJson.antigravity_footer,
+        endpointDefault: !isVision,
+      });
+
       const rawModel = String(reqJson.model || "antigravity").slice(0, 256);
       const [cleanModel, modelTimeout] = extractModelAndTimeout(rawModel);
       const model = cleanModel || "antigravity";
@@ -716,8 +726,7 @@ export function createBridgeServer(options = {}) {
         const [imgTimeout] = extractRequestTimeouts(reqJson, req.headers, pathname, promptText.length, promptText, modelTimeout);
         try {
           const [mdImg] = await generateImageViaRouter(promptText, model, undefined, undefined, Math.floor(imgTimeout));
-          const showStatus = shouldShowProfileStatus();
-          const banner = showStatus ? profileManager.build_profile_quota_banner(null) : "";
+          const banner = footerOn ? profileManager.build_profile_quota_banner(null) : "";
           const finalImgText = `${mdImg}${banner}`;
 
           if (isAnthropic) {
@@ -732,7 +741,23 @@ export function createBridgeServer(options = {}) {
         }
       }
 
-      const promptText = formatMessagesToPrompt(messages, normalizedTools, toolChoice);
+      let attachments;
+      try {
+        attachments = materializeAttachments(messages);
+      } catch (err) {
+        if (!(err instanceof AttachmentError)) throw err;
+        sendJson(res, { error: { message: err.message, type: "invalid_request_error" } }, 400);
+        return;
+      }
+      const attachmentPaths = attachments.files.map((f) => f.path);
+      let promptText;
+      try {
+        promptText = formatMessagesToPrompt(attachments.messages, normalizedTools, toolChoice);
+      } catch (err) {
+        attachments.cleanup();
+        throw err;
+      }
+      if (attachmentPaths.length > 0) promptText = `${promptText}\n\n${attachmentInstructions(attachments.files)}`;
       const cliDetect = detectCliCommand();
       const cmdTpl = customCmd || cliDetect.template;
 
@@ -747,7 +772,7 @@ export function createBridgeServer(options = {}) {
       const stallTimeout = calculateDynamicStallTimeout(promptText.length, model);
       const reqStart = Date.now();
       console.log(
-        `[REQUEST] ${pathname} model=${model} prompt_len=${promptText.length} stream=${stream} tools=${normalizedTools ? normalizedTools.length : 0} profile_timeout=${profTimeout.toFixed(0)}s total_timeout=${totalTimeout.toFixed(0)}s stall=${stallTimeout.toFixed(0)}s`
+        `[REQUEST] ${pathname} model=${model} prompt_len=${promptText.length} stream=${stream} tools=${normalizedTools ? normalizedTools.length : 0} attachments=${attachmentPaths.length} footer=${footerOn} profile_timeout=${profTimeout.toFixed(0)}s total_timeout=${totalTimeout.toFixed(0)}s stall=${stallTimeout.toFixed(0)}s`
       );
 
       // Cancel the CLI run if the client disconnects mid-request.
@@ -823,6 +848,7 @@ export function createBridgeServer(options = {}) {
             signal: abortCtl.signal,
             clientToolNames,
             clientTools: clientToolNames ? normalizedTools : null,
+            attachmentPaths,
           }
         );
 
@@ -843,7 +869,7 @@ export function createBridgeServer(options = {}) {
         // fed its own history back started to imitate the banner and to echo the JSON as text), so a
         // tool-call reply carries only the prose the model wrote around the call, or nothing.
         const isToolCallReply = Boolean(parsedToolCalls && parsedToolCalls.length > 0);
-        const showStatus = shouldShowProfileStatus() && !isToolCallReply;
+        const showStatus = footerOn && !isToolCallReply;
         const banner = showStatus ? profileManager.build_profile_quota_banner(usedProfile) : "";
         const replyText = isToolCallReply ? parsedContentText || "" : parsedContentText || outputText;
         const actualModel = effectiveModel || model;
@@ -944,6 +970,8 @@ export function createBridgeServer(options = {}) {
         } else {
           sendJson(res, { error: { message: errMsg, type: "api_error" } }, 500);
         }
+      } finally {
+        attachments.cleanup();
       }
     }
   });

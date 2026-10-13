@@ -385,6 +385,36 @@ curl -X POST http://127.0.0.1:8000/v1/messages \
   }'
 ```
 
+### 4.1 ส่งรูปภาพ/PDF และไม่มี footer (`POST /v1/vision/chat/completions`, `POST /v1/vision/messages`) — รุ่น Node.js
+ส่งรูปหรือ PDF แบบ base64 มาในข้อความ แล้วได้คำตอบล้วน ๆ endpoint นี้ทำงานเหมือน chat endpoint ด้านบนทุกอย่าง
+(รูปแบบ OpenAI และ Anthropic รวม streaming) ต่างกันแค่ footer `⚡ Antigravity Profile` **ปิด** เป็นค่าเริ่มต้น
+
+- part ที่รับ: OpenAI `image_url` / `input_image` ที่เป็น `data:<mime>;base64,...`, OpenAI `file` / `input_file` ที่มี `file_data`;
+  Anthropic block `image` / `document` ที่ source เป็น `base64` (รวมที่อยู่ใน `tool_result`)
+  ชนิดไฟล์: PNG, JPEG, GIF, WebP, HEIC/HEIF, PDF (รวม PDF สแกน) URL `http(s)` ภายนอก bridge ไม่ดาวน์โหลดให้
+- วิธีที่ไฟล์ไปถึงโมเดล: agy รับ input เป็นข้อความเท่านั้น bridge จึงเขียนไฟล์ลงโฟลเดอร์ชั่วคราวส่วนตัว (ลบทิ้งเมื่อคำขอจบ)
+  แล้วให้ agy เปิดด้วย tool `view_file` ของมันเอง ซึ่งส่งไฟล์ให้ Gemini/Claude เป็น media part แบบ inline
+  ในโหมด API bridge ยอมให้อ่านเฉพาะไฟล์เหล่านั้น tool อื่นยังถูกบล็อกเหมือนเดิม (ดูบรรทัด `[ATTACHMENT VIEW]` ใน journal)
+  endpoint ปกติ `/v1/chat/completions` และ `/v1/messages` ก็รับไฟล์แนบได้แบบเดียวกัน
+- เปิด/ปิด footer ได้ทุก endpoint: header `X-Antigravity-Footer: off|on` หรือฟิลด์ `"antigravity_footer": false|true` ใน body
+  (header มาก่อน) ถ้าตั้ง `ANTIGRAVITY_HIDE_PROFILE_STATUS=1` ไว้ footer จะปิดทุกที่
+- ขนาด: body สูงสุด 32 MB (ไฟล์ 20 MB เป็น base64 ราว 27 MB) เพิ่มได้ด้วย `ANTIGRAVITY_MAX_BODY_MB`
+  reverse proxy มีเพดานของตัวเอง (nginx `client_max_body_size`)
+
+```bash
+IMG=$(base64 < photo.jpg | tr -d '\n')
+curl -X POST http://127.0.0.1:8008/v1/vision/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-antigravity" \
+  -d '{
+    "model": "gemini-3.8-flash",
+    "messages": [{"role": "user", "content": [
+      {"type": "text", "text": "ในภาพมีอะไร"},
+      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,'"$IMG"'"}}
+    ]}]
+  }'
+```
+
 ### 5. สั่งสร้างรูปภาพ (`POST /v1/images/generations`)
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/images/generations \
@@ -446,6 +476,8 @@ Bridge รัน `agy` CLI ด้วย `--dangerously-skip-permissions` ดั�
 | **`ANTIGRAVITY_API_KEYS`** / **`ANTIGRAVITY_API_KEY`** | — | **Node.js เท่านั้น** รายการ key พร้อม label / key เดี่ยว (อ่าน `BRIDGE_API_KEYS`, `API_KEYS` ด้วย) |
 | **`ANTIGRAVITY_ALLOWED_HOSTS`** | — | ค่า `Host` header เพิ่มเติมที่ยอมรับ นอกเหนือจาก loopback และ bind host |
 | **`ANTIGRAVITY_HIDE_PROFILE_STATUS`** | `0` | `1` ซ่อน footer สถานะโปรไฟล์ในคำตอบของ AI |
+| **`ANTIGRAVITY_MAX_BODY_MB`** | `32` | **Node.js เท่านั้น** ขนาด body สูงสุดเป็น MB (รูป/PDF แบบ inline) |
+| **`ANTIGRAVITY_MAX_ATTACHMENTS`** | `10` | **Node.js เท่านั้น** จำนวนรูป/PDF ล่าสุดที่ส่งต่อต่อหนึ่งคำขอ ที่เก่ากว่านั้นกลายเป็นข้อความแจ้ง |
 | **`ANTIGRAVITY_NO_PROXY`** | `0` | `1` ปิดการตรวจจับ proxy อัตโนมัติ |
 | **`ANTIGRAVITY_NO_AUTO_REFRESH`** | `0` | `1` ปิด daemon รีเฟรช OAuth ทุก 55 นาที |
 | **`ANTIGRAVITY_ALLOW_CLI_TOOLS`** | `0` | `1` อนุญาตให้ agy รัน tool ของตัวเอง (terminal/ไฟล์/เบราว์เซอร์) ระหว่างคำขอ API |
