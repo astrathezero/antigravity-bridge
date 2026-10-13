@@ -388,6 +388,7 @@ curl -X POST http://127.0.0.1:8000/v1/messages \
 ### 4.1 ส่งรูปภาพ/PDF และไม่มี footer (`POST /v1/vision/chat/completions`, `POST /v1/vision/messages`) — รุ่น Node.js
 ส่งรูปหรือ PDF แบบ base64 มาในข้อความ แล้วได้คำตอบล้วน ๆ endpoint นี้ทำงานเหมือน chat endpoint ด้านบนทุกอย่าง
 (รูปแบบ OpenAI และ Anthropic รวม streaming) ต่างกันแค่ footer `⚡ Antigravity Profile` **ปิด** เป็นค่าเริ่มต้น
+คู่มือฉบับเต็ม (ตัวอย่าง curl / OpenAI SDK / Anthropic SDK): [docs/VISION_API.th.md](docs/VISION_API.th.md)
 
 - part ที่รับ: OpenAI `image_url` / `input_image` ที่เป็น `data:<mime>;base64,...`, OpenAI `file` / `input_file` ที่มี `file_data`;
   Anthropic block `image` / `document` ที่ source เป็น `base64` (รวมที่อยู่ใน `tool_result`)

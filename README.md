@@ -394,6 +394,7 @@ curl -X POST http://127.0.0.1:8000/v1/messages \
 ### 4.1 Images & PDFs, no footer (`POST /v1/vision/chat/completions`, `POST /v1/vision/messages`) — Node.js edition
 Send images or PDFs inline as base64 and get the bare answer. These are the same chat endpoints as above
 (OpenAI and Anthropic shapes, streaming included) except that the `⚡ Antigravity Profile` footer is **off** by default.
+Full guide (Thai, with curl / OpenAI SDK / Anthropic SDK examples): [docs/VISION_API.th.md](docs/VISION_API.th.md).
 
 - Accepted parts: OpenAI `image_url` / `input_image` with a `data:<mime>;base64,...` URL, OpenAI `file` / `input_file`
   with `file_data`; Anthropic `image` / `document` blocks with a `base64` source (also inside a `tool_result`).
